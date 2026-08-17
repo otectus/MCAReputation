@@ -1,0 +1,155 @@
+plugins {
+    id 'eclipse'
+    id 'idea'
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+// Minecraft 1.18+ ships Java 17; target it explicitly (a modern system default JDK is 21+,
+// which ForgeGradle 6 does not tolerate as the Gradle JVM).
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+
+println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
+
+minecraft {
+    mappings channel: mapping_channel, version: mapping_version
+
+    copyIdeResources = true
+
+    runs {
+        configureEach {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods {
+                "${mod_id}" {
+                    source sourceSets.main
+                }
+            }
+        }
+
+        client {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
+
+        server {
+            property 'forge.enabledGameTestNamespaces', mod_id
+            args '--nogui'
+        }
+
+        gameTestServer {
+            property 'forge.enabledGameTestNamespaces', mod_id
+        }
+    }
+}
+
+repositories {
+    // MCA Reborn via Modrinth Maven. exclusiveContent keeps this repo scoped to the
+    // maven.modrinth group and routes resolution through ForgeGradle's deobf pipeline.
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'Modrinth'
+                url = 'https://api.modrinth.com/maven'
+            }
+        }
+        forRepositories(fg.repository)
+        filter { includeGroup 'maven.modrinth' }
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    // MCA Reborn — obfuscated production (Universal) jar, remapped to our dev mappings by
+    // fg.deobf. Every MCA access is isolated behind dev.otectus.mcareputation.compat (spec 11).
+    //
+    // NOTE: no Architectury dependency, deliberately (spec 9.1). MCA 7.6 declares it itself and
+    // MCA 7.7 dropped it; this mod contains no Architectury reference of any kind.
+    implementation fg.deobf("maven.modrinth:minecraft-comes-alive-reborn:${mca_version}")
+
+    // Unit tests for the pure (non-MCA, non-Minecraft-runtime) domain: score math, decay,
+    // awareness, codecs, NBT round trips, tiers, pruning, migration.
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.2'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params:5.10.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+// Expand metadata placeholders into mods.toml / pack.mcmeta at build time.
+tasks.named('processResources', ProcessResources).configure {
+    var replaceProperties = [
+            minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
+            forge_version: forge_version, forge_version_range: forge_version_range,
+            loader_version_range: loader_version_range,
+            mca_version_range: mca_version_range,
+            mod_id: mod_id, mod_name: mod_name, mod_license: mod_license, mod_version: mod_version,
+            mod_authors: mod_authors, mod_description: mod_description,
+    ]
+    inputs.properties replaceProperties
+
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replaceProperties + [project: project]
+    }
+}
+
+tasks.named('jar', Jar).configure {
+    manifest {
+        attributes([
+                'Specification-Title'     : mod_id,
+                'Specification-Vendor'    : mod_authors,
+                'Specification-Version'   : '1',
+                'Implementation-Title'    : project.name,
+                'Implementation-Version'  : project.jar.archiveVersion,
+                'Implementation-Vendor'   : mod_authors
+        ])
+    }
+    finalizedBy 'reobfJar'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+/**
+ * Spec 36.5 static jar check: the shipped artifact must not contain a single class from an
+ * optional companion mod, from Architectury, or from any other mod. Reputation depends on
+ * nothing but Forge and MCA, so anything under those package roots means a build-file mistake.
+ */
+tasks.register('checkJarContents') {
+    dependsOn tasks.named('jar')
+    doLast {
+        def forbidden = ['dev/otectus/mcaquests/', 'dev/otectus/mcaconversations/',
+                         'dev/architectury/', 'me/shedaniel/', 'forge/net/mca/']
+        def jarFile = tasks.named('jar').get().archiveFile.get().asFile
+        def offenders = []
+        new java.util.zip.ZipFile(jarFile).withCloseable { zip ->
+            zip.entries().each { entry ->
+                if (forbidden.any { entry.name.startsWith(it) }) {
+                    offenders << entry.name
+                }
+            }
+        }
+        if (!offenders.isEmpty()) {
+            throw new GradleException("Shaded classes found in ${jarFile.name}: ${offenders.take(20)}")
+        }
+        logger.lifecycle("checkJarContents: ${jarFile.name} is clean (no shaded companion/Architectury/MCA classes).")
+    }
+}
+
+tasks.named('build').configure {
+    dependsOn 'checkJarContents'
+}

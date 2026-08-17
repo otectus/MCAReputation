@@ -1,0 +1,78 @@
+{
+  "tiers": [
+    {
+      "id": "infamous",
+      "threshold": -300,
+      "name": { "translate": "mcareputation.tier.infamous" },
+      "description": { "translate": "mcareputation.tier.infamous.description" },
+      "trust_bias": -4,
+      "respect_bias": -8
+    },
+    {
+      "id": "hated",
+      "threshold": -150,
+      "name": { "translate": "mcareputation.tier.hated" },
+      "description": { "translate": "mcareputation.tier.hated.description" },
+      "trust_bias": -3,
+      "respect_bias": -6
+    },
+    {
+      "id": "distrusted",
+      "threshold": -75,
+      "name": { "translate": "mcareputation.tier.distrusted" },
+      "description": { "translate": "mcareputation.tier.distrusted.description" },
+      "trust_bias": -2,
+      "respect_bias": -4
+    },
+    {
+      "id": "wary",
+      "threshold": -25,
+      "name": { "translate": "mcareputation.tier.wary" },
+      "description": { "translate": "mcareputation.tier.wary.description" },
+      "trust_bias": -1,
+      "respect_bias": -2
+    },
+    {
+      "id": "stranger",
+      "threshold": 0,
+      "name": { "translate": "mcareputation.tier.stranger" },
+      "description": { "translate": "mcareputation.tier.stranger.description" },
+      "trust_bias": 0,
+      "respect_bias": 0
+    },
+    {
+      "id": "acquaintance",
+      "threshold": 25,
+      "name": { "translate": "mcareputation.tier.acquaintance" },
+      "description": { "translate": "mcareputation.tier.acquaintance.description" },
+      "trust_bias": 1,
+      "respect_bias": 2
+    },
+    {
+      "id": "friend",
+      "threshold": 75,
+      "name": { "translate": "mcareputation.tier.friend" },
+      "description": { "translate": "mcareputation.tier.friend.description" },
+      "trust_bias": 2,
+      "respect_bias": 4
+    },
+    {
+      "id": "honored",
+      "threshold": 150,
+      "name": { "translate": "mcareputation.tier.honored" },
+      "description": { "translate": "mcareputation.tier.honored.description" },
+      "trust_bias": 3,
+      "respect_bias": 6,
+      "grants_title": "mcaquests:honored_of_village"
+    },
+    {
+      "id": "revered",
+      "threshold": 300,
+      "name": { "translate": "mcareputation.tier.revered" },
+      "description": { "translate": "mcareputation.tier.revered.description" },
+      "trust_bias": 4,
+      "respect_bias": 8,
+      "grants_title": "mcaquests:revered_of_village"
+    }
+  ]
+}

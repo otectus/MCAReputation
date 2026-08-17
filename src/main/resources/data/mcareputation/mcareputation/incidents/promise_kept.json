@@ -1,0 +1,15 @@
+{
+  "display": { "translate": "mcareputation.incident.promise_kept" },
+  "default_delta": 8,
+  "visibility": "witnessed",
+  "severity": "moderate",
+  "tags": ["promise", "service"],
+  "decay": { "type": "none" },
+  "retain_unwitnessed": true,
+  "gossip": {
+    "tone": "gratitude",
+    "phrase": "mcareputation.gossip.promise_kept",
+    "with": ["player", "subject"]
+  },
+  "max_override_abs": 40
+}

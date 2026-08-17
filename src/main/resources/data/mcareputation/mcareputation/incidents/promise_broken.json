@@ -1,0 +1,21 @@
+{
+  "display": { "translate": "mcareputation.incident.promise_broken" },
+  "default_delta": 0,
+  "visibility": "witnessed",
+  "severity": "moderate",
+  "tags": ["promise", "setback"],
+  "decay": { "type": "none" },
+  "retain_unwitnessed": true,
+  "resolution": {
+    "apologized": 0.75,
+    "atoned": 0.25,
+    "forgiven": 0.0,
+    "disproven": 0.0
+  },
+  "gossip": {
+    "tone": "disappointment",
+    "phrase": "mcareputation.gossip.promise_broken",
+    "with": ["player", "subject"]
+  },
+  "max_override_abs": 40
+}

@@ -1,0 +1,14 @@
+{
+  "display": { "translate": "mcareputation.incident.project_completed" },
+  "default_delta": 0,
+  "visibility": "village",
+  "severity": "moderate",
+  "tags": ["service", "project"],
+  "decay": { "type": "none" },
+  "gossip": {
+    "tone": "praise",
+    "phrase": "mcareputation.gossip.project_completed",
+    "with": ["player", "source_title"]
+  },
+  "max_override_abs": 100
+}

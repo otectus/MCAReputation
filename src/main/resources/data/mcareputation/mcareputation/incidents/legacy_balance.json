@@ -1,0 +1,8 @@
+{
+  "display": { "translate": "mcareputation.incident.legacy_balance" },
+  "default_delta": 0,
+  "visibility": "private",
+  "severity": "trivial",
+  "tags": ["system", "migration"],
+  "decay": { "type": "none" }
+}
