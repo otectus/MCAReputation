@@ -59,6 +59,11 @@ public final class TestPaths {
         return requireDirectory(projectRoot().resolve("src/main/resources"));
     }
 
+    /** {@code src/test/resources} — checked-in fixtures such as the golden 1.20.1 saved data. */
+    public static Path testResources() {
+        return requireDirectory(projectRoot().resolve("src/test/resources"));
+    }
+
     /** {@code build/classes/java/main} — the compiled main classes, for constant-pool scans. */
     public static Path compiledMainClasses() {
         return requireDirectory(projectRoot().resolve("build/classes/java/main"));
