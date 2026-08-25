@@ -6,9 +6,9 @@ An add-on for [Minecraft Comes Alive: Reborn](https://modrinth.com/mod/minecraft
 gives every MCA village a memory. Help people and word gets around. Hurt someone where others can see,
 and word gets around about that too.
 
-- **Minecraft** 1.20.1 · **Forge** 47.4.10+ · **Java** 17
-- **Requires** MCA Reborn 7.6–7.7 (tested on `7.6.20` and `7.7.0-beta.2`)
-- **Optional companions** MCA: Quests, MCA: Conversations
+- **Minecraft** 1.21.1 · **NeoForge** 21.1.248+ · **Java** 21
+- **Requires** MCA Reborn 7.7.x (built and verified against `7.7.36-beta.3+1.21.1`)
+- **Optional companions** MCA: Quests, MCA: Conversations, MCA: Crime
 - **Licence** GPL-3.0-only
 
 ---
@@ -109,7 +109,9 @@ worked examples are in **[DATAPACK.md](DATAPACK.md)**.
 
 ## For mod authors
 
-A stable, server-authoritative Java API plus five Forge events. See **[API.md](API.md)**.
+A stable, server-authoritative Java API plus five NeoForge events. See **[API.md](API.md)**.
+The API generation is still `1`, but add-ons built against the Forge 1.20.1 artifact must be
+recompiled: the event bus and loader imports moved with the platform.
 
 ## Upgrading an existing world
 
@@ -123,7 +125,7 @@ it back are in **[MIGRATION.md](MIGRATION.md)**.
 |---|---|
 | [CONFIG.md](CONFIG.md) | every config option, default, range, and disabled behaviour |
 | [DATAPACK.md](DATAPACK.md) | incident, tier, and title schemas with examples |
-| [API.md](API.md) | the public Java API, the Forge events, threading and failure contracts |
+| [API.md](API.md) | the public Java API, the NeoForge events, threading and failure contracts |
 | [MIGRATION.md](MIGRATION.md) | legacy Quests import, removal, and rollback |
 | [CHANGELOG.md](CHANGELOG.md) | release notes |
 | [PRODUCTION_TESTS.md](PRODUCTION_TESTS.md) | the verification matrix and its current status |
@@ -131,14 +133,18 @@ it back are in **[MIGRATION.md](MIGRATION.md)**.
 
 ## Building
 
-Needs a JDK 17 on `JAVA_HOME` (ForgeGradle 6 does not tolerate a newer JVM as the Gradle daemon).
+Minecraft 1.21.1 needs a JDK 21. `JAVA_HOME` does not have to point at one — the foojay toolchain
+resolver provisions it if the system JDK is older.
 
 ```bash
 ./gradlew build
 ```
 
-`build/libs/mcareputation-<version>.jar` is the reobfuscated artifact. The build also runs
-`checkJarContents`, which fails if a companion mod's classes ever end up shaded into it.
+`build/libs/mcareputation-<version>.jar` is the distributable artifact directly; NeoForge runs
+official Mojang names in dev and in production, so there is no reobfuscation step. The build also
+runs `checkJarContents`, which fails if a companion mod's classes are shaded in, if any class still
+names `net.minecraftforge` or MCA's old `forge.net.mca` root, if the Forge-era `mods.toml` or
+`pack.mcmeta` reappears, or if anything was compiled against the wrong Java release.
 
 To build the whole suite, build this repository **first** — the two companions compile against its
 class output:

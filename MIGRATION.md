@@ -1,5 +1,45 @@
 # MCA: Reputation — migration, removal, and rollback
 
+## If you are moving a world from Minecraft 1.20.1 (Forge) to 1.21.1 (NeoForge)
+
+**Back the world up first, and keep the backup.** Vanilla's world upgrade is one-way, independently of
+this mod: once 1.21.1 has written the world, 1.20.1 will not open it again. That is not something this
+mod can undo, so treat the upgraded copy as a new artifact rather than an edit.
+
+What this mod guarantees across that move:
+
+- The saved-data format is **unchanged** — still version `1`, still `mcareputation.dat` in the
+  overworld's data storage. There is no conversion step, nothing to run, and no window in which data
+  is half-migrated.
+- Every score, baseline, incident (with its status, context, witnesses and dedupe key), village and
+  global title, tier high-water mark, legacy-import marker, and cached village name survives exactly.
+- Community identity stays dimension-aware, so village 3 in the Overworld and village 3 in the Nether
+  remain two different places with two different reputations, as they always were.
+- Every config key, default, and filename is unchanged: your existing `mcareputation-common.toml` and
+  `mcareputation-client.toml` keep working untouched.
+
+A golden copy of a 1.20.1 save is checked into this repository and asserted against on every build, so
+this is a tested guarantee rather than an intention.
+
+What you must update:
+
+- **MCA Reborn** must be a 1.21.1 build (`7.7.x`). The Forge 1.20.1 jar cannot load on NeoForge.
+- **The optional companions**, if you use them, must likewise be their 1.21.1 NeoForge builds. A Forge
+  1.20.1 companion jar is simply not seen by the loader; it will not half-work.
+- **Add-ons that call this mod's API** must be recompiled. The API generation is still `1`, but the
+  event base class moved with the platform. See [API.md](API.md).
+
+After the upgrade, trigger one new deed, save, exit fully, and restart. Old and new state should both
+be there. If a score has reset, stop and restore the backup rather than playing on — reputation is
+written on the same autosave path as MCA's own village data, and a reset is a symptom worth
+diagnosing, not a thing to play through.
+
+### Downgrading
+
+Not supported. There is no path back from 1.21.1 to 1.20.1, for this mod or for the world.
+
+---
+
 ## If you are starting a new world
 
 Nothing to do. Everyone begins as a stranger everywhere, which is the intended starting point.

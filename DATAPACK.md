@@ -1,5 +1,17 @@
 # MCA: Reputation — datapack reference
 
+> **Paths are unchanged by the Minecraft 1.21.1 / NeoForge port**, including the legacy `mcaquests`
+> ones. The doubled namespace segment below is deliberate: these are this mod's own reload-listener
+> directories, not vanilla resource folders, so the 1.21 singular/plural directory renames do not
+> apply to them.
+>
+> One thing did change under the surface. Text fields (`display`, tier `name`, tier and title
+> `description`) are now parsed by `ComponentSerialization.CODEC` rather than 1.20.1's
+> `ExtraCodecs.COMPONENT`. Every text form these docs show — a plain string, a `{"translate": …}`
+> object, a list of components — parses exactly as before; the change is which vanilla codec does it.
+> This mod targets **Minecraft 1.21.1** and needs no `pack_format` declaration of its own, because
+> NeoForge generates pack metadata for mods.
+
 Three kinds of definition, all reloaded by `/reload`:
 
 ```

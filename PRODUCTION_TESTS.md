@@ -5,31 +5,40 @@
 
 ## Why this file exists
 
-MCA Reborn's Forge mixins ship without a refmap and with hard-coded SRG names, so they only resolve in
-a production (SRG) runtime. ForgeGradle's `runClient` and `runServer` therefore do **not** exercise
-real MCA behaviour, and a green dev run proves very little about a mod that links MCA internals.
+A green `./gradlew build` is not a release gate. It proves the code compiles against the pinned MCA
+artifact and that the domain logic behaves — it says nothing about whether the mod starts on a real
+client, whether a real dedicated server resolves a client class it should not, or whether a real
+1.20.1 world survives the upgrade with its ledger intact.
 
-Both companion mods in this suite already document that constraint, and it applies here for the same
-reason. Spec Appendix D puts it plainly: "production verified" means built, reobfuscated jars were
-tested in a production-style instance — not that compilation and unit tests passed.
+The 1.20.1 reason for this file was that MCA's Forge mixins shipped SRG-named with no refmap, so
+`runClient`/`runServer` did not exercise real MCA at all. **That specific obstacle is gone on 1.21.1**:
+MCA's NeoForge artifact is mojmap and loads as a real mod in the dev runs, so `runClient` and
+`runServer` here *do* exercise genuine MCA behaviour. The gate remains anyway, for the reason Spec
+Appendix D actually gives: "production verified" means the built jars were tested in a production-style
+instance, not that compilation and unit tests passed. There is no reobfuscation step to worry about any
+more — `build/libs/mcareputation-0.2.0.jar` *is* the artifact that ships.
 
 ## What has passed so far
 
 | Gate | Status | Evidence |
 |---|---|---|
 | Phase 0 audit and reconciliation | ✅ | [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) |
-| MCA 7.6 / 7.7 signature parity | ✅ | `javap` over both deobf jars; every consumed signature byte-identical |
-| MCA: Reputation compiles and unit tests | ✅ | 240+ tests, 0 failures |
-| MCA: Quests compiles and regression suite | ✅ | all green, including the dimension-keyed title store and Journal-link packets |
-| MCA: Conversations compiles and regression suite | ✅ | all green, including the gossip merge, the standing topic, and chat-intent parity |
-| Reobfuscated jar contains no shaded companion classes | ✅ | `checkJarContents` gradle task, run as part of `build` |
-| No mixins to lint | ✅ | the mod ships none; asserted by `OptionalClassloadTest` |
+| MCA 7.7.36-beta.3 signature confirmation | ✅ | `javap` over the pinned `mca-neoforge` jar; every consumed signature present and compatible (IMPLEMENTATION_NOTES §2.1) |
+| MCA: Reputation compiles and unit tests | ✅ | **296 tests, 0 failures, 0 skipped** (1.20.1 Forge baseline was 255) |
+| Golden 1.20.1 saved data loads under 1.21.1 | ✅ | `GoldenSavedDataCompatibilityTest` against a fixture written by the unmodified Forge serializer |
+| Config keys and defaults unchanged | ✅ | `ConfigParityTest` pins both key sets and both filenames exactly |
+| No Forge or relocated-MCA reference survives | ✅ | `NeoForgePortLintTest` (source, 19 idioms) + `OptionalClassloadTest` (bytecode) + `checkJarContents` (packaged bytecode) |
+| Dedicated-server safety of the packet seam | ✅ | `ClientPacketSinkTest` + a bytecode assertion that no class under `network/` names a client type |
+| MCA: Quests compiles and regression suite | ✅ | **331 tests, 0 failures**, with `compat/reputation/**` compiled against this port for the first time |
+| MCA: Conversations compiles and regression suite | ✅ | **537 tests, 0 failures**, with `compat/reputation/**` compiled and the optional dependency entry restored |
+| Shipped jar contains no shaded companion classes | ✅ | `checkJarContents`, run as part of `build` |
+| No mixins to lint | ✅ | the mod ships none; asserted by `OptionalClassloadTest` and `checkJarContents` |
 | Production runtime matrix | ⬜ | **this document** |
 
 ### What the automated tests now pre-cover
 
-The pre-release review added suites that pre-cover parts of this matrix, which narrows — but does not
-replace — the manual pass:
+The pre-release review and the 1.21.1 port added suites that pre-cover parts of this matrix, which
+narrows — but does not replace — the manual pass:
 
 - **§2 functional scenarios (partially):** the whole `ReputationService` transaction — ordering,
   dedupe, unwitnessed drop-vs-retain, listener/mirror containment, set/add exactness at the clamp,
@@ -37,30 +46,41 @@ replace — the manual pass:
   pruning at the clamp and cap-sweep behaviour (`PruningTest`, `SavedDataTest`).
 - **§3 exploit resistance (partially):** dedupe replay, resolution replay/ratchet
   (`ReputationServiceTest`, `ResolutionTest`, `DedupeTest`); snapshot request pacing and timeout
-  (`RequestThrottleTest`); packet bounds (`SnapshotPacketTest`).
+  (`RequestThrottleTest`); packet bounds on **both** encode and decode, including rejection one over
+  every limit (`SnapshotPacketTest`).
 - **§1 static checks (partially):** command-tree parsing incl. the `/mcarep` redirect and the
   community argument type (`CommandTreeTest`); two-way lang parity (`LangParityTest`); shipped
   content and validator severities (`ContentValidationTest`).
+- **World migration (partially):** the saved-data half is covered by the golden fixture. What is
+  *not* covered is the vanilla world upgrade around it — chunk conversion, MCA's own data, and the
+  interaction between the two. §2 below still gates the release.
 
-Installation-combination testing, performance, log review, and everything that needs a real SRG
-runtime remain manual-only and still gate the release.
+Installation-combination testing, in-game combat attribution, UI behaviour, performance, and log
+review remain manual-only and still gate the release.
 
 ## Building the artifacts
 
+Build this repository **first** — both companions compile against its class output:
+
 ```bash
-cd MCAReputation      && ./gradlew build      # build this first; the companions compile against it
-cd ../MCAQuests       && ./gradlew build
-cd ../MCAConversations && ./gradlew build
+cd MCAReputation_1.21.1   && ./gradlew build
+cd ../MCAQuests_1.21.1    && ./gradlew build
+cd ../MCAConversations_1.21.1 && ./gradlew build
 ```
 
-Take the reobfuscated jars from each `build/libs/`. Record the exact filenames and hashes below.
+Java 21 is required; the foojay toolchain resolver provisions it if `JAVA_HOME` is older. Take the
+jars from each `build/libs/` — they are the distributable artifacts as built, with no reobfuscation
+step. Record the exact filenames and hashes below.
 
 | Artifact | File | SHA-256 |
 |---|---|---|
-| MCA: Reputation | | |
-| MCA: Quests | | |
-| MCA: Conversations | | |
-| MCA Reborn | | |
+| MCA: Reputation | `mcareputation-0.2.0.jar` | `b1fbe0fa91048317ee549520f1c8b3570ddd9cef5e73ce6c238e67ad6b9a3fd6` |
+| MCA: Quests | `mcaquests-1.1.0.jar` | `22f380d5f72d57968b851e4ead82560c1e078eb56ad17bf5881a4ce7bcdc7a08` |
+| MCA: Conversations | `mcaconversations-neoforge-2.0.0+1.21.1.jar` | `b1dd4b0dcf8c790d3daf2b595266406784047f1966d5a1d7c8513dea566b55f6` |
+| MCA Reborn | `mca-neoforge-7.7.36-beta.3+1.21.1.jar` | `de4763d34a41cb84ffa392b87cdb23191beddda2323b56552a1a2fcd7c436fc3` |
+
+Environment to record with the results: Minecraft `1.21.1`, NeoForge `21.1.248`, Java `21`, plus the
+tester and date.
 
 ---
 
@@ -70,10 +90,10 @@ Every row must reach the main menu, load a world, and produce no ERROR attributa
 
 | # | Combination | Client | Dedicated server | Notes |
 |---:|---|:---:|:---:|---|
-| 1 | MCA 7.6.20 + Reputation | ⬜ | ⬜ | |
-| 2 | MCA 7.7.0-beta.2 + Reputation | ⬜ | ⬜ | |
-| 3 | MCA + Quests only | ⬜ | ⬜ | must behave exactly as 1.0.0 did |
-| 4 | MCA + Conversations only | ⬜ | ⬜ | must behave exactly as 1.0.0 did |
+| 1 | NeoForge + MCA + Reputation | ⬜ | ⬜ | the baseline row |
+| 2 | NeoForge + Reputation, **no MCA** | ⬜ | ⬜ | must be a clean "missing required dependency: mca" from the loader, never a linkage crash |
+| 3 | MCA + Quests only | ⬜ | ⬜ | must behave exactly as it does without Reputation |
+| 4 | MCA + Conversations only | ⬜ | ⬜ | must behave exactly as it does without Reputation |
 | 5 | MCA + Reputation + Quests | ⬜ | ⬜ | |
 | 6 | MCA + Reputation + Conversations | ⬜ | ⬜ | |
 | 7 | MCA + Quests + Conversations, no Reputation | ⬜ | ⬜ | |
@@ -93,6 +113,8 @@ For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not install
 | Witnessed assault | Standing falls; witnesses recorded; the deed appears in the ledger | ⬜ |
 | Unwitnessed assault | Standing does not move, and the player is not told one way or the other | ⬜ |
 | Killing after an assault | Total is the killing's figure (−40), not the sum (−48); the assault line remains at zero | ⬜ |
+| **Lethal-hit event order (port-critical)** | `LivingDamageEvent.Post` must fire **before** `LivingDeathEvent` for a lethal player hit. The fold/link/rollback algorithm depends on seeing the precursor assault before the death transaction. If this environment fires them the other way round, the death handler must be refactored to derive the lethal assault atomically — do not accept −48 where −40 is intended | ⬜ |
+| Mitigated chip damage | A hit fully absorbed by armour or enchantments records **no** deed: the threshold is compared against `getNewDamage()`, the health actually lost | ⬜ |
 | Unwitnessed killing | Hidden, zero-contribution history; no public change | ⬜ |
 | Self-defence | Reduced penalty, `self_defence` recorded in context | ⬜ |
 | Sustained beating | One incident with accumulated damage, not one per damage tick | ⬜ |
@@ -122,6 +144,31 @@ For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not install
 | Second login after migration | Nothing is added again | ⬜ |
 | Remove Reputation | Quests reads its mirrored fallback; standing is what it was | ⬜ |
 | Reinstall Reputation | Canonical data resumes; no duplication | ⬜ |
+
+## 2b. World migration from Minecraft 1.20.1
+
+New for the NeoForge port, and the row most worth doing carefully: the golden fixture proves the
+serializer round-trips, but only a real world proves the serializer runs on the data a real world
+actually contains, in the presence of vanilla's own chunk upgrade and MCA's own saved data.
+
+**Use a copy. Back up the copy.** The vanilla upgrade is one-way; there is no going back to 1.20.1.
+
+| # | Step | Result |
+|---:|---|:---:|
+| 1 | On 1.20.1, record scores, tiers, titles and a few representative incidents for at least two players and two villages — including two villages with the same numeric id in different dimensions | ⬜ |
+| 2 | Copy the world, then back up the copy separately | ⬜ |
+| 3 | Open the copy in the 1.21.1 / NeoForge instance and let the vanilla world upgrade run | ⬜ |
+| 4 | Reputation saved data loads exactly once, with no "future format" warning and no corruption-containment log line | ⬜ |
+| 5 | Every score, dimension/village id, title, incident, status, context, witness set, dedupe entry and tier high-water mark matches step 1 | ⬜ |
+| 6 | Trigger one new deed, save, exit **fully**, restart, and confirm both the old and the new state persist | ⬜ |
+| 7 | Rename a village; the cached display name updates while the community identity (and therefore the standing) does not | ⬜ |
+| 8 | Repeat steps 3–6 on a brand-new 1.21.1 world, to catch initialisation paths that existing data hides | ⬜ |
+| 9 | Confirm the existing `mcareputation-common.toml` and `mcareputation-client.toml` were read as-is, with no keys reset to defaults | ⬜ |
+
+If step 5 shows a reset, **stop and restore the backup** rather than playing on. Reputation is written
+on the same autosave path as MCA's own village data; a reset is a symptom to diagnose, not to accept.
+
+---
 
 ## 3. Security and exploit scenarios
 

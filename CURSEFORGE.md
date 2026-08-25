@@ -88,8 +88,8 @@ changes behavior only: no saved record is ever deleted by a config change.
 
 | | |
 |---|---|
-| **Minecraft** | 1.20.1 |
-| **Mod loader** | Forge 47.x |
+| **Minecraft** | 1.21.1 |
+| **Mod loader** | NeoForge 21.1.x |
 | **Required** | [MCA Reborn](https://www.curseforge.com/minecraft/mc-mods/minecraft-comes-alive-reborn) `7.6` – `7.7` (built against 7.7.0-beta.2; **not** 7.7.0-beta.1, which is broken upstream) |
 | **Only if MCA needs it** | [Architectury API](https://www.curseforge.com/minecraft/mc-mods/architectury-api) — required by MCA 7.6, dropped by MCA 7.7. This mod never asks for it |
 | **Optional** | MCA: Quests — quests, projects, and situations become named public deeds |
@@ -161,7 +161,7 @@ with the exact file and field.
 
 ## For mod developers
 
-A stable, documented Java API (`dev.otectus.mcareputation.api`) and five Forge events
+A stable, documented Java API (`dev.otectus.mcareputation.api`) and five NeoForge events
 (reputation changed, tier changed, incident created, incident resolved, title granted) let other
 mods record deeds, query standing, and react to changes. Every write goes through one atomic,
 idempotent transaction — dedupe keys guarantee a deed lands exactly once, no matter how many

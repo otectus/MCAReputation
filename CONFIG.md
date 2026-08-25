@@ -1,5 +1,11 @@
 # MCA: Reputation — configuration
 
+> **Unchanged by the Minecraft 1.21.1 / NeoForge port.** Both filenames, every key, every default and
+> every range are exactly what the Forge 1.20.1 build used, so an existing server's or client's TOML
+> keeps working untouched — there is nothing to edit or migrate. `ConfigParityTest` pins both key sets
+> and both filenames on every build, so a key that ever moves fails CI rather than silently resetting
+> somebody's setting.
+
 Two files, written on first run:
 
 - `config/mcareputation-common.toml` — **server-authoritative**. On a dedicated server the server's copy

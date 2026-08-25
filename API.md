@@ -208,7 +208,7 @@ behaviour in a later version without a format change.
 
 The single most important thing an integration gets right. Applying the same key for the same player
 and community returns the earlier result and mutates **nothing** — no incident, no score, no event, no
-toast, no title, no mirror write. That is what makes a duplicated turn-in packet, a doubled Forge
+toast, no title, no mirror write. That is what makes a duplicated turn-in packet, a doubled
 event, a relog mid-transaction, and a datapack reload all harmless.
 
 Recommended shapes:
@@ -234,7 +234,36 @@ is mutated — `applied()` is false and `appliedDelta()` is zero — only the id
 
 ---
 
-## Forge events
+## NeoForge events
+
+All five extend `net.neoforged.bus.api.Event` and are posted on `NeoForge.EVENT_BUS`:
+
+```java
+import dev.otectus.mcareputation.api.event.ReputationTierChangedEvent;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.common.NeoForge;
+
+public final class MyReputationListener {
+
+    public static void register() {
+        NeoForge.EVENT_BUS.register(MyReputationListener.class);
+    }
+
+    @SubscribeEvent
+    public static void onTierChanged(ReputationTierChangedEvent event) {
+        if (event.upward() && event.firstTime()) {
+            // a genuine new best with this village
+        }
+    }
+}
+```
+
+> **Add-ons built against the Forge 1.20.1 artifact must be recompiled.** `getApiVersion()` still
+> returns `1` — the operations and their meanings are unchanged — but the event base class and the
+> bus moved from `net.minecraftforge.eventbus.api.Event` / `MinecraftForge.EVENT_BUS` to the NeoForge
+> equivalents above. That is a platform boundary, not a new API contract, so nothing in the tables
+> below changed. Java 21 is required.
+
 
 All five are **server-side, posted after the canonical commit, immutable, and non-cancellable**. The
 store is already consistent when a listener runs, so a listener may safely query it.

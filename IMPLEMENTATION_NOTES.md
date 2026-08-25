@@ -20,16 +20,25 @@ releases produced here are `1.1.0`.
 
 ## 2. MCA API confirmation (spec §39 items 4 and 6)
 
-Verified with `javap` against the **deobf-mapped** jars ForgeGradle already has cached for both
-supported MCA versions:
+**Re-audited for the Minecraft 1.21.1 / NeoForge port.** MCA Reborn 1.21.1 dropped the Forgix-merged
+"Universal" jar, so its classes are no longer relocated under a loader-named root: `forge.net.mca.*`
+is now `net.conczin.mca.*`. Verified with `javap` against the exact artifact this mod is built
+against — no deobf step exists or is needed, because the NeoForge artifact is already mojmap:
 
 ```
-~/.gradle/caches/forge_gradle/deobf_dependencies/maven/modrinth/minecraft-comes-alive-reborn/
-    7.6.20+1.20.1_mapped_official_1.20.1/…jar
-    7.7.0-beta.2+1.20.1_mapped_official_1.20.1/…jar
+net.conczin.mca:mca-neoforge:7.7.36-beta.3+1.21.1   (Conczin Maven, https://maven.conczin.net/Artifacts)
 ```
 
-### 2.1 Village identity and residents — identical on 7.6.20 and 7.7.0-beta.2
+Two notes on the pin, both of which cost time to discover:
+
+- **`7.7.36+1.21.1` was never published.** `-beta.3` is the real latest; the newest non-prerelease is
+  `7.7.33+1.21.1`. Any plan or script naming `7.7.36+1.21.1` will fail to resolve.
+- **The Modrinth Maven is ambiguous for this artifact.** The Fabric and NeoForge files share the
+  version string `7.7.x+1.21.1`, and resolution can silently hand back the Fabric jar (intermediary
+  names, `fabric.mod.json`). MCA: Quests worked around it by pinning a Modrinth file id. The Conczin
+  Maven puts the loader in the artifact id (`mca-neoforge`), so the ambiguity does not arise.
+
+### 2.1 Every consumed signature, confirmed present on 7.7.36-beta.3
 
 | Signature | Used for |
 |---|---|
@@ -43,34 +52,39 @@ supported MCA versions:
 | `Village#getResidents(ServerLevel) : List<VillagerEntityMCA>` | loaded residents (awareness) |
 | `Village#getResidentsUUIDs() : Stream<UUID>` | full residency, load-independent |
 | `Village#getResidentNames() : Map<UUID,String>` | subject/witness display names |
-| `VillagerEntityMCA#getResidency().getHomeVillage() : Optional<Village>` | primary community resolution |
+| `FamilyTree.get(ServerLevel)` / `FamilyTree#getOrEmpty(UUID)` / `FamilyTreeNode#getName()` | unloaded-villager names |
+| `VillagerEntityMCA#getResidency() : Residency` → `Residency#getHomeVillage() : Optional<Village>` | primary community resolution |
+| `VillagerEntityMCA#getVillagerBrain() : VillagerBrain<?>` → `#getPersonality()` | gossip/display hint |
+| `VillagerLike#getAgeState() : AgeState`, `AgeState.ADULT` | age gating for the Conversations bridge |
+| `InteractScreen` | the Standing button's host screen |
 
-Every one of these is byte-identical across the two versions. **One binary supports both; no
-reflection and no version branch is needed.** This resolves the §39 "STOP" gate in the
-non-blocking direction.
+**Every one is present with a compatible shape.** The port to 1.21.1 is therefore an import-package
+change inside the two `compat` classes and nothing more — no reflection, no version branch, no
+adapter. `OptionalClassloadTest` and `checkJarContents` both fail the build if any other class starts
+naming `net.conczin.mca`, or if a reference to the old `forge.net.mca` root survives anywhere.
 
-### 2.2 Known 7.6 → 7.7 drift
+### 2.2 Personality is still read through `toString()`
 
-`forge.net.mca.entity.ai.relationship.Personality` is an `enum` on 7.6 and a registry-backed class on
-7.7, so neither `name()` nor `getPersonalityId()` exists on both. Conversations already solved this by
-going through `Object#toString()` and normalising (`"ODD"` / `"mca:odd"` → `"odd"`). Reputation
-consumes personality only as an opaque display/gossip hint, so it uses the same `toString()` path.
+`net.conczin.mca.entity.ai.relationship.Personality` now also exposes `getPersonalityId()` returning a
+`ResourceLocation`, which the 1.20.1 line did not have on both supported versions. The `toString()`
+path is kept anyway: it works across the whole `[7.7,8)` range this mod declares, and reputation
+consumes personality only as an opaque display/gossip hint. Switching to the typed accessor would
+narrow the supported range for no behavioural gain.
 
 ### 2.3 Village ID uniqueness → `CommunityKey` still keeps the dimension
 
 `VillageManager` is a `SavedData` obtained per `ServerLevel`, so village IDs are allocated **per
-dimension** and two dimensions can absolutely hold the same numeric ID. Even if they could not, §39
-directs us to retain the dimension. `CommunityKey(ResourceLocation dimension, int villageId)` is final.
+dimension** and two dimensions can absolutely hold the same numeric ID. `CommunityKey(ResourceLocation
+dimension, int villageId)` is final, and the golden 1.20.1 fixture asserts the two-dimension case
+survives the platform move.
 
 ### 2.4 Interaction-screen injection point (§39 item 6) — **no mixin needed**
 
-`forge.net.mca.client.gui.InteractScreen` extends `AbstractDynamicScreen` → `ExtendedScreen` →
-`net.minecraft.client.gui.screens.Screen`, and its `render`/`mouseClicked` overrides both call
-`super`, so vanilla `renderables`/`children` are rendered and clickable. Its villager field is
-`private final VillagerLike<?> villager` with **no getter** on either version.
+`net.conczin.mca.client.gui.InteractScreen` extends `AbstractDynamicScreen` → `Screen`. Its villager
+field is private with no getter, as before.
 
 **Decision — deviation from §11's "MCA menu injection mixin/accessor":** the mod ships **zero
-mixins**. The Standing button is added through Forge's `ScreenEvent.Init.Post` (checking
+mixins**. The Standing button is added through the loader's `ScreenEvent.Init.Post` (checking
 `screen instanceof InteractScreen`), and the villager identity comes from a client-side record of the
 last entity the player interacted with (`PlayerInteractEvent.EntityInteract`), **not** from reading
 MCA's private field. The claimed entity ID is then validated server-side exactly as §27.2 already
@@ -79,8 +93,20 @@ robust than an accessor mixin — an accessor cannot be made optional, so an MCA
 hard-fail mixin application at startup, whereas this path degrades to "button does nothing useful".
 §11 calls mixins a last resort; there is no last resort here.
 
-Consequence: `mods.toml` has no `[[mixins]]` block and there is no mixin JSON to lint, which
-discharges the §36.5 mixin checks vacuously.
+Consequence: `neoforge.mods.toml` has no `[[mixins]]` block and there is no mixin JSON to lint, which
+discharges the §36.5 mixin checks vacuously. `checkJarContents` fails the build if a mixin config
+ever appears in the artifact.
+
+### 2.5 Platform decisions taken during the port
+
+| Decision | Why |
+|---|---|
+| Declared MCA range `[7.7,8)`, wider than the compile pin | MCA: Quests declares `[7.7,8)` and MCA: Conversations `[7.7.36-beta.3,7.7.37)`. A narrow range here would make the three mods mutually uninstallable. Every MCA call is `instanceof`-guarded and `catch (Throwable)`, so drift inside 7.7 degrades a feature rather than crashing a server. `[7.7.36,8)` specifically would **not** work: a Maven range excludes prereleases below its lower bound, so it rejects `7.7.36-beta.3`. |
+| Gradle 8.12 + ModDevGradle 2.0.141 | Matches both sibling ports exactly. ModDevGradle 2.0.x targets the Gradle 8 API; adding a Gradle 9 migration to an already-large port buys nothing. |
+| NeoForge range `[21.1.248,21.2)` | Bounded above so the artifact can never load on 1.21.2+. Overlaps Quests' `[21.1.0,21.2)` and Conversations' `[21.1.234,21.2)`. |
+| Network protocol `2` → `3` | The framing, payload ids and component encoding all changed. A 1.20.1 client could not reach a 1.21.1 server anyway, but the bump makes the incompatible wire revision auditable. |
+| `LivingDamageEvent.Post`, not `LivingIncomingDamageEvent` | The chip-damage threshold is defined on health *actually lost*. `LivingIncomingDamageEvent` is the cancellable pre-mitigation stage and would compare against the wrong number. |
+| Saved data stays format `1` | The target API grew a `HolderLookup.Provider` parameter; the schema did not change. The provider is an adapter parameter, and `savePayload`/`loadPayload` stay provider-neutral so a fixture written by the 1.20.1 build reads back unchanged. |
 
 ## 3. Quests reputation surface — complete enumeration (spec §39 item 3)
 
@@ -188,9 +214,9 @@ pointing at `../MCAReputation/build/classes/java/main`.
 Build order for a full-suite build: **MCAReputation → MCAQuests → MCAConversations**
 (Conversations already compiles optionally against Quests as well).
 
-## 6. Forge event availability (spec §39 item 5)
+## 6. Loader event availability (spec §39 item 5)
 
-Confirmed present in Forge 47.4.10 for 1.20.1 and used as follows:
+Confirmed present in NeoForge 21.1.248 for 1.21.1 and used as follows:
 
 - `LivingHurtEvent` — assault attribution (fires after armour/absorption, carries the final amount,
   is cancellable, and is server-side-checkable via `entity.level().isClientSide`).
@@ -217,7 +243,7 @@ thrown-potion, and tamed-pet cases in §20.1 without any per-source special casi
 > `util/EnumCodecs`, `util/StrictCodecs`, `network/ClientPacketHandler`, `network/ReputationFeedback`,
 > `incident/BuiltinIncidents`, `incident/IncidentDisplay`, `incident/ResolutionPolicy`,
 > `reputation/Titles`, and `reputation/ServiceContext` were added. The parenthetical below on
-> `McaCompat` is also out of date: `compat/McaScreenCompat` imports `forge.net.mca.*` too — the real
+> `McaCompat` is also out of date: `compat/McaScreenCompat` imports `net.conczin.mca.*` too — the real
 > rule, asserted by `OptionalClassloadTest`, is that only the `compat` *package* may.
 
 Follows §11 exactly, with these concrete additions:
@@ -225,14 +251,14 @@ Follows §11 exactly, with these concrete additions:
 ```
 dev.otectus.mcareputation
 ├── McaReputation.java                  mod entry point, server lifecycle, LOGGER
-├── McaReputationConfig.java            COMMON + CLIENT ForgeConfigSpec, clamped accessors
+├── McaReputationConfig.java            COMMON + CLIENT ModConfigSpec, clamped accessors
 ├── api/  McaReputationApi, ReputationRequest, ReputationResult, ReputationSnapshot,
 │         ReputationIncidentView, ResolutionResult, ImportResult, LegacyImportRequest,
 │         ReputationMirror, ExternalGossipCandidate, ReputationQuery
 │   └── event/  ReputationChangedEvent, ReputationTierChangedEvent,
 │               ReputationIncidentCreatedEvent, ReputationIncidentResolvedEvent,
 │               ReputationTitleGrantedEvent
-├── compat/  McaCompat (ONLY class importing forge.net.mca.*)
+├── compat/  McaCompat (ONLY class importing net.conczin.mca.*)
 ├── community/  CommunityKey, CommunityMetadata, CommunityResolver
 ├── incident/  IncidentDefinition, IncidentRegistry, IncidentLoader, IncidentValidator,
 │              IncidentRecord, IncidentStatus, IncidentVisibility, IncidentSeverity,

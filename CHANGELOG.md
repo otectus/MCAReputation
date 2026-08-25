@@ -11,10 +11,56 @@ A full-tree review before first release: score-integrity fixes, command and inte
 config that does what it says, and the transaction finally under test. 0.1.0 was never published;
 0.2.0 is the version that ships.
 
-Compatibility is unchanged from the table below (MC 1.20.1, Forge 47.x, MCA `7.6`–`7.7`), except the
-optional companions: the Journal's **[View Deeds]** link needs **MCA: Quests 1.2.0+**, and villager
-gossip about deeds plus the standing topic need **MCA: Conversations 1.2.0+**. Older companions keep
-working; those features simply are not offered.
+**This release targets Minecraft 1.21.1 on NeoForge.** The platform moved; the feature contract did
+not. See *Ported* below for what that changed and what it deliberately did not.
+
+| Mod | Version |
+|---|---|
+| Minecraft | `1.21.1` (metadata range `[1.21.1,1.21.2)`) |
+| NeoForge | `21.1.248+` (metadata range `[21.1.248,21.2)`) |
+| Java | `21` |
+| MCA Reborn | `7.7.x` (metadata range `[7.7,8)`) — built and verified against `7.7.36-beta.3+1.21.1` |
+| MCA: Quests | `1.1.0+` (optional) |
+| MCA: Conversations | `2.0.0+` (optional) |
+| MCA: Crime | `0.1.0+` (optional) |
+
+The optional companions: the Journal's **[View Deeds]** link needs **MCA: Quests**, and villager
+gossip about deeds plus the standing topic need **MCA: Conversations**. Each must be a 1.21.1 NeoForge
+build; a Forge 1.20.1 companion cannot load on this platform at all. Without them those features
+simply are not offered.
+
+### Ported
+
+**Minecraft 1.21.1 / NeoForge 21.1.248, from Minecraft 1.20.1 / Forge 47.4.10.**
+
+- The build moved from ForgeGradle 6 to ModDevGradle 2.0.141 on Gradle 8.12 and Java 21. There is no
+  reobfuscation step any more: NeoForge runs official Mojang names in dev and in production, so
+  `build/libs/mcareputation-0.2.0.jar` is the distributable artifact directly.
+- MCA Reborn's classes moved from the Forgix-relocated `forge.net.mca.*` root to `net.conczin.mca.*`.
+  Every signature this mod consumes was verified present and compatible against the pinned artifact;
+  the change is an import swap confined to the two `compat` classes, exactly as designed.
+- Networking was rewritten from a `SimpleChannel` with numeric discriminators to five named
+  `CustomPacketPayload`s on a `PayloadRegistrar`, protocol version `3`. Decoding is now bounded as
+  well as encoding: an oversized collection count is rejected before anything is allocated, where the
+  Forge build read whatever the sender claimed.
+- `LivingHurtEvent` became `LivingDamageEvent.Post`, and the damage threshold now reads
+  `getNewDamage()` — the health actually lost after armour, enchantments and absorption. This is what
+  keeps the chip-damage threshold and the assault/death coalescing meaning what they always meant.
+- The client dispatch seam no longer uses `DistExecutor`, which NeoForge removed. Common packet code
+  now calls an installable sink expressed only in this mod's own payload records, and the client
+  installs a real implementation during client setup. A dedicated server still resolves no client
+  class — now checked directly against the compiled bytecode rather than trusted to an idiom.
+
+**Deliberately unchanged.** The saved-data format is still version `1` and the file is still
+`mcareputation.dat` in the overworld's data storage: a world from the 1.20.1 build loads here with
+every score, incident, witness, title, dedupe entry and high-water mark intact, and there is a
+checked-in golden fixture written by the old serializer that proves it. Every config key, default and
+filename is unchanged. Every datapack path is unchanged, including the legacy `mcaquests` ones. The
+public API generation is still `1` — though add-ons compiled against the Forge artifact must be
+rebuilt, because their loader and event-bus imports moved with the platform.
+
+**No downgrade.** Opening a world in 1.21.1 is not a supported path back to 1.20.1. Vanilla's world
+upgrade is one-way regardless of this mod.
 
 ### Fixed
 
@@ -117,11 +163,15 @@ Superseded by 0.2.0 before any release was tagged.
 
 | Mod | Version |
 |---|---|
-| Minecraft | `1.20.1` |
-| Forge | `47.4.10+` (metadata range `[47,)`) |
-| MCA Reborn | `7.6`–`7.7` — built against `7.7.0-beta.2`, verified against `7.6.20` |
+| Minecraft | `1.21.1` |
+| NeoForge | `21.1.248+` (metadata range `[21.1.248,21.2)`) |
+| MCA Reborn | `7.7.x` (metadata range `[7.7,8)`) — built against `7.7.36-beta.3+1.21.1` |
 | MCA: Quests | `1.1.0+` (optional) |
-| MCA: Conversations | `1.1.0+` (optional) |
+| MCA: Conversations | `2.0.0+` (optional) |
+| MCA: Crime | `0.1.0+` (optional) |
+
+*Historical note: 0.2.0 was originally developed against Minecraft 1.20.1 / Forge 47.4.10 with MCA
+`7.6`–`7.7`. It was ported to the platform above before first release; see* Ported *above.*
 
 ### Added
 
@@ -190,7 +240,7 @@ Superseded by 0.2.0 before any release was tagged.
   payload is bounded before encoding.
 - Datapack-driven incidents, tier ladders, and titles, with atomic reload and cross-definition
   validation that reports every problem at once with the exact file and field.
-- A stable public Java API and five Forge events, plus a `ReputationMirror` sink and a
+- A stable public Java API and five loader events, plus a `ReputationMirror` sink and a
   `LegacyImportProvider` seam for add-ons.
 
 ### Compatibility
@@ -199,7 +249,7 @@ Superseded by 0.2.0 before any release was tagged.
 - **No Architectury dependency.** MCA 7.6 declares it itself and 7.7 dropped it; this mod contains no
   Architectury reference, so a 7.7 user who removed it is not blocked.
 - **No mixins.** The one place a mixin was a candidate — the Standing button on MCA's interaction
-  screen — uses Forge's screen-init event instead, so there is no MCA-internal signature to drift
+  screen — uses the loader's screen-init event instead, so there is no MCA-internal signature to drift
   against.
 - **One binary for MCA 7.6 and 7.7.** Every consumed signature was verified byte-identical across
   `7.6.20` and `7.7.0-beta.2`; the one known drift is consumed through `Object#toString()`.
