@@ -1,0 +1,3 @@
+
+# NBT fixtures are binary evidence; never let a text filter touch them.
+*.nbt binary
