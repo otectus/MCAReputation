@@ -152,7 +152,7 @@ class ReputationServiceTest {
 
         assertTrue(result.applied());
         assertTrue(result.newHighWater(), "0 -> 200 reaches honored for the first time");
-        assertTrue(home().hasTitle(new ResourceLocation("mcaquests", "honored_of_village")));
+        assertTrue(home().hasTitle(ResourceLocation.fromNamespaceAndPath("mcaquests", "honored_of_village")));
         assertEquals(List.of("ReputationTitleGrantedEvent",
                         "mirrorScore:200:honored",
                         "mirrorVillageTitle:mcaquests:honored_of_village",
@@ -179,7 +179,7 @@ class ReputationServiceTest {
         assertEquals(200, result.newScore());
         assertEquals(200, home().score());
         assertEquals(1, home().incidentCount());
-        assertTrue(home().hasTitle(new ResourceLocation("mcaquests", "honored_of_village")),
+        assertTrue(home().hasTitle(ResourceLocation.fromNamespaceAndPath("mcaquests", "honored_of_village")),
                 "the title grant survives a listener that throws on its event");
         assertEquals(4, ctx.posted.size(),
                 "every event was still posted: title, created, changed, tier");
@@ -506,7 +506,7 @@ class ReputationServiceTest {
         List<ReputationTierChangedEvent> tier = ctx.posted(ReputationTierChangedEvent.class);
         assertEquals(1, tier.size());
         assertTrue(tier.get(0).firstTime(), "no imported high-water: honored is genuinely new");
-        assertTrue(home().hasTitle(new ResourceLocation("mcaquests", "honored_of_village")));
+        assertTrue(home().hasTitle(ResourceLocation.fromNamespaceAndPath("mcaquests", "honored_of_village")));
 
         List<IncidentRecord> ledger = home().incidentsNewestFirst();
         assertEquals(1, ledger.size());
@@ -526,7 +526,7 @@ class ReputationServiceTest {
         assertEquals(1, tier.size());
         assertFalse(tier.get(0).firstTime(),
                 "the legacy system already celebrated honored; the import must not repeat it");
-        assertFalse(home().hasTitle(new ResourceLocation("mcaquests", "honored_of_village")),
+        assertFalse(home().hasTitle(ResourceLocation.fromNamespaceAndPath("mcaquests", "honored_of_village")),
                 "no first-time crossing, no tier title");
     }
 

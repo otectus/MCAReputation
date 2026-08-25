@@ -5,7 +5,7 @@ import com.mojang.serialization.DataResult;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.network.chat.Component;
 import dev.otectus.mcareputation.util.StrictCodecs;
-import net.minecraft.util.ExtraCodecs;
+import net.minecraft.network.chat.ComponentSerialization;
 
 import java.util.List;
 import java.util.Locale;
@@ -61,7 +61,7 @@ public record IncidentDefinition(
                     // Accepts both {"translate": "..."} objects and a bare string, because
                     // Component.Serializer treats a JSON primitive as a literal component. That is
                     // the same leniency §22.1 requires of the legacy Quests tier/title `name` fields.
-                    ExtraCodecs.COMPONENT.fieldOf("display").forGetter(IncidentDefinition::display),
+                    ComponentSerialization.CODEC.fieldOf("display").forGetter(IncidentDefinition::display),
                     Codec.INT.fieldOf("default_delta").forGetter(IncidentDefinition::defaultDelta),
                     IncidentVisibility.CODEC.fieldOf("visibility").forGetter(IncidentDefinition::visibility),
                     IncidentSeverity.CODEC.fieldOf("severity").forGetter(IncidentDefinition::severity),

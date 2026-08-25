@@ -3,10 +3,10 @@ package dev.otectus.mcareputation.reputation;
 import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.eventbus.api.Event;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.bus.api.Event;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.UUID;
 
 /**
@@ -59,7 +59,7 @@ interface ServiceContext {
 
             @Override
             public void post(Event event) {
-                MinecraftForge.EVENT_BUS.post(event);
+                NeoForge.EVENT_BUS.post(event);
             }
         };
     }

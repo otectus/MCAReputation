@@ -21,8 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class CoreIncidentAuthorityTest {
 
-    private static final ResourceLocation CRIME = new ResourceLocation("mcacrime", "crime_detector");
-    private static final ResourceLocation OTHER = new ResourceLocation("othermod", "detector");
+    private static final ResourceLocation CRIME = ResourceLocation.fromNamespaceAndPath("mcacrime", "crime_detector");
+    private static final ResourceLocation OTHER = ResourceLocation.fromNamespaceAndPath("othermod", "detector");
 
     /** A stub companion authority whose health and claims the test drives directly. */
     private record Stub(ResourceLocation id, boolean healthy) implements CoreIncidentAuthority {

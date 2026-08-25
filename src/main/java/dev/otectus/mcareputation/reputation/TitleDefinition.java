@@ -5,7 +5,8 @@ import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import dev.otectus.mcareputation.util.StrictCodecs;
-import net.minecraft.util.ExtraCodecs;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.ComponentSerialization;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -35,8 +36,8 @@ public record TitleDefinition(
 
     public static final Codec<TitleDefinition> CODEC = RecordCodecBuilder.create(instance -> instance.group(
             // Bare-string names are accepted for the same legacy reason as tier names (§22.1).
-            ExtraCodecs.COMPONENT.fieldOf("name").forGetter(TitleDefinition::name),
-            StrictCodecs.strictOptional(ExtraCodecs.COMPONENT, "description").forGetter(TitleDefinition::description),
+            ComponentSerialization.CODEC.fieldOf("name").forGetter(TitleDefinition::name),
+            StrictCodecs.strictOptional(ComponentSerialization.CODEC, "description").forGetter(TitleDefinition::description),
             StrictCodecs.strictOptional(TitleScope.CODEC, "scope", TitleScope.VILLAGE).forGetter(TitleDefinition::scope),
             StrictCodecs.strictOptional(Codec.BOOL, "revocable", false).forGetter(TitleDefinition::revocable),
             StrictCodecs.strictOptional(ResourceLocation.CODEC, "icon").forGetter(TitleDefinition::icon)
@@ -57,7 +58,7 @@ public record TitleDefinition(
      */
     public ItemStack iconStack() {
         return icon.map(id -> {
-                    Item item = net.minecraftforge.registries.ForgeRegistries.ITEMS.getValue(id);
+                    Item item = BuiltInRegistries.ITEM.getOptional(id).orElse(Items.AIR);
                     return item == null || item == Items.AIR ? new ItemStack(Items.NAME_TAG) : new ItemStack(item);
                 })
                 .orElseGet(() -> new ItemStack(Items.NAME_TAG));

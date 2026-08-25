@@ -91,13 +91,15 @@ public record CommunityMetadata(String name, Optional<BlockPos> center, long las
 
     public void write(FriendlyByteBuf buf) {
         buf.writeUtf(name, MAX_NAME_LENGTH);
-        buf.writeOptional(center, FriendlyByteBuf::writeBlockPos);
+        // Explicit lambda: 1.21.1 added a static ByteBuf overload of writeBlockPos, making the
+        // method reference ambiguous.
+        buf.writeOptional(center, (b, value) -> b.writeBlockPos(value));
         buf.writeVarLong(Math.max(0L, lastResolvedGameTime));
     }
 
     public static CommunityMetadata read(FriendlyByteBuf buf) {
         String name = buf.readUtf(MAX_NAME_LENGTH);
-        Optional<BlockPos> center = buf.readOptional(FriendlyByteBuf::readBlockPos);
+        Optional<BlockPos> center = buf.readOptional(b -> b.readBlockPos());
         return new CommunityMetadata(name, center, buf.readVarLong());
     }
 }

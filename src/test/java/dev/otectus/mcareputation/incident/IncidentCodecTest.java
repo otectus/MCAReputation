@@ -199,7 +199,7 @@ class IncidentCodecTest {
     @Test
     void unknownDefinitionIsInertButUsable() {
         IncidentDefinition unknown = IncidentDefinition.unknown(
-                new net.minecraft.resources.ResourceLocation("somemod:gone"));
+                net.minecraft.resources.ResourceLocation.parse("somemod:gone"));
         assertEquals(0, unknown.defaultDelta());
         assertEquals(0, unknown.resolveDelta(OptionalInt.of(100)),
                 "a vanished definition must not let a caller inject score");

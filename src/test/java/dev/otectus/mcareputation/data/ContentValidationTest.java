@@ -235,7 +235,7 @@ class ContentValidationTest {
     void aMalformedTagValidatesAsAnError() throws IOException {
         Map<ResourceLocation, IncidentDefinition> incidents = new LinkedHashMap<>(shippedIncidents());
         IncidentDefinition assault = incidents.get(BuiltinIncidents.VILLAGER_ASSAULTED);
-        incidents.put(new ResourceLocation("test", "bad_tags"), new IncidentDefinition(
+        incidents.put(ResourceLocation.fromNamespaceAndPath("test", "bad_tags"), new IncidentDefinition(
                 assault.display(), assault.defaultDelta(), assault.visibility(), assault.severity(),
                 List.of("Not A Valid Tag!"), assault.retentionTicks(), assault.decay(),
                 assault.resolution(), assault.gossip(), assault.pinned(), assault.maxOverrideAbs(),

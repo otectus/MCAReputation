@@ -2,9 +2,9 @@ package dev.otectus.mcareputation.reputation;
 
 import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.eventbus.api.Event;
+import net.neoforged.bus.api.Event;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;

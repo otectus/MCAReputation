@@ -27,10 +27,10 @@ import java.util.Set;
 public final class ReputationTiers {
 
     /** Canonical id for the default ladder. */
-    public static final ResourceLocation DEFAULT_ID = new ResourceLocation("mcareputation", "default");
+    public static final ResourceLocation DEFAULT_ID = ResourceLocation.fromNamespaceAndPath("mcareputation", "default");
 
     /** The id MCA: Quests has always used; preserved as an alias (§32.4). */
-    public static final ResourceLocation LEGACY_DEFAULT_ID = new ResourceLocation("mcaquests", "default");
+    public static final ResourceLocation LEGACY_DEFAULT_ID = ResourceLocation.fromNamespaceAndPath("mcaquests", "default");
 
     /**
      * The shipped ladder (spec Appendix A). The positive half is byte-for-byte the thresholds Quests
@@ -45,8 +45,8 @@ public final class ReputationTiers {
             tier("stranger", 0, 0, 0, null),
             tier("acquaintance", 25, 1, 2, null),
             tier("friend", 75, 2, 4, null),
-            tier("honored", 150, 3, 6, new ResourceLocation("mcaquests", "honored_of_village")),
-            tier("revered", 300, 4, 8, new ResourceLocation("mcaquests", "revered_of_village"))));
+            tier("honored", 150, 3, 6, ResourceLocation.fromNamespaceAndPath("mcaquests", "honored_of_village")),
+            tier("revered", 300, 4, 8, ResourceLocation.fromNamespaceAndPath("mcaquests", "revered_of_village"))));
 
     private static volatile Map<ResourceLocation, ReputationTierSet> ladders = Map.of();
 

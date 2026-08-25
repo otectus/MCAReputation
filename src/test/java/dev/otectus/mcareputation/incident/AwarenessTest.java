@@ -106,7 +106,7 @@ class AwarenessTest {
         for (int villageId = 0; villageId < 64; villageId++) {
             delays.add(AwarenessResolver.rumorDelayTicks(record.id(), TestFixtures.VILLAGER_2,
                     new dev.otectus.mcareputation.community.CommunityKey(
-                            new net.minecraft.resources.ResourceLocation("minecraft:overworld"), villageId),
+                            net.minecraft.resources.ResourceLocation.parse("minecraft:overworld"), villageId),
                     MIN_DELAY, MAX_DELAY));
         }
         assertTrue(delays.size() > 50, "expected well-spread delays, got " + delays.size() + " distinct");

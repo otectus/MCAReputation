@@ -3,7 +3,7 @@ package dev.otectus.mcareputation.api.event;
 import dev.otectus.mcareputation.api.ReputationIncidentView;
 import net.minecraft.server.level.ServerPlayer;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.UUID;
 
 /**

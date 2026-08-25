@@ -6,7 +6,7 @@ import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import dev.otectus.mcareputation.util.StrictCodecs;
-import net.minecraft.util.ExtraCodecs;
+import net.minecraft.network.chat.ComponentSerialization;
 
 import java.util.Optional;
 
@@ -52,8 +52,8 @@ public record ReputationTier(
                     // Accepts both {"translate": "..."} and a bare "Friend" string, because
                     // Component.Serializer reads a JSON primitive as a literal. That is what lets the
                     // legacy mcaquests ladders (whose codec is Codec.STRING) load unchanged (§22.1).
-                    ExtraCodecs.COMPONENT.fieldOf("name").forGetter(ReputationTier::name),
-                    StrictCodecs.strictOptional(ExtraCodecs.COMPONENT, "description").forGetter(ReputationTier::description),
+                    ComponentSerialization.CODEC.fieldOf("name").forGetter(ReputationTier::name),
+                    StrictCodecs.strictOptional(ComponentSerialization.CODEC, "description").forGetter(ReputationTier::description),
                     StrictCodecs.strictOptional(Codec.INT, "trust_bias", 0).forGetter(ReputationTier::trustBias),
                     StrictCodecs.strictOptional(Codec.INT, "respect_bias", 0).forGetter(ReputationTier::respectBias),
                     StrictCodecs.strictOptional(ResourceLocation.CODEC, "grants_title").forGetter(ReputationTier::grantsTitle)

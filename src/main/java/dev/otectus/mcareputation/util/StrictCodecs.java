@@ -29,8 +29,10 @@ import java.util.stream.Stream;
  * still {@code Optional.empty()} (or the supplied default), while a present-but-invalid one produces
  * a real parse error naming the field.
  *
- * <p>1.20.1 has no {@code ExtraCodecs.strictOptionalField}, which is why this is hand-rolled; later
- * Minecraft versions ship an equivalent and this class can be retired against them.
+ * <p>Hand-rolled because 1.20.1 had no {@code ExtraCodecs.strictOptionalField}. 1.21.1 does ship an
+ * equivalent, but this class is deliberately kept: its error messages name the offending field and
+ * resource, and the content-validation tests assert that wording. Retiring it is a separate change
+ * from the loader port.
  */
 public final class StrictCodecs {
 

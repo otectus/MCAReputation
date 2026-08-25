@@ -9,10 +9,10 @@ import dev.otectus.mcareputation.reputation.ReputationTiers;
 import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -47,7 +47,7 @@ import java.util.UUID;
  * all, so there is no change event and nothing to suppress — the player is never told about a
  * consequence that did not happen, and never tipped off that one did (§28.3).
  */
-@Mod.EventBusSubscriber(modid = McaReputation.MOD_ID)
+@EventBusSubscriber(modid = McaReputation.MOD_ID)
 public final class ReputationFeedback {
 
     /** One tick's worth of pending feedback, per player and community. */
@@ -96,8 +96,9 @@ public final class ReputationFeedback {
 
     /** Flushes at the end of the tick, so everything that happened this tick arrives merged. */
     @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || PENDING.isEmpty()) {
+    public static void onServerTick(ServerTickEvent.Post event) {
+        // No phase check: the Post subtype already is the end phase.
+        if (PENDING.isEmpty()) {
             return;
         }
         Map<UUID, Map<CommunityKey, Pending>> flushing = new LinkedHashMap<>(PENDING);

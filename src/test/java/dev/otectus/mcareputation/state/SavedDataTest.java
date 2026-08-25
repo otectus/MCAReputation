@@ -40,8 +40,8 @@ class SavedDataTest {
         home.recomputeScore(MIN, MAX);
         home.setTierHighWater(dev.otectus.mcareputation.reputation.ReputationTiers.DEFAULT_ID,
                 "acquaintance");
-        home.grantTitle(new ResourceLocation("mcaquests:honored_of_village"));
-        a.grantGlobalTitle(new ResourceLocation("mcareputation:wanderer"));
+        home.grantTitle(ResourceLocation.parse("mcaquests:honored_of_village"));
+        a.grantGlobalTitle(ResourceLocation.parse("mcareputation:wanderer"));
         a.markMigrated("mcaquests:legacy_reputation_v1", "1");
 
         PlayerReputationRecord b = data.getOrCreatePlayer(TestFixtures.PLAYER_B);
@@ -61,8 +61,8 @@ class SavedDataTest {
         assertEquals("Riverbend", home.metadata().name());
         assertEquals(Optional.of("acquaintance"), home.tierHighWater(
                 dev.otectus.mcareputation.reputation.ReputationTiers.DEFAULT_ID));
-        assertTrue(home.hasTitle(new ResourceLocation("mcaquests:honored_of_village")));
-        assertTrue(a.hasGlobalTitle(new ResourceLocation("mcareputation:wanderer")));
+        assertTrue(home.hasTitle(ResourceLocation.parse("mcaquests:honored_of_village")));
+        assertTrue(a.hasGlobalTitle(ResourceLocation.parse("mcareputation:wanderer")));
         assertTrue(a.hasMigrated("mcaquests:legacy_reputation_v1"));
 
         assertEquals(-40, loaded.score(TestFixtures.PLAYER_B, TestFixtures.NETHER_3));
@@ -116,10 +116,10 @@ class SavedDataTest {
 
     @Test
     void oneUnparseablePlayerKeyDoesNotCostTheOthers() {
-        CompoundTag tag = populated().save(new CompoundTag());
+        CompoundTag tag = populated().savePayload(new CompoundTag());
         tag.getCompound("players").put("definitely-not-a-uuid", new CompoundTag());
 
-        ReputationSavedData loaded = ReputationSavedData.load(tag);
+        ReputationSavedData loaded = ReputationSavedData.loadPayload(tag);
         assertEquals(2, loaded.playerCount());
         assertEquals(30, loaded.score(TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3));
     }
@@ -131,13 +131,13 @@ class SavedDataTest {
         player.getOrCreate(TestFixtures.OVERWORLD_3).addBaseline(50, MIN, MAX);
         player.getOrCreate(TestFixtures.NETHER_3).addBaseline(20, MIN, MAX);
 
-        CompoundTag tag = data.save(new CompoundTag());
+        CompoundTag tag = data.savePayload(new CompoundTag());
         ListTag communities = tag.getCompound("players")
                 .getCompound(TestFixtures.PLAYER_A.toString())
                 .getList("communities", net.minecraft.nbt.Tag.TAG_COMPOUND);
         communities.getCompound(0).put("key", new CompoundTag()); // wreck the first one's identity
 
-        ReputationSavedData loaded = ReputationSavedData.load(tag);
+        ReputationSavedData loaded = ReputationSavedData.loadPayload(tag);
         PlayerReputationRecord reloaded = loaded.player(TestFixtures.PLAYER_A).orElseThrow();
         assertEquals(1, reloaded.communities().size(), "the surviving community must still load");
         assertEquals(20, loaded.score(TestFixtures.PLAYER_A, TestFixtures.NETHER_3));
@@ -156,7 +156,7 @@ class SavedDataTest {
                 Optional.empty(), 5, IncidentVisibility.VILLAGE, IncidentSeverity.MINOR, List.of()));
         community.recomputeScore(MIN, MAX);
 
-        CompoundTag tag = data.save(new CompoundTag());
+        CompoundTag tag = data.savePayload(new CompoundTag());
         ListTag incidents = tag.getCompound("players")
                 .getCompound(TestFixtures.PLAYER_A.toString())
                 .getList("communities", net.minecraft.nbt.Tag.TAG_COMPOUND)
@@ -164,7 +164,7 @@ class SavedDataTest {
                 .getList("incidents", net.minecraft.nbt.Tag.TAG_COMPOUND);
         incidents.getCompound(0).putString("type", "!!! not a resource location !!!");
 
-        ReputationSavedData loaded = ReputationSavedData.load(tag);
+        ReputationSavedData loaded = ReputationSavedData.loadPayload(tag);
         CommunityReputationRecord reloaded = loaded.player(TestFixtures.PLAYER_A).orElseThrow()
                 .community(TestFixtures.OVERWORLD_3).orElseThrow();
         assertEquals(1, reloaded.incidentCount());
@@ -175,7 +175,7 @@ class SavedDataTest {
     void emptyRecordsAreNotPersisted() {
         ReputationSavedData data = ReputationSavedData.createForTest();
         data.getOrCreatePlayer(TestFixtures.PLAYER_A);
-        assertEquals(0, ReputationSavedData.load(data.save(new CompoundTag())).playerCount());
+        assertEquals(0, ReputationSavedData.loadPayload(data.savePayload(new CompoundTag())).playerCount());
     }
 
     // ------------------------------------------------------------------

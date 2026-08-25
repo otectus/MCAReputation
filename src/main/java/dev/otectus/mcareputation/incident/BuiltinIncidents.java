@@ -66,7 +66,7 @@ public final class BuiltinIncidents {
 
     /** MCA: Conversations, when a dialogue action records through the bridge. */
     public static final ResourceLocation SOURCE_CONVERSATIONS =
-            new ResourceLocation(McaReputation.CONVERSATIONS_MOD_ID, "conversations");
+            ResourceLocation.fromNamespaceAndPath(McaReputation.CONVERSATIONS_MOD_ID, "conversations");
 
     // --- context keys -------------------------------------------------------
 

@@ -4,6 +4,7 @@ import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.network.ReputationNetwork;
 import net.minecraft.client.Minecraft;
+import net.neoforged.neoforge.network.PacketDistributor;
 import net.minecraft.network.chat.Component;
 
 import java.util.List;
@@ -137,7 +138,7 @@ public final class ClientReputationData {
     }
 
     private static void send(RequestThrottle.Request request) {
-        ReputationNetwork.CHANNEL.sendToServer(
+        PacketDistributor.sendToServer(
                 new ReputationNetwork.RequestSnapshotC2S(request.contextEntityId(), request.community()));
     }
 

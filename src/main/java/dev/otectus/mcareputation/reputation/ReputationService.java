@@ -31,7 +31,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -956,7 +956,7 @@ public final class ReputationService {
     }
 
     /** Posts an event, containing any listener failure so one bad add-on cannot unwind a commit. */
-    static void postSafely(ServiceContext ctx, net.minecraftforge.eventbus.api.Event event) {
+    static void postSafely(ServiceContext ctx, net.neoforged.bus.api.Event event) {
         try {
             ctx.post(event);
         } catch (Throwable t) {

@@ -1,7 +1,7 @@
 package dev.otectus.mcareputation;
 
 import dev.otectus.mcareputation.reputation.ReputationBounds;
-import net.minecraftforge.common.ForgeConfigSpec;
+import net.neoforged.neoforge.common.ModConfigSpec;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.function.Supplier;
@@ -27,16 +27,16 @@ import java.util.function.Supplier;
 public final class McaReputationConfig {
 
     public static final Common COMMON;
-    public static final ForgeConfigSpec COMMON_SPEC;
+    public static final ModConfigSpec COMMON_SPEC;
     public static final Client CLIENT;
-    public static final ForgeConfigSpec CLIENT_SPEC;
+    public static final ModConfigSpec CLIENT_SPEC;
 
     static {
-        Pair<Common, ForgeConfigSpec> common = new ForgeConfigSpec.Builder().configure(Common::new);
+        Pair<Common, ModConfigSpec> common = new ModConfigSpec.Builder().configure(Common::new);
         COMMON = common.getLeft();
         COMMON_SPEC = common.getRight();
 
-        Pair<Client, ForgeConfigSpec> client = new ForgeConfigSpec.Builder().configure(Client::new);
+        Pair<Client, ModConfigSpec> client = new ModConfigSpec.Builder().configure(Client::new);
         CLIENT = client.getLeft();
         CLIENT_SPEC = client.getRight();
     }
@@ -63,36 +63,36 @@ public final class McaReputationConfig {
 
     public static final class Common {
 
-        public final ForgeConfigSpec.BooleanValue enableReputation;
-        public final ForgeConfigSpec.IntValue minimumScore;
-        public final ForgeConfigSpec.IntValue maximumScore;
-        public final ForgeConfigSpec.IntValue defaultVillageSearchRadius;
-        public final ForgeConfigSpec.BooleanValue enableCoreAssaultIncidents;
-        public final ForgeConfigSpec.BooleanValue enableCoreKillingIncidents;
-        public final ForgeConfigSpec.DoubleValue minimumIncidentDamage;
-        public final ForgeConfigSpec.IntValue witnessRadius;
-        public final ForgeConfigSpec.IntValue maxWitnesses;
-        public final ForgeConfigSpec.BooleanValue requireWitnessLineOfSight;
-        public final ForgeConfigSpec.BooleanValue attributeTamedDamage;
-        public final ForgeConfigSpec.IntValue selfDefenseWindowTicks;
-        public final ForgeConfigSpec.DoubleValue selfDefenseMultiplier;
-        public final ForgeConfigSpec.IntValue assaultCoalesceTicks;
-        public final ForgeConfigSpec.IntValue minRumorDelayTicks;
-        public final ForgeConfigSpec.IntValue maxRumorDelayTicks;
-        public final ForgeConfigSpec.IntValue maxIncidentsPerCommunity;
-        public final ForgeConfigSpec.IntValue maxIncidentsPerPlayer;
-        public final ForgeConfigSpec.IntValue reconcileOnlineIntervalTicks;
-        public final ForgeConfigSpec.BooleanValue enableScoreDecay;
-        public final ForgeConfigSpec.BooleanValue enableTierTitles;
-        public final ForgeConfigSpec.BooleanValue strictJsonValidation;
-        public final ForgeConfigSpec.BooleanValue enableQuestsIntegration;
-        public final ForgeConfigSpec.BooleanValue enableConversationsIntegration;
-        public final ForgeConfigSpec.BooleanValue enableCrimeIntegration;
-        public final ForgeConfigSpec.BooleanValue mirrorQuestsFallbackState;
-        public final ForgeConfigSpec.BooleanValue migrateLegacyQuestsData;
-        public final ForgeConfigSpec.BooleanValue debugLogging;
+        public final ModConfigSpec.BooleanValue enableReputation;
+        public final ModConfigSpec.IntValue minimumScore;
+        public final ModConfigSpec.IntValue maximumScore;
+        public final ModConfigSpec.IntValue defaultVillageSearchRadius;
+        public final ModConfigSpec.BooleanValue enableCoreAssaultIncidents;
+        public final ModConfigSpec.BooleanValue enableCoreKillingIncidents;
+        public final ModConfigSpec.DoubleValue minimumIncidentDamage;
+        public final ModConfigSpec.IntValue witnessRadius;
+        public final ModConfigSpec.IntValue maxWitnesses;
+        public final ModConfigSpec.BooleanValue requireWitnessLineOfSight;
+        public final ModConfigSpec.BooleanValue attributeTamedDamage;
+        public final ModConfigSpec.IntValue selfDefenseWindowTicks;
+        public final ModConfigSpec.DoubleValue selfDefenseMultiplier;
+        public final ModConfigSpec.IntValue assaultCoalesceTicks;
+        public final ModConfigSpec.IntValue minRumorDelayTicks;
+        public final ModConfigSpec.IntValue maxRumorDelayTicks;
+        public final ModConfigSpec.IntValue maxIncidentsPerCommunity;
+        public final ModConfigSpec.IntValue maxIncidentsPerPlayer;
+        public final ModConfigSpec.IntValue reconcileOnlineIntervalTicks;
+        public final ModConfigSpec.BooleanValue enableScoreDecay;
+        public final ModConfigSpec.BooleanValue enableTierTitles;
+        public final ModConfigSpec.BooleanValue strictJsonValidation;
+        public final ModConfigSpec.BooleanValue enableQuestsIntegration;
+        public final ModConfigSpec.BooleanValue enableConversationsIntegration;
+        public final ModConfigSpec.BooleanValue enableCrimeIntegration;
+        public final ModConfigSpec.BooleanValue mirrorQuestsFallbackState;
+        public final ModConfigSpec.BooleanValue migrateLegacyQuestsData;
+        public final ModConfigSpec.BooleanValue debugLogging;
 
-        Common(ForgeConfigSpec.Builder builder) {
+        Common(ModConfigSpec.Builder builder) {
             builder.comment("MCA: Reputation — server-authoritative settings.",
                     "Disabling a subsystem changes behaviour only; no saved record is ever deleted.").push("general");
             enableReputation = builder
@@ -223,15 +223,15 @@ public final class McaReputationConfig {
 
     public static final class Client {
 
-        public final ForgeConfigSpec.BooleanValue showReputationButton;
-        public final ForgeConfigSpec.BooleanValue showChangeActionBar;
-        public final ForgeConfigSpec.BooleanValue showTierToasts;
-        public final ForgeConfigSpec.BooleanValue showNegativeTierMessages;
-        public final ForgeConfigSpec.BooleanValue mergeChangeNotifications;
-        public final ForgeConfigSpec.BooleanValue showExactScore;
-        public final ForgeConfigSpec.BooleanValue showIncidentDeltas;
+        public final ModConfigSpec.BooleanValue showReputationButton;
+        public final ModConfigSpec.BooleanValue showChangeActionBar;
+        public final ModConfigSpec.BooleanValue showTierToasts;
+        public final ModConfigSpec.BooleanValue showNegativeTierMessages;
+        public final ModConfigSpec.BooleanValue mergeChangeNotifications;
+        public final ModConfigSpec.BooleanValue showExactScore;
+        public final ModConfigSpec.BooleanValue showIncidentDeltas;
 
-        Client(ForgeConfigSpec.Builder builder) {
+        Client(ModConfigSpec.Builder builder) {
             builder.comment("MCA: Reputation — client presentation.",
                     "Hiding a number changes only what you see; the server's arithmetic is unaffected.")
                     .push("display");

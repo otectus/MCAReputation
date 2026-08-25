@@ -10,7 +10,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -138,7 +138,8 @@ public final class ReputationScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        renderBackground(graphics);
+        // 1.21.1 takes the pointer and partial tick too; the old one-argument form is gone.
+        renderBackground(graphics, mouseX, mouseY, partialTick);
         graphics.fill(panelLeft, panelTop, panelLeft + panelWidth, panelTop + panelHeight, 0xE0100010);
         graphics.renderOutline(panelLeft, panelTop, panelWidth, panelHeight, 0xFF6F4A87);
 
@@ -367,14 +368,19 @@ public final class ReputationScreen extends Screen {
                 0x9A9A9A, false);
     }
 
+    /**
+     * 1.21.1 splits the single scroll delta into horizontal and vertical components. This list only
+     * scrolls vertically, so {@code deltaY} is the one that matters and {@code deltaX} is ignored -
+     * a horizontal wheel or trackpad swipe must not move the deeds list.
+     */
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+    public boolean mouseScrolled(double mouseX, double mouseY, double deltaX, double deltaY) {
         if (mouseY >= listTop && mouseY <= listBottom) {
-            scroll = ScrollMath.clampScroll(scroll - delta * LINE * 2, contentHeight,
+            scroll = ScrollMath.clampScroll(scroll - deltaY * LINE * 2, contentHeight,
                     listBottom - listTop);
             return true;
         }
-        return super.mouseScrolled(mouseX, mouseY, delta);
+        return super.mouseScrolled(mouseX, mouseY, deltaX, deltaY);
     }
 
     @Override

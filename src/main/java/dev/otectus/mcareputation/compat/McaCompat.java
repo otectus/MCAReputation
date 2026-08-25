@@ -2,13 +2,13 @@ package dev.otectus.mcareputation.compat;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
-import forge.net.mca.entity.VillagerEntityMCA;
-import forge.net.mca.entity.VillagerLike;
-import forge.net.mca.entity.ai.relationship.AgeState;
-import forge.net.mca.server.world.data.FamilyTree;
-import forge.net.mca.server.world.data.FamilyTreeNode;
-import forge.net.mca.server.world.data.Village;
-import forge.net.mca.server.world.data.VillageManager;
+import net.conczin.mca.entity.VillagerEntityMCA;
+import net.conczin.mca.entity.VillagerLike;
+import net.conczin.mca.entity.ai.relationship.AgeState;
+import net.conczin.mca.server.world.data.FamilyTree;
+import net.conczin.mca.server.world.data.FamilyTreeNode;
+import net.conczin.mca.server.world.data.Village;
+import net.conczin.mca.server.world.data.VillageManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.server.level.ServerLevel;
@@ -29,9 +29,9 @@ import java.util.UUID;
 /**
  * The single point of contact with Minecraft Comes Alive: Reborn (spec §11, §12.4).
  *
- * <p><b>Why {@code forge.net.mca.*} and not {@code net.mca.*}?</b> MCA Reborn ships a Forgix-merged
+ * <p><b>Why {@code net.conczin.mca.*} and not {@code net.mca.*}?</b> MCA Reborn ships a Forgix-merged
  * "Universal" jar covering Forge, Fabric, and Quilt. Forgix relocates each loader's classes under a
- * loader-named root package, so the Forge classes are physically {@code forge.net.mca.*} in both the
+ * loader-named root package, so the Forge classes are physically {@code net.conczin.mca.*} in both the
  * production jar and the dev-remapped one. The sibling MCA add-ons take the same approach.
  *
  * <p><b>Every method fails safe.</b> {@code instanceof} guards, {@code try/catch (Throwable)}, a DEBUG

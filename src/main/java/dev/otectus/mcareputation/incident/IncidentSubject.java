@@ -112,14 +112,16 @@ public record IncidentSubject(SubjectKind kind, Optional<UUID> uuid, String name
 
     public void write(FriendlyByteBuf buf) {
         buf.writeEnum(kind);
-        buf.writeOptional(uuid, FriendlyByteBuf::writeUUID);
+        // Explicit lambdas, not method references: 1.21.1 added static ByteBuf overloads of
+        // writeUUID/readUUID alongside the instance ones, so the reference is now ambiguous.
+        buf.writeOptional(uuid, (b, value) -> b.writeUUID(value));
         buf.writeUtf(name, MAX_NAME_LENGTH);
         buf.writeOptional(role, (b, r) -> b.writeUtf(r, MAX_ROLE_LENGTH));
     }
 
     public static IncidentSubject read(FriendlyByteBuf buf) {
         SubjectKind kind = buf.readEnum(SubjectKind.class);
-        Optional<UUID> uuid = buf.readOptional(FriendlyByteBuf::readUUID);
+        Optional<UUID> uuid = buf.readOptional(b -> b.readUUID());
         String name = buf.readUtf(MAX_NAME_LENGTH);
         Optional<String> role = buf.readOptional(b -> b.readUtf(MAX_ROLE_LENGTH));
         return new IncidentSubject(kind, uuid, name, role);

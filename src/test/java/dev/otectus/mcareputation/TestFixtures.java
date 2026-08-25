@@ -26,14 +26,14 @@ import java.util.UUID;
 public final class TestFixtures {
 
     public static final CommunityKey OVERWORLD_3 =
-            new CommunityKey(new ResourceLocation("minecraft", "overworld"), 3);
+            new CommunityKey(ResourceLocation.fromNamespaceAndPath("minecraft", "overworld"), 3);
     public static final CommunityKey NETHER_3 =
-            new CommunityKey(new ResourceLocation("minecraft", "the_nether"), 3);
+            new CommunityKey(ResourceLocation.fromNamespaceAndPath("minecraft", "the_nether"), 3);
     public static final CommunityKey OVERWORLD_7 =
-            new CommunityKey(new ResourceLocation("minecraft", "overworld"), 7);
+            new CommunityKey(ResourceLocation.fromNamespaceAndPath("minecraft", "overworld"), 7);
 
-    public static final ResourceLocation ASSAULT = new ResourceLocation("mcareputation", "villager_assaulted");
-    public static final ResourceLocation SOURCE = new ResourceLocation("mcareputation", "core");
+    public static final ResourceLocation ASSAULT = ResourceLocation.fromNamespaceAndPath("mcareputation", "villager_assaulted");
+    public static final ResourceLocation SOURCE = ResourceLocation.fromNamespaceAndPath("mcareputation", "core");
 
     public static final UUID PLAYER_A = UUID.fromString("00000000-0000-0000-0000-00000000000a");
     public static final UUID PLAYER_B = UUID.fromString("00000000-0000-0000-0000-00000000000b");

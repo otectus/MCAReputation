@@ -2,9 +2,9 @@ package dev.otectus.mcareputation.api.event;
 
 import dev.otectus.mcareputation.community.CommunityKey;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraftforge.eventbus.api.Event;
+import net.neoforged.bus.api.Event;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -53,8 +53,7 @@ public abstract class ReputationEvent extends Event {
         return community;
     }
 
-    @Override
-    public final boolean isCancelable() {
-        return false;
-    }
+    // No cancellation. Forge's Event exposed isCancelable(); NeoForge instead marks a cancellable
+    // event by implementing ICancellableEvent, which these deliberately do not. A listener must not
+    // be able to veto a change that has already been committed to the store (spec 29.4).
 }

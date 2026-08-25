@@ -20,10 +20,10 @@ class CommunityKeyTest {
 
     @Test
     void sameDimensionAndIdAreEqual() {
-        assertEquals(new CommunityKey(new ResourceLocation("minecraft:overworld"), 3),
+        assertEquals(new CommunityKey(ResourceLocation.parse("minecraft:overworld"), 3),
                 TestFixtures.OVERWORLD_3);
         assertEquals(TestFixtures.OVERWORLD_3.hashCode(),
-                new CommunityKey(new ResourceLocation("minecraft:overworld"), 3).hashCode());
+                new CommunityKey(ResourceLocation.parse("minecraft:overworld"), 3).hashCode());
     }
 
     /**
@@ -70,8 +70,8 @@ class CommunityKeyTest {
     @Test
     void negativeIdIsRejected() {
         assertThrows(IllegalArgumentException.class,
-                () -> new CommunityKey(new ResourceLocation("minecraft:overworld"), -1));
-        assertTrue(CommunityKey.of(new ResourceLocation("minecraft:overworld"), -1).isEmpty());
+                () -> new CommunityKey(ResourceLocation.parse("minecraft:overworld"), -1));
+        assertTrue(CommunityKey.of(ResourceLocation.parse("minecraft:overworld"), -1).isEmpty());
     }
 
     @Test

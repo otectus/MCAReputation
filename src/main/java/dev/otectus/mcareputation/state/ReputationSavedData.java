@@ -3,6 +3,7 @@ package dev.otectus.mcareputation.state;
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.community.CommunityKey;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -38,6 +39,15 @@ import java.util.UUID;
  * Every level of the load — player, community, incident, subject, witness, title — is guarded
  * independently, so the worst outcome of a corrupted region of the file is that one player loses one
  * village's history, not that nobody can open the world.
+ *
+ * <h2>The registry provider is an adapter parameter, not part of the schema</h2>
+ *
+ * <p>1.21.1's {@code SavedData} passes a {@link HolderLookup.Provider} to both save and load. This
+ * schema stores nothing that needs one — primitives, strings, UUIDs, and resource-location text — so
+ * the lookup-aware methods are thin adapters over {@link #savePayload} and {@link #loadPayload},
+ * which stay provider-neutral. Those two are what the tests and the golden 1.20.1 fixture exercise,
+ * and keeping them free of a provider is what lets a fixture written by the Forge build be read back
+ * here unchanged. FORMAT_VERSION stays 1 across the loader port because the bytes did not move.
  */
 public final class ReputationSavedData extends SavedData {
 
@@ -53,10 +63,16 @@ public final class ReputationSavedData extends SavedData {
     public ReputationSavedData() {
     }
 
+    /**
+     * The 1.21.1 factory triple: create-supplier, lookup-aware load function, and (unused here) an
+     * optional data-fixer type. The mod owns its own schema version, so no vanilla fixer is attached.
+     */
+    private static final SavedData.Factory<ReputationSavedData> FACTORY =
+            new SavedData.Factory<>(ReputationSavedData::new, ReputationSavedData::load);
+
     public static ReputationSavedData get(MinecraftServer server) {
         ServerLevel overworld = server.overworld();
-        return overworld.getDataStorage()
-                .computeIfAbsent(ReputationSavedData::load, ReputationSavedData::new, DATA_NAME);
+        return overworld.getDataStorage().computeIfAbsent(FACTORY, DATA_NAME);
     }
 
     public int loadedVersion() {
@@ -152,8 +168,14 @@ public final class ReputationSavedData extends SavedData {
 
     // --- persistence --------------------------------------------------------
 
+    /** The 1.21.1 adapter. The provider is unused: this schema needs no registry context. */
     @Override
-    public CompoundTag save(CompoundTag tag) {
+    public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
+        return savePayload(tag);
+    }
+
+    /** The provider-neutral serializer. Byte-for-byte what the Forge 1.20.1 build wrote. */
+    CompoundTag savePayload(CompoundTag tag) {
         tag.putInt("version", FORMAT_VERSION);
         CompoundTag playerTag = new CompoundTag();
         players.forEach((uuid, record) -> {
@@ -165,7 +187,13 @@ public final class ReputationSavedData extends SavedData {
         return tag;
     }
 
-    public static ReputationSavedData load(CompoundTag tag) {
+    /** The 1.21.1 adapter. The provider is unused: this schema needs no registry context. */
+    private static ReputationSavedData load(CompoundTag tag, HolderLookup.Provider registries) {
+        return loadPayload(tag);
+    }
+
+    /** The provider-neutral deserializer, and what the golden 1.20.1 fixture is read through. */
+    public static ReputationSavedData loadPayload(CompoundTag tag) {
         ReputationSavedData data = new ReputationSavedData();
         data.loadedVersion = tag.contains("version") ? tag.getInt("version") : FORMAT_VERSION;
         if (data.loadedVersion > FORMAT_VERSION) {
@@ -229,7 +257,7 @@ public final class ReputationSavedData extends SavedData {
     /** Test seam: a full save/load round trip, exercising the real NBT path. */
     public ReputationSavedData roundTripForTest() {
         List<UUID> before = new ArrayList<>(players.keySet());
-        ReputationSavedData reloaded = load(save(new CompoundTag()));
+        ReputationSavedData reloaded = loadPayload(savePayload(new CompoundTag()));
         if (reloaded.players.size() != before.stream().filter(id -> !players.get(id).isEmpty()).count()) {
             McaReputation.LOGGER.debug("[MCA: Reputation] round trip dropped empty player records, as designed");
         }

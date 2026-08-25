@@ -1,13 +1,13 @@
 package dev.otectus.mcareputation.compat;
 
-import forge.net.mca.client.gui.InteractScreen;
+import net.conczin.mca.client.gui.InteractScreen;
 import net.minecraft.client.gui.screens.Screen;
 
 /**
  * The client-side half of the MCA compatibility layer: recognising MCA's own screens (spec §28.1).
  *
  * <p>Kept in {@code compat} with the rest of the MCA imports, so §11's rule — only this package may
- * touch {@code forge.net.mca.*} — holds on the client too. Client-only by construction; nothing on a
+ * touch {@code net.conczin.mca.*} — holds on the client too. Client-only by construction; nothing on a
  * dedicated server references it.
  *
  * <p><b>Why a type check and not a mixin.</b> {@code InteractScreen} keeps its villager in a private

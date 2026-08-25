@@ -10,14 +10,15 @@ import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
-import net.minecraftforge.client.event.ScreenEvent;
-import net.minecraftforge.client.settings.KeyConflictContext;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
+import net.neoforged.neoforge.client.event.ScreenEvent;
+import net.neoforged.neoforge.client.settings.KeyConflictContext;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 
 import java.util.Optional;
 
@@ -32,7 +33,7 @@ import java.util.Optional;
  * <p>The keybind ships <b>unbound</b> on purpose. A default key in a modpack with dozens of mods is a
  * conflict waiting to happen, and this screen is reachable without it.
  */
-@Mod.EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT)
+@EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT)
 public final class ReputationClient {
 
     /**
@@ -65,8 +66,12 @@ public final class ReputationClient {
             InputConstants.UNKNOWN.getValue(), // unbound by default (§28.1)
             "key.categories.mcareputation");
 
-    @Mod.EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT,
-            bus = Mod.EventBusSubscriber.Bus.MOD)
+    /**
+     * Mod-bus handlers. The Forge build needed an explicit {@code bus = Bus.MOD} selector here;
+     * NeoForge routes each method by whether its event type is an {@code IModBusEvent}, so the
+     * selector is gone and both of these land on the mod bus automatically.
+     */
+    @EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT)
     public static final class ModBus {
 
         private ModBus() {
@@ -76,13 +81,52 @@ public final class ReputationClient {
         public static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
             event.register(OPEN_REPUTATION);
         }
+
+        /**
+         * Installs the client half of the packet dispatch seam (§36.5).
+         *
+         * <p>This replaces Forge's {@code DistExecutor}, which NeoForge 1.21.1 removed. Because this
+         * class is {@code Dist.CLIENT}-only, naming {@link ClientReputationData} here is safe; the
+         * common {@code ClientPacketHandler} never does, which is what keeps a dedicated server from
+         * resolving a single client class.
+         *
+         * <p>Runs during client setup, so it is in place long before a client can join a world, and
+         * it does not need {@code Minecraft.getInstance().player} to exist.
+         */
+        @SubscribeEvent
+        public static void onClientSetup(FMLClientSetupEvent event) {
+            dev.otectus.mcareputation.network.ClientPacketHandler.install(
+                    new dev.otectus.mcareputation.network.ClientPacketHandler.Sink() {
+
+                        @Override
+                        public void acceptSnapshot(
+                                dev.otectus.mcareputation.network.ReputationNetwork.SnapshotS2C packet) {
+                            ClientReputationData.acceptSnapshot(packet);
+                        }
+
+                        @Override
+                        public void openScreen() {
+                            ClientReputationData.openScreen();
+                        }
+
+                        @Override
+                        public void acceptChange(
+                                dev.otectus.mcareputation.network.ReputationNetwork.ChangeS2C packet) {
+                            ClientReputationData.acceptChange(packet);
+                        }
+
+                        @Override
+                        public void acceptToast(
+                                dev.otectus.mcareputation.network.ReputationNetwork.TierToastS2C packet) {
+                            ClientReputationData.acceptToast(packet);
+                        }
+                    });
+        }
     }
 
     @SubscribeEvent
-    public static void onClientTick(TickEvent.ClientTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    public static void onClientTick(ClientTickEvent.Post event) {
+        // No phase check: the Post subtype already is the end phase.
         clientTick++;
         ClientReputationData.flushChanges();
         while (OPEN_REPUTATION.consumeClick()) {
@@ -159,7 +203,7 @@ public final class ReputationClient {
     // ------------------------------------------------------------------
 
     @SubscribeEvent
-    public static void onLoggedOut(net.minecraftforge.client.event.ClientPlayerNetworkEvent.LoggingOut event) {
+    public static void onLoggedOut(net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent.LoggingOut event) {
         // A cached snapshot from one world must never be shown in another.
         ClientReputationData.clear();
         lastInteractedEntityId = 0;

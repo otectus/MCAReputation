@@ -24,13 +24,13 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.OwnableEntity;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.living.LivingDeathEvent;
-import net.minecraftforge.event.entity.living.LivingHurtEvent;
-import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.common.Mod;
+import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
 
 import java.util.List;
 import java.util.Optional;
@@ -46,10 +46,10 @@ import java.util.UUID;
  * already owned by another system, or impossible to attribute reliably. Detecting fewer things well
  * is the design.
  *
- * <p>Everything in this class is server side. The Forge damage and death events fire on both sides;
- * each handler bails immediately on a client level, so no client ever computes standing.
+ * <p>Everything in this class is server side. The damage and death events fire on both sides; each
+ * handler bails immediately on a client level, so no client ever computes standing.
  */
-@Mod.EventBusSubscriber(modid = McaReputation.MOD_ID)
+@EventBusSubscriber(modid = McaReputation.MOD_ID)
 public final class ReputationGameplayEvents {
 
     private static int tickCounter;
@@ -65,14 +65,19 @@ public final class ReputationGameplayEvents {
      * Records harm to a villager, and separately notes when a villager harms a <em>player</em> so the
      * self-defence window has something to consult.
      *
-     * <p>Uses {@link LivingHurtEvent} rather than {@code LivingAttackEvent} because it carries the
-     * final damage figure after armour and absorption — {@code minimumIncidentDamage} is meant to
-     * ignore chip damage, and a pre-mitigation number would not do that. Runs at
-     * {@link EventPriority#LOWEST} so any other mod that intends to cancel the hit has already done
-     * so; a cancelled event is not a deed.
+     * <p>Uses {@link LivingDamageEvent.Post} — the 1.21.1 successor to Forge's {@code LivingHurtEvent}
+     * — because {@link LivingDamageEvent.Post#getNewDamage()} is the health actually lost after armour,
+     * enchantments, absorption and every other reduction. {@code minimumIncidentDamage} is meant to
+     * ignore chip damage, and a pre-mitigation number would not do that, which rules out
+     * {@code LivingIncomingDamageEvent} for this purpose.
+     *
+     * <p>{@code receiveCanceled = false} is gone with the event: {@code Post} fires after the damage
+     * has been applied and is not the cancellable stage, so a hit another mod cancelled never reaches
+     * here at all. {@link EventPriority#LOWEST} is kept only for deterministic ordering against other
+     * post-damage listeners; it is no longer what guarantees cancellation handling.
      */
-    @SubscribeEvent(priority = EventPriority.LOWEST, receiveCanceled = false)
-    public static void onLivingHurt(LivingHurtEvent event) {
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onLivingHurt(LivingDamageEvent.Post event) {
         LivingEntity target = event.getEntity();
         if (target.level().isClientSide() || !(target.level() instanceof ServerLevel level)) {
             return;
@@ -82,7 +87,9 @@ public final class ReputationGameplayEvents {
         // A villager hitting a player: not an incident, but the fact the self-defence rule needs.
         if (target instanceof ServerPlayer player) {
             Entity attacker = event.getSource().getEntity();
-            if (attacker != null && McaCompat.isMcaVillager(attacker)) {
+            // Only a hit that actually cost health opens the self-defence window; a fully absorbed
+            // or negated swing is not something the player needs to answer for retaliating against.
+            if (attacker != null && event.getNewDamage() > 0.0F && McaCompat.isMcaVillager(attacker)) {
                 AssaultTracker.recordVillagerHitPlayer(attacker.getUUID(), player.getUUID(), gameTime);
             }
             return;
@@ -102,7 +109,7 @@ public final class ReputationGameplayEvents {
         if (!McaCompat.isLivingMcaVillager(target)) {
             return;
         }
-        if (event.getAmount() < McaReputationConfig.minimumIncidentDamage()) {
+        if (event.getNewDamage() < McaReputationConfig.minimumIncidentDamage()) {
             return;
         }
         Optional<ServerPlayer> responsible = attribute(event.getSource());
@@ -115,7 +122,7 @@ public final class ReputationGameplayEvents {
             // A villager with no village and none nearby has no public to be outraged (§12.2).
             return;
         }
-        recordAssault(level, player, target, community.get(), event.getAmount(), gameTime);
+        recordAssault(level, player, target, community.get(), event.getNewDamage(), gameTime);
     }
 
     private static void recordAssault(ServerLevel level, ServerPlayer player, LivingEntity victim,
@@ -359,8 +366,9 @@ public final class ReputationGameplayEvents {
      * with nobody online does nothing at all (§34).
      */
     @SubscribeEvent
-    public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || !McaReputationConfig.enabled()) {
+    public static void onServerTick(ServerTickEvent.Post event) {
+        // No phase check: the Post subtype already is the end phase.
+        if (!McaReputationConfig.enabled()) {
             return;
         }
         if (++tickCounter < McaReputationConfig.reconcileOnlineIntervalTicks()) {

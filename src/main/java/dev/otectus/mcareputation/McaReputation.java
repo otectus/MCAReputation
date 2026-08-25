@@ -37,11 +37,11 @@ public final class McaReputation {
 
     /** A {@link ResourceLocation} in this mod's namespace. */
     public static ResourceLocation id(String path) {
-        return new ResourceLocation(MOD_ID, path);
+        return ResourceLocation.fromNamespaceAndPath(MOD_ID, path);
     }
 
     /** A {@link ResourceLocation} in MCA: Quests' namespace, for the compatibility aliases. */
     public static ResourceLocation questsId(String path) {
-        return new ResourceLocation(QUESTS_MOD_ID, path);
+        return ResourceLocation.fromNamespaceAndPath(QUESTS_MOD_ID, path);
     }
 }

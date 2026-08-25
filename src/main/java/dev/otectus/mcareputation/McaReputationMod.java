@@ -15,29 +15,34 @@ import net.minecraft.commands.synchronization.ArgumentTypeInfo;
 import net.minecraft.commands.synchronization.ArgumentTypeInfos;
 import net.minecraft.commands.synchronization.SingletonArgumentInfo;
 import net.minecraft.core.registries.Registries;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.event.AddReloadListenerEvent;
-import net.minecraftforge.event.RegisterCommandsEvent;
-import net.minecraftforge.event.server.ServerStoppedEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.fml.ModLoadingContext;
-import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.config.ModConfig;
-import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
-import net.minecraftforge.registries.DeferredRegister;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.ModContainer;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.config.ModConfig;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.AddReloadListenerEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
+import net.neoforged.neoforge.registries.DeferredRegister;
 
 /**
- * The Forge entry point (spec §9, §11).
+ * The NeoForge entry point (spec §9, §11).
  *
  * <p>Registration order matters and is fixed here: config specs before anything reads them, the
- * network channel during common setup, and the datapack listener on every reload including world
- * load. Nothing in this class touches a client type — the client half lives entirely in
+ * network payloads on the mod bus, and the datapack listener on every reload including world load.
+ * Nothing in this class touches a client type — the client half lives entirely in
  * {@code dev.otectus.mcareputation.client} and is reached only through {@code Dist.CLIENT} event
  * subscribers, so a dedicated server never loads it (§36.5).
  *
- * <p>Optional companions are not referenced at all. MCA: Quests and MCA: Conversations each own their
- * side of the integration and register with this mod's public API when they load; nothing here knows
- * whether they exist (§9.2).
+ * <p><b>Payloads are registered from the mod bus, not from common setup.</b> The Forge build called
+ * {@code ReputationNetwork.register} out of {@code FMLCommonSetupEvent.enqueueWork}; NeoForge throws
+ * if a payload is registered after {@code RegisterPayloadHandlersEvent} has passed, so the listener
+ * is added directly instead.
+ *
+ * <p>Optional companions are not referenced at all. MCA: Quests, MCA: Conversations, and MCA: Crime
+ * each own their side of the integration and register with this mod's public API when they load;
+ * nothing here knows whether they exist (§9.2).
  */
 @Mod(McaReputation.MOD_ID)
 public final class McaReputationMod {
@@ -51,18 +56,16 @@ public final class McaReputationMod {
                 CommunityArgument.class, SingletonArgumentInfo.contextFree(CommunityArgument::community)));
     }
 
-    public McaReputationMod() {
-        ModLoadingContext context = ModLoadingContext.get();
-        context.registerConfig(ModConfig.Type.COMMON, McaReputationConfig.COMMON_SPEC,
+    public McaReputationMod(IEventBus modBus, ModContainer modContainer) {
+        modContainer.registerConfig(ModConfig.Type.COMMON, McaReputationConfig.COMMON_SPEC,
                 "mcareputation-common.toml");
-        context.registerConfig(ModConfig.Type.CLIENT, McaReputationConfig.CLIENT_SPEC,
+        modContainer.registerConfig(ModConfig.Type.CLIENT, McaReputationConfig.CLIENT_SPEC,
                 "mcareputation-client.toml");
 
-        net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus()
-                .addListener(this::onCommonSetup);
-        COMMAND_ARGUMENT_TYPES.register(
-                net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
-        MinecraftForge.EVENT_BUS.register(this);
+        COMMAND_ARGUMENT_TYPES.register(modBus);
+        modBus.addListener(ReputationNetwork::register);
+        modBus.addListener(this::onCommonSetup);
+        NeoForge.EVENT_BUS.register(this);
 
         // Seed the registries with the built-in fallback ladder so that tier lookups are meaningful
         // even before the first datapack reload — for example while another mod's setup runs.
@@ -70,8 +73,7 @@ public final class McaReputationMod {
                 ReputationTiers.BUILTIN_DEFAULT));
     }
 
-    private void onCommonSetup(FMLCommonSetupEvent event) {
-        event.enqueueWork(ReputationNetwork::register);
+    private void onCommonSetup(net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent event) {
         McaReputation.LOGGER.info("[MCA: Reputation] {} ready (API v{})", McaReputation.MOD_ID,
                 dev.otectus.mcareputation.api.McaReputationApi.getApiVersion());
     }

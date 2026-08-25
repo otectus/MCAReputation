@@ -2,7 +2,7 @@ package dev.otectus.mcareputation.client;
 
 import dev.otectus.mcareputation.community.CommunityKey;
 
-import javax.annotation.Nullable;
+import org.jetbrains.annotations.Nullable;
 import java.util.Optional;
 
 /**
