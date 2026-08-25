@@ -1,7 +1,8 @@
 plugins {
-    id 'eclipse'
     id 'idea'
-    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'eclipse'
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.141'
 }
 
 version = mod_version
@@ -11,71 +12,82 @@ base {
     archivesName = mod_id
 }
 
-// Minecraft 1.18+ ships Java 17; target it explicitly (a modern system default JDK is 21+,
-// which ForgeGradle 6 does not tolerate as the Gradle JVM).
-java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+// Minecraft 1.20.5+ requires Java 21; the foojay resolver provisions it if the system JDK is older.
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
 println "Java: ${System.getProperty 'java.version'}, JVM: ${System.getProperty 'java.vm.version'} (${System.getProperty 'java.vendor'}), Arch: ${System.getProperty 'os.arch'}"
 
-minecraft {
-    mappings channel: mapping_channel, version: mapping_version
+neoForge {
+    version = project.neoforge_version
 
-    copyIdeResources = true
+    parchment {
+        minecraftVersion = project.parchment_minecraft
+        mappingsVersion = project.parchment_version
+    }
 
     runs {
-        configureEach {
-            workingDirectory project.file('run')
-            property 'forge.logging.markers', 'REGISTRIES'
-            property 'forge.logging.console.level', 'debug'
-            mods {
-                "${mod_id}" {
-                    source sourceSets.main
-                }
-            }
-        }
-
         client {
-            property 'forge.enabledGameTestNamespaces', mod_id
+            client()
+            gameDirectory = project.file('run')
         }
-
         server {
-            property 'forge.enabledGameTestNamespaces', mod_id
-            args '--nogui'
+            server()
+            gameDirectory = project.file('run-server')
+            programArgument '--nogui'
         }
-
         gameTestServer {
-            property 'forge.enabledGameTestNamespaces', mod_id
+            type = 'gameTestServer'
+            gameDirectory = project.file('run-gametest')
         }
+        configureEach {
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+
+    // The test suite is not purely JVM-side: it touches ResourceLocation, Component,
+    // RegistryFriendlyByteBuf, Brigadier and NBT, so it needs real Minecraft classes on the
+    // test classpath. Do not remove this just because most domain tests look pure.
+    unitTest {
+        enable()
+        testedMod = mods."${mod_id}"
     }
 }
 
 repositories {
-    // MCA Reborn via Modrinth Maven. exclusiveContent keeps this repo scoped to the
-    // maven.modrinth group and routes resolution through ForgeGradle's deobf pipeline.
-    exclusiveContent {
-        forRepository {
-            maven {
-                name = 'Modrinth'
-                url = 'https://api.modrinth.com/maven'
-            }
-        }
-        forRepositories(fg.repository)
-        filter { includeGroup 'maven.modrinth' }
+    // MCA Reborn. The loader is in the artifact id (mca-neoforge), so there is no
+    // Fabric/NeoForge ambiguity here. Scoped so nothing else resolves through it.
+    maven {
+        name = 'Conczin'
+        url = 'https://maven.conczin.net/Artifacts'
+        content { includeGroup 'net.conczin.mca' }
     }
 }
 
 dependencies {
-    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-
-    // MCA Reborn — obfuscated production (Universal) jar, remapped to our dev mappings by
-    // fg.deobf. Every MCA access is isolated behind dev.otectus.mcareputation.compat (spec 11).
+    // MCA Reborn - a mojmap NeoForge mod jar, so it loads as a real mod under runClient/runServer.
+    // (On 1.20.1 it could not: MCA shipped a Forgix-merged universal jar and needed fg.deobf.)
     //
-    // NOTE: no Architectury dependency, deliberately (spec 9.1). MCA 7.6 declares it itself and
-    // MCA 7.7 dropped it; this mod contains no Architectury reference of any kind.
-    implementation fg.deobf("maven.modrinth:minecraft-comes-alive-reborn:${mca_version}")
+    // transitive = false on purpose: MCA's POM declares runtime dependencies on
+    // maven.modrinth:sodium and maven.modrinth:ferrite-core, which do not resolve without the
+    // Modrinth Maven. Nothing this mod needs is lost.
+    //
+    // Every MCA access is isolated behind dev.otectus.mcareputation.compat (spec 11).
+    //
+    // NOTE: no Architectury dependency, deliberately (spec 9.1). MCA 1.21.1 dropped it entirely
+    // and this mod contains no Architectury reference of any kind.
+    implementation("net.conczin.mca:mca-neoforge:${mca_version}") {
+        transitive = false
+    }
 
-    // Unit tests for the pure (non-MCA, non-Minecraft-runtime) domain: score math, decay,
-    // awareness, codecs, NBT round trips, tiers, pruning, migration.
+    // Unit tests for the pure (non-MCA) domain: score math, decay, awareness, codecs, NBT round
+    // trips, tiers, pruning, migration - plus the port's payload and saved-data compatibility tests.
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.10.2'
     testImplementation 'org.junit.jupiter:junit-jupiter-params:5.10.2'
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.10.2'
@@ -87,21 +99,37 @@ test {
     testLogging {
         events 'passed', 'skipped', 'failed'
     }
+    // ModDevGradle's unitTest runner works out of build/minecraft-junit, so the tests that read
+    // the real shipped resources off disk (ContentValidationTest, LangParityTest,
+    // OptionalClassloadTest, NeoForgePortLintTest) cannot reach src/ through a relative path.
+    systemProperty 'mcareputation.projectRoot', project.projectDir.absolutePath
 }
 
-// Expand metadata placeholders into mods.toml / pack.mcmeta at build time.
+// Expand metadata placeholders into neoforge.mods.toml at build time.
 tasks.named('processResources', ProcessResources).configure {
+    // Without this the expansion is written in the platform charset (windows-1252 here), which
+    // cannot encode every character the metadata might contain and emits '?' bytes mid-sequence.
+    // The result is a neoforge.mods.toml that is not valid UTF-8, and NightConfig rejects the file.
+    filteringCharset = 'UTF-8'
+
     var replaceProperties = [
-            minecraft_version: minecraft_version, minecraft_version_range: minecraft_version_range,
-            forge_version: forge_version, forge_version_range: forge_version_range,
-            loader_version_range: loader_version_range,
-            mca_version_range: mca_version_range,
-            mod_id: mod_id, mod_name: mod_name, mod_license: mod_license, mod_version: mod_version,
-            mod_authors: mod_authors, mod_description: mod_description,
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neoforge_version       : neoforge_version,
+            neoforge_version_range : neoforge_version_range,
+            loader_version_range   : loader_version_range,
+            mca_version            : mca_version,
+            mca_version_range      : mca_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+            mod_authors            : mod_authors,
+            mod_description        : mod_description,
     ]
     inputs.properties replaceProperties
 
-    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+    filesMatching(['META-INF/neoforge.mods.toml']) {
         expand replaceProperties + [project: project]
     }
 }
@@ -117,37 +145,128 @@ tasks.named('jar', Jar).configure {
                 'Implementation-Vendor'   : mod_authors
         ])
     }
-    finalizedBy 'reobfJar'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
+    options.release = 21
 }
 
 /**
- * Spec 36.5 static jar check: the shipped artifact must not contain a single class from an
- * optional companion mod, from Architectury, or from any other mod. Reputation depends on
- * nothing but Forge and MCA, so anything under those package roots means a build-file mistake.
+ * Spec 36.5 static jar check: the shipped artifact must be exactly what we intend to ship.
+ *
+ * Three failure modes this exists for. A dependency getting bundled: MCA and NeoForge are both on
+ * the compile path, and a stray `implementation files(...)` would quietly fold their classes in,
+ * producing a jar that overrides the real mod at runtime. Metadata drift: a jar carrying the old
+ * Forge-spelled mods.toml loads as far as the main menu and then behaves as if the mod were not
+ * installed. And a stale port: a surviving constant-pool reference to net/minecraftforge/ or the
+ * Forgix-relocated forge/net/mca/ root means a mechanical port missed a file.
+ *
+ * The bytecode scan reads each class entry as ISO-8859-1 and searches for slash-form package
+ * strings. That is not a semantic verifier, but it reliably catches stale constant-pool entries -
+ * which a jar-entry-prefix check alone cannot.
  */
 tasks.register('checkJarContents') {
     dependsOn tasks.named('jar')
+    def jarFile = tasks.named('jar', Jar).flatMap { it.archiveFile }
+    def expectedVersion = project.version.toString()
+    inputs.file(jarFile)
+    outputs.upToDateWhen { false }
+
     doLast {
-        def forbidden = ['dev/otectus/mcaquests/', 'dev/otectus/mcaconversations/',
+        def problems = []
+        def entries = [] as Set
+        def classMajors = [] as Set
+        def bytecodeHits = [:].withDefault { [] }
+        String implementationVersion = null
+
+        // Package roots that must not appear as a packaged entry NOR as a constant-pool string.
+        def forbidden = ['net/conczin/mca/', 'forge/net/mca/', 'net/minecraftforge/',
+                         'dev/otectus/mcaquests/', 'dev/otectus/mcaconversations/',
                          'dev/otectus/mcacrime/', 'dev/architectury/', 'me/shedaniel/',
-                         'forge/net/mca/']
-        def jarFile = tasks.named('jar').get().archiveFile.get().asFile
-        def offenders = []
-        new java.util.zip.ZipFile(jarFile).withCloseable { zip ->
+                         'org/spongepowered/']
+
+        new java.util.zip.ZipFile(jarFile.get().asFile).withCloseable { zip ->
             zip.entries().each { entry ->
-                if (forbidden.any { entry.name.startsWith(it) }) {
-                    offenders << entry.name
+                entries << entry.name
+                if (entry.name == 'META-INF/MANIFEST.MF') {
+                    zip.getInputStream(entry).withCloseable { input ->
+                        implementationVersion = new java.util.jar.Manifest(input)
+                                .mainAttributes.getValue('Implementation-Version')
+                    }
+                } else if (entry.name.endsWith('.class')) {
+                    byte[] bytes = zip.getInputStream(entry).withCloseable { it.bytes }
+                    if (bytes.length >= 8) {
+                        classMajors << (((bytes[6] & 0xFF) << 8) | (bytes[7] & 0xFF))
+                    }
+                    def text = new String(bytes, 'ISO-8859-1')
+                    forbidden.each { prefix ->
+                        if (text.contains(prefix)) {
+                            bytecodeHits[prefix] << entry.name
+                        }
+                    }
                 }
             }
         }
-        if (!offenders.isEmpty()) {
-            throw new GradleException("Shaded classes found in ${jarFile.name}: ${offenders.take(20)}")
+
+        // --- required metadata ---
+        ['META-INF/neoforge.mods.toml', 'assets/mcareputation/lang/en_us.json',
+         'data/mcareputation/mcareputation/reputation_tiers/default.json',
+         'data/mcareputation/mcareputation/incidents/villager_assaulted.json',
+         'data/mcaquests/mcaquests/titles/honored_of_village.json'].each {
+            if (!entries.contains(it)) {
+                problems << "missing ${it}"
+            }
         }
-        logger.lifecycle("checkJarContents: ${jarFile.name} is clean (no shaded companion/Architectury/MCA classes).")
+        // NeoForge synthesises pack metadata for mods; a shipped 1.20.1 pack.mcmeta would be stale.
+        ['META-INF/mods.toml', 'pack.mcmeta'].each {
+            if (entries.contains(it)) {
+                problems << "${it} must not be packaged (Forge-era file)"
+            }
+        }
+        if (entries.any { it.endsWith('.mixins.json') }) {
+            problems << 'a mixin config is packaged; this mod ships none by design (spec 11)'
+        }
+
+        // --- nothing shaded, and no stale platform references ---
+        forbidden.each { prefix ->
+            def shaded = entries.findAll { it.startsWith(prefix) && it.endsWith('.class') }
+            if (!shaded.isEmpty()) {
+                problems << "${shaded.size()} shaded class(es) under ${prefix}, e.g. ${shaded.first()}"
+            }
+        }
+        // Our own two compat classes legitimately name MCA in their constant pool; nothing else may.
+        def mcaAllowed = ['dev/otectus/mcareputation/compat/McaCompat.class',
+                          'dev/otectus/mcareputation/compat/McaScreenCompat.class'] as Set
+        bytecodeHits.each { prefix, hits ->
+            def offenders = prefix == 'net/conczin/mca/'
+                    ? hits.findAll { !mcaAllowed.contains(it) }
+                    : hits
+            if (!offenders.isEmpty()) {
+                problems << "bytecode reference to ${prefix} in ${offenders.take(5)}"
+            }
+        }
+        def nested = entries.findAll { it.endsWith('.jar') }
+        if (!nested.isEmpty()) {
+            problems << "nested jar(s): ${nested.join(', ')}"
+        }
+
+        // --- build identity ---
+        if (implementationVersion != expectedVersion) {
+            problems << "Implementation-Version is '${implementationVersion}', expected '${expectedVersion}'"
+        }
+        // 65 == Java 21. A stray 61 would mean something compiled against the wrong release.
+        def wrong = classMajors.findAll { it != 65 }
+        if (!wrong.isEmpty()) {
+            problems << "class-file major version(s) ${wrong} present; Java 21 is 65"
+        }
+
+        if (!problems.isEmpty()) {
+            throw new GradleException("checkJarContents failed:" + System.lineSeparator()
+                    + "  - " + problems.join(System.lineSeparator() + "  - "))
+        }
+        logger.lifecycle("checkJarContents: ${entries.size()} entries, nothing shaded, "
+                + "no Forge or relocated-MCA bytecode references, all classes Java 21.")
     }
 }
 
