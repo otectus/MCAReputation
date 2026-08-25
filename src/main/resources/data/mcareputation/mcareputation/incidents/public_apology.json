@@ -1,0 +1,19 @@
+{
+  "display": { "translate": "mcareputation.incident.public_apology" },
+  "default_delta": 1,
+  "visibility": "witnessed",
+  "severity": "trivial",
+  "tags": ["amends"],
+  "retention_ticks": 336000,
+  "decay": {
+    "type": "linear_to_zero",
+    "delay_ticks": 24000,
+    "amount_per_day": 1
+  },
+  "gossip": {
+    "tone": "neutral",
+    "phrase": "mcareputation.gossip.public_apology",
+    "with": ["player", "subject"]
+  },
+  "max_override_abs": 4
+}

@@ -1,0 +1,22 @@
+{
+  "display": { "translate": "mcareputation.incident.villager_killed" },
+  "default_delta": -40,
+  "visibility": "witnessed",
+  "severity": "severe",
+  "tags": ["crime", "violence", "killing"],
+  "decay": { "type": "none" },
+  "resolution": {
+    "apologized": 1.0,
+    "atoned": 0.5,
+    "forgiven": 0.0,
+    "disproven": 0.0
+  },
+  "gossip": {
+    "tone": "condemnation",
+    "phrase": "mcareputation.gossip.villager_killed",
+    "with": ["player", "subject"]
+  },
+  "pinned": false,
+  "retain_unwitnessed": true,
+  "max_override_abs": 60
+}

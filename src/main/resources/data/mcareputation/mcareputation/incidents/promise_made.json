@@ -1,0 +1,9 @@
+{
+  "display": { "translate": "mcareputation.incident.promise_made" },
+  "default_delta": 0,
+  "visibility": "private",
+  "severity": "trivial",
+  "tags": ["promise"],
+  "decay": { "type": "none" },
+  "retention_ticks": 1680000
+}

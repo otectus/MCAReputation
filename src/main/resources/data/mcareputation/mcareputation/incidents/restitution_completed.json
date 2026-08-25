@@ -1,0 +1,14 @@
+{
+  "display": { "translate": "mcareputation.incident.restitution_completed" },
+  "default_delta": 4,
+  "visibility": "village",
+  "severity": "moderate",
+  "tags": ["amends", "service"],
+  "decay": { "type": "none" },
+  "gossip": {
+    "tone": "approval",
+    "phrase": "mcareputation.gossip.restitution_completed",
+    "with": ["player", "subject"]
+  },
+  "max_override_abs": 40
+}

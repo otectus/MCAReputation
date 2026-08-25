@@ -1,0 +1,14 @@
+{
+  "display": { "translate": "mcareputation.incident.quest_completed" },
+  "default_delta": 0,
+  "visibility": "village",
+  "severity": "minor",
+  "tags": ["service", "quest"],
+  "decay": { "type": "none" },
+  "gossip": {
+    "tone": "praise",
+    "phrase": "mcareputation.gossip.quest_completed",
+    "with": ["player", "source_title"]
+  },
+  "max_override_abs": 100
+}
