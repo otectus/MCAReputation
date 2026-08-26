@@ -16,6 +16,11 @@ description='''${mod_description}'''
 
 # MCA: Reputation is meaningless without MCA Reborn, so MCA is a mandatory dependency. We load
 # AFTER MCA so its entities, village manager, and saved data are present.
+#
+# The range stays [7.6,8): MCA kept the mod id "mca" across its 7.7.1 package rename
+# (net.mca -> net.conczin.mca), and this mod supports both roots by resolving MCA at runtime
+# (compat/McaReflect). Do NOT narrow this range to work around a future MCA move — add the new
+# package root to McaReflect.SUPPORTED_ROOTS instead, so existing servers keep loading.
 [[dependencies.${mod_id}]]
     modId="forge"
     mandatory=true

@@ -51,7 +51,8 @@ non-blocking direction.
 
 ### 2.2 Known 7.6 → 7.7 drift
 
-`forge.net.mca.entity.ai.relationship.Personality` is an `enum` on 7.6 and a registry-backed class on
+`<root>.entity.ai.relationship.Personality` (where `<root>` is `forge.net.mca` on MCA 7.6-7.7.0 and
+`forge.net.conczin.mca` on 7.7.1+) is an `enum` on 7.6 and a registry-backed class on
 7.7, so neither `name()` nor `getPersonalityId()` exists on both. Conversations already solved this by
 going through `Object#toString()` and normalising (`"ODD"` / `"mca:odd"` → `"odd"`). Reputation
 consumes personality only as an opaque display/gossip hint, so it uses the same `toString()` path.
@@ -64,7 +65,7 @@ directs us to retain the dimension. `CommunityKey(ResourceLocation dimension, in
 
 ### 2.4 Interaction-screen injection point (§39 item 6) — **no mixin needed**
 
-`forge.net.mca.client.gui.InteractScreen` extends `AbstractDynamicScreen` → `ExtendedScreen` →
+`<root>.client.gui.InteractScreen` extends `AbstractDynamicScreen` → `ExtendedScreen` →
 `net.minecraft.client.gui.screens.Screen`, and its `render`/`mouseClicked` overrides both call
 `super`, so vanilla `renderables`/`children` are rendered and clickable. Its villager field is
 `private final VillagerLike<?> villager` with **no getter** on either version.
@@ -217,8 +218,12 @@ thrown-potion, and tamed-pet cases in §20.1 without any per-source special casi
 > `util/EnumCodecs`, `util/StrictCodecs`, `network/ClientPacketHandler`, `network/ReputationFeedback`,
 > `incident/BuiltinIncidents`, `incident/IncidentDisplay`, `incident/ResolutionPolicy`,
 > `reputation/Titles`, and `reputation/ServiceContext` were added. The parenthetical below on
-> `McaCompat` is also out of date: `compat/McaScreenCompat` imports `forge.net.mca.*` too — the real
-> rule, asserted by `OptionalClassloadTest`, is that only the `compat` *package* may.
+> `McaCompat` is also out of date, and so is the rule it described. 0.2.1 abandoned the
+> "only `compat` may import `forge.net.mca.*`" rule entirely: MCA renamed its base package to
+> `net.conczin.mca` in 7.7.1, and a compile-time import bound the binary to one root, so one
+> quarantined package still meant a server-killing `NoClassDefFoundError`. `OptionalClassloadTest`
+> now asserts the stronger rule — *nothing* imports MCA — and `compat/McaReflect` resolves every
+> MCA class and method by name at runtime across both package roots.
 
 Follows §11 exactly, with these concrete additions:
 
@@ -232,7 +237,7 @@ dev.otectus.mcareputation
 │   └── event/  ReputationChangedEvent, ReputationTierChangedEvent,
 │               ReputationIncidentCreatedEvent, ReputationIncidentResolvedEvent,
 │               ReputationTitleGrantedEvent
-├── compat/  McaCompat (ONLY class importing forge.net.mca.*)
+├── compat/  McaCompat, McaScreenCompat, McaReflect (MCA is resolved by NAME; nothing imports it)
 ├── community/  CommunityKey, CommunityMetadata, CommunityResolver
 ├── incident/  IncidentDefinition, IncidentRegistry, IncidentLoader, IncidentValidator,
 │              IncidentRecord, IncidentStatus, IncidentVisibility, IncidentSeverity,

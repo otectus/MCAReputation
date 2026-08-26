@@ -67,12 +67,17 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
 
-    // MCA Reborn — obfuscated production (Universal) jar, remapped to our dev mappings by
-    // fg.deobf. Every MCA access is isolated behind dev.otectus.mcareputation.compat (spec 11).
+    // MCA Reborn — obfuscated production (Universal) jar, remapped to our dev mappings by fg.deobf.
+    //
+    // runtimeOnly, NOT implementation: nothing in this mod compiles against MCA any more. MCA moves
+    // its base package between releases (net.mca -> net.conczin.mca in 7.7.1), so every MCA class and
+    // method is resolved by name at runtime in compat/McaReflect. Keeping MCA off the compile
+    // classpath makes that a COMPILE ERROR rather than a test failure if anyone reintroduces an
+    // import, while runClient/runServer still get a real MCA to load.
     //
     // NOTE: no Architectury dependency, deliberately (spec 9.1). MCA 7.6 declares it itself and
     // MCA 7.7 dropped it; this mod contains no Architectury reference of any kind.
-    implementation fg.deobf("maven.modrinth:minecraft-comes-alive-reborn:${mca_version}")
+    runtimeOnly fg.deobf("maven.modrinth:minecraft-comes-alive-reborn:${mca_version}")
 
     // Unit tests for the pure (non-MCA, non-Minecraft-runtime) domain: score math, decay,
     // awareness, codecs, NBT round trips, tiers, pruning, migration.
@@ -132,8 +137,12 @@ tasks.withType(JavaCompile).configureEach {
 tasks.register('checkJarContents') {
     dependsOn tasks.named('jar')
     doLast {
+        // Every MCA package root, old and new. The shipped jar must contain none of them: MCA is
+        // reached by name at runtime, so a class file under any of these roots means a build mistake.
         def forbidden = ['dev/otectus/mcaquests/', 'dev/otectus/mcaconversations/',
-                         'dev/architectury/', 'me/shedaniel/', 'forge/net/mca/']
+                         'dev/architectury/', 'me/shedaniel/',
+                         'forge/net/mca/', 'forge/net/conczin/mca/',
+                         'net/mca/', 'net/conczin/mca/']
         def jarFile = tasks.named('jar').get().archiveFile.get().asFile
         def offenders = []
         new java.util.zip.ZipFile(jarFile).withCloseable { zip ->

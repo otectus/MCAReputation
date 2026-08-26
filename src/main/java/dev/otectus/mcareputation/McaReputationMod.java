@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation;
 
 import dev.otectus.mcareputation.command.CommunityArgument;
+import dev.otectus.mcareputation.compat.McaReflect;
 import dev.otectus.mcareputation.command.ReputationCommand;
 import dev.otectus.mcareputation.data.ReputationReloadListener;
 import dev.otectus.mcareputation.event.AssaultTracker;
@@ -71,6 +72,9 @@ public final class McaReputationMod {
 
     private void onCommonSetup(FMLCommonSetupEvent event) {
         event.enqueueWork(ReputationNetwork::register);
+        // Resolve MCA once, before any gameplay, so an incompatible MCA is one ERROR line at startup
+        // rather than a surprise mid-tick. See McaReflect for why this cannot be a compile-time bind.
+        event.enqueueWork(McaReflect::selfTest);
         McaReputation.LOGGER.info("[MCA: Reputation] {} ready (API v{})", McaReputation.MOD_ID,
                 dev.otectus.mcareputation.api.McaReputationApi.getApiVersion());
     }

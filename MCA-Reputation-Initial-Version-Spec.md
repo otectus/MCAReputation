@@ -289,7 +289,10 @@ dev.otectus.mcareputation
 
 Rules:
 
-- Only `compat.mca` may import `forge.net.mca.*`.
+- Nothing may import MCA. MCA renames its base package between releases (`net.mca` →
+  `net.conczin.mca` in 7.7.1), so `compat.McaReflect` resolves every MCA class and method by
+  name at runtime and the rest of `compat` is the policy layer on top. A compile-time import
+  binds the binary to one package root and crashes servers running the other.
 - The public API must expose Minecraft/Java types, not MCA internal types.
 - Pure score, tier, decay, awareness, NBT, and validation logic must remain testable without a running game.
 - Client classes must not load on a dedicated server.

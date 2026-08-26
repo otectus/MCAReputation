@@ -32,7 +32,15 @@ class OptionalClassloadTest {
             "dev/otectus/mcaconversations/",
             "dev/architectury/",
             "me/shedaniel/",
-            "dev/ftb/mods/");
+            "dev/ftb/mods/",
+            // MCA itself, under every package root it has ever shipped. MCA moves its base
+            // package between releases, so this mod resolves it by name at runtime and no
+            // compiled class may name an MCA type. 0.2.0 crashed servers because McaCompat did.
+            // These are slash-form (constant-pool internal form); McaReflect's probe table is
+            // dot-form, so it does not trip this check. Do not "tidy" either form into the other.
+            // "net/mca/" also catches "forge/net/mca/", and likewise for the conczin root.
+            "net/mca/",
+            "net/conczin/mca/");
 
     private static Path compiledClasses() {
         URL marker = OptionalClassloadTest.class.getResource("/dev/otectus/mcareputation/McaReputation.class");
@@ -62,11 +70,18 @@ class OptionalClassloadTest {
     }
 
     /**
-     * §11: only {@code compat} may import {@code forge.net.mca.*}. Everything else must go through it,
-     * so an MCA signature change has exactly one place to be fixed.
+     * §11, restated for a mod whose dependency renames its own packages: <b>nothing</b> may import
+     * an MCA type, not even {@code compat}.
+     *
+     * <p>0.2.0 allowed {@code compat} to import {@code forge.net.mca.*} on the reasoning that one
+     * quarantined package meant one place to fix. That was not enough. MCA renamed its base package
+     * to {@code net.conczin.mca} in 7.7.1, and because the import bound the binary to one root at
+     * compile time, "one place to fix" still meant a server-killing {@code NoClassDefFoundError} for
+     * anyone who updated MCA before this mod. MCA is now resolved by name in {@code McaReflect}, so
+     * an import of any MCA root is a regression to that bug.
      */
     @Test
-    void onlyTheCompatPackageImportsMca() throws IOException {
+    void noSourceFileImportsMca() throws IOException {
         Path sourceRoot = Paths.get("src/main/java/dev/otectus/mcareputation");
         if (!Files.isDirectory(sourceRoot)) {
             return; // running from a packaged artifact rather than the source tree
@@ -74,17 +89,38 @@ class OptionalClassloadTest {
         List<String> offenders = new ArrayList<>();
         try (Stream<Path> files = Files.walk(sourceRoot)) {
             for (Path file : files.filter(path -> path.toString().endsWith(".java")).toList()) {
-                if (file.toString().replace('\\', '/').contains("/compat/")) {
-                    continue;
-                }
                 String source = Files.readString(file, StandardCharsets.UTF_8);
-                if (source.contains("import forge.net.mca.")) {
-                    offenders.add(sourceRoot.relativize(file).toString());
+                for (String line : source.lines().toList()) {
+                    String trimmed = line.strip();
+                    if (trimmed.startsWith("import ")
+                            && (trimmed.contains("net.mca.") || trimmed.contains("net.conczin.mca."))) {
+                        offenders.add(sourceRoot.relativize(file) + ": " + trimmed);
+                    }
                 }
             }
         }
-        assertTrue(offenders.isEmpty(), () -> "MCA imports outside compat:\n  "
+        assertTrue(offenders.isEmpty(), () -> "MCA must be resolved by name, never imported:\n  "
                 + String.join("\n  ", offenders));
+    }
+
+    /**
+     * The runtime probe must keep covering both MCA generations in the wild.
+     *
+     * <p>Asserted against the source rather than the field so the check needs no classloading: a
+     * tidy-up that drops either root would silently strip support for half the installed base —
+     * {@code forge.net.mca} is MCA 7.6 through 7.7.0, {@code forge.net.conczin.mca} is 7.7.1+.
+     */
+    @Test
+    void mcaReflectStillProbesBothKnownPackageRoots() throws IOException {
+        Path resolver = Paths.get("src/main/java/dev/otectus/mcareputation/compat/McaReflect.java");
+        if (!Files.isReadable(resolver)) {
+            return; // running from a packaged artifact rather than the source tree
+        }
+        String source = Files.readString(resolver, StandardCharsets.UTF_8);
+        assertTrue(source.contains("\"forge.net.conczin.mca\""),
+                "the MCA 7.7.1+ package root must stay in SUPPORTED_ROOTS");
+        assertTrue(source.contains("\"forge.net.mca\""),
+                "the MCA 7.6-7.7.0 package root must stay in SUPPORTED_ROOTS");
     }
 
     /** §36.5: a dedicated server must never be handed a client class by mod initialisation. */

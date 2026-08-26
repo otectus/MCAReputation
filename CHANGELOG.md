@@ -5,6 +5,42 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — unreleased
+
+A crash fix. MCA Reborn `7.7.1-alpha.2` renamed its base package from `net.mca` to `net.conczin.mca`,
+which moved the Forgix-relocated Forge classes from `forge.net.mca.*` to `forge.net.conczin.mca.*`.
+MCA kept the mod id `mca`, so Forge accepted the pairing and the server started — then died on the
+first `LivingHurtEvent`.
+
+### Fixed
+
+- **MCA: Reputation no longer crashes servers running MCA 7.7.1 or newer.** 0.2.0 linked against
+  `forge.net.mca.*` at compile time, so on 7.7.1 the first villager-or-mob damage event threw
+  `NoClassDefFoundError: forge/net/mca/entity/VillagerEntityMCA` out of `McaCompat` and took the
+  server tick loop with it — reproducible with `/kill` on any mob. MCA is now resolved by name at
+  runtime, and one jar supports MCA 7.6 through 7.7.1+.
+- **The compat layer actually fails safe now.** Every method already claimed to, but the
+  `instanceof` guard sat *outside* the `try/catch`, and class resolution happens at exactly that
+  instruction — which is why a package rename became a crash rather than a degrade. The type test is
+  now inside the guarded region, and `LinkageError` is caught ahead of `Throwable` throughout.
+- **An unsupported MCA now degrades instead of dying.** A linkage failure trips a one-shot latch that
+  disables MCA integration for the session and logs a single error naming the detected MCA build and
+  the supported package roots — rather than re-throwing once per damage tick. Standing already in
+  the save stays intact and readable with `/mcareputation`.
+
+### Added
+
+- **A startup self-test.** Common setup resolves MCA once and logs one line — either
+  `MCA integration active: mca <version> (package root <root>)`, or an error naming exactly which
+  members failed to resolve. It checks against the MCA actually installed, which compiling against a
+  pinned version cannot do, and it is the first thing to look for in a bug report.
+
+### Changed
+
+- MCA is no longer a compile-time dependency (`runtimeOnly` in `build.gradle`), so reintroducing an
+  MCA `import` is now a compile error rather than a test failure. `OptionalClassloadTest` asserts the
+  stronger rule that replaced spec §11's old one: *nothing* imports MCA, not even `compat`.
+
 ## [0.2.0] — unreleased
 
 A full-tree review before first release: score-integrity fixes, command and interface repairs,
