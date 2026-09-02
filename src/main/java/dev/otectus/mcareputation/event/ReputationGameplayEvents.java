@@ -2,6 +2,7 @@ package dev.otectus.mcareputation.event;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.CoreIncidentKind;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
 import dev.otectus.mcareputation.community.CommunityKey;
@@ -87,6 +88,15 @@ public final class ReputationGameplayEvents {
         }
 
         if (!McaReputationConfig.enabled() || !McaReputationConfig.coreAssaultEnabled()) {
+            return;
+        }
+        if (CoreIncidentAuthorities.isClaimed(CoreIncidentKind.MCA_VILLAGER_ASSAULT)) {
+            // A companion (MCA: Crime, typically) is detecting this itself and will file the same
+            // incident through the API. Recording here as well would charge one punch twice.
+            //
+            // Checked before the villager test rather than after: the claim is a single list read and
+            // the test is a reflective MCA lookup, so this ordering makes the claimed case cheaper on a
+            // hook that fires for every point of damage dealt in the world.
             return;
         }
         if (!McaCompat.isLivingMcaVillager(target)) {
@@ -186,6 +196,9 @@ public final class ReputationGameplayEvents {
         }
         if (!McaReputationConfig.enabled() || !McaReputationConfig.coreKillingEnabled()) {
             return;
+        }
+        if (CoreIncidentAuthorities.isClaimed(CoreIncidentKind.MCA_VILLAGER_KILL)) {
+            return; // as in onLivingHurt: a companion owns this deed and files it itself
         }
         if (!McaCompat.isMcaVillager(victim)) {
             return;

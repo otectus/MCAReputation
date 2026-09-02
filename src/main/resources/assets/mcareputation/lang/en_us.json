@@ -14,6 +14,8 @@
   "mcareputation.screen.pinned": "remembered",
   "mcareputation.screen.deeds_truncated": "…showing the %s most recent of %s deeds",
   "mcareputation.screen.community_index": "%s of %s",
+  "mcareputation.screen.previous_community": "Previous village",
+  "mcareputation.screen.next_community": "Next village",
 
   "_comment_button": "=== Entry points ===",
   "mcareputation.button.standing": "Standing",

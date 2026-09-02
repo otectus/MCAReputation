@@ -79,7 +79,7 @@ needs permission level 2, and every change is written to the server log with who
 /mcareputation tiers [ladder]                the loaded tier ladder
 /mcareputation validate                      check every loaded datapack definition
 /mcareputation migrate status|run …          legacy MCA: Quests standing import
-/mcareputation debug community|witnesses
+/mcareputation debug community|witnesses|authorities|standing [<player>] [<community>]
 ```
 
 Communities are written `<dimension>/<villageId>`, e.g. `minecraft:overworld/3`, or the literal `here`.

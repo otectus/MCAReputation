@@ -217,6 +217,60 @@ A listener that throws is caught and logged; the committed transaction stands.
 
 ---
 
+## `CoreIncidentAuthority` — avoiding double detection
+
+*Added in 0.3.0.*
+
+This mod detects two things by itself: harming an MCA villager, and killing one. A companion that
+detects the same deeds — MCA: Crime does — would otherwise file a second incident for the same punch,
+and neither mod can prevent that from its own side. An authority is how one of them claims the deed.
+
+```java
+public enum CoreIncidentKind {
+    MCA_VILLAGER_ASSAULT,   // -> mcareputation:villager_assaulted
+    MCA_VILLAGER_KILL       // -> mcareputation:villager_killed
+}
+
+public interface CoreIncidentAuthority {
+    ResourceLocation authorityId();
+    boolean owns(CoreIncidentKind kind);
+    default String authorityName() { return authorityId().toString(); }
+}
+```
+
+```java
+CoreIncidentAuthorityRegistration claim =
+        McaReputationApi.registerCoreIncidentAuthority(myAuthority);
+
+boolean held = claim.isActive()
+        && McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT);
+
+claim.close();   // detection returns to this mod on the very next event
+```
+
+While `owns` answers true, this mod's automatic hook for that kind records nothing and the claimant is
+expected to file the equivalent incident through `record` instead. **File the same incident type** —
+`CoreIncidentKind.incidentType()` names it — so the ledger, scores, decay, gossip and witnesses behave
+identically whichever mod detected the deed. A companion that claims a kind and then records something
+of its own invention has removed the detection without replacing it.
+
+`owns` is asked **per event**, not once at registration, and that is deliberate: a companion's
+detection is usually conditional on its own config, and a one-time flag would let an operator switch
+that config off and silently disable villager detection in *both* mods. Because it is on the damage
+path, `owns` must be cheap — a couple of boolean reads — and must not call back into this API.
+
+Failure directions are chosen so nothing is ever lost quietly. An authority that throws is treated as
+**not** claiming, so detection stays here: the risk is a duplicate somebody can see in the ledger,
+rather than a deed recorded by nobody. Closing the registration is the only way to withdraw a claim,
+and it is idempotent.
+
+`/mcareputation debug authorities` shows what is registered and which kinds are currently claimed.
+
+Registering an authority is **additive to API version 1** — `getApiVersion()` deliberately does not
+move, because a bridge written against the original version is still fully compatible.
+
+---
+
 ## `ReputationMirror`
 
 For an add-on that needs a usable fallback copy if this mod is later removed.

@@ -3,6 +3,7 @@ package dev.otectus.mcareputation.api;
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
 import dev.otectus.mcareputation.community.CommunityResolver;
 import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.reputation.ReputationService;
@@ -377,6 +378,48 @@ public final class McaReputationApi {
     // ------------------------------------------------------------------
     // Integration plumbing
     // ------------------------------------------------------------------
+
+    /**
+     * Claims one or more {@linkplain CoreIncidentKind core detection kinds} for a companion mod, so
+     * this mod stops detecting them itself (§20, §25.1).
+     *
+     * <p>This exists to solve double detection and nothing else. Two mods watching the same
+     * {@code LivingHurtEvent} and both filing an assault charge one punch twice, and neither can fix
+     * that alone. The claimant files the equivalent incident through {@link #record} instead; because
+     * it is the same incident type, scores, decay, gossip, witnesses and the ledger are unchanged.
+     *
+     * <p>Call at mod setup. Hold the returned handle: closing it is the only way to withdraw the
+     * claim, after which detection resumes here on the very next event.
+     *
+     * <p>Additive to API version 1 rather than a break. A companion written against the original
+     * version neither calls this nor is affected by it, so {@link #getApiVersion()} deliberately does
+     * not move — bumping it would make every existing bridge refuse an API it is still fully
+     * compatible with.
+     *
+     * @return the handle that withdraws the claim; never null
+     * @since MCA: Reputation 0.3.0
+     */
+    public static CoreIncidentAuthorityRegistration registerCoreIncidentAuthority(CoreIncidentAuthority authority) {
+        return CoreIncidentAuthorities.register(authority);
+    }
+
+    /**
+     * Whether a companion is currently detecting this kind, leaving this mod stood down for it.
+     *
+     * <p>The question a claimant asks straight after registering, to confirm the claim actually took —
+     * and the question an operator is really asking when villager assaults stop appearing in the
+     * ledger. Also drives {@code /mcareputation debug authorities}.
+     *
+     * <p>False when nobody has claimed it, when every claimant's own configuration currently says it
+     * is not detecting, and when a claimant threw while being asked. That last case is deliberate:
+     * detection staying here risks a visible duplicate, whereas assuming the claim held would lose the
+     * deed silently.
+     *
+     * @since MCA: Reputation 0.3.0
+     */
+    public static boolean hasExternalAuthority(CoreIncidentKind kind) {
+        return CoreIncidentAuthorities.isClaimed(kind);
+    }
 
     /** Registers a fallback mirror (§25.1). Call at mod setup; see {@link ReputationMirror}. */
     public static void registerMirror(ReputationMirror mirror) {

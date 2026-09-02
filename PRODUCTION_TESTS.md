@@ -123,6 +123,51 @@ For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not install
 | Remove Reputation | Quests reads its mirrored fallback; standing is what it was | ⬜ |
 | Reinstall Reputation | Canonical data resumes; no duplication | ⬜ |
 
+## 2b. Standing that does not move, and deliveries that do not register
+
+The 0.3.0 report — *"no matter what I do I have '25 more to acquaintance' and my rank is 'stranger',
+additionally delivery quests don't seem to be registering"*. See [DIAGNOSIS.md](DIAGNOSIS.md); this is
+the script that reproduces it and confirms the fix. **Run it on a dedicated server with a separate
+client as well as in singleplayer**: the display half is a server-side selection bug whose symptom is
+identical in both, and only a second client proves the sync leg carries the corrected selection.
+
+Set up once: a world with **two** MCA villages within 128 blocks of each other (the default
+`defaultVillageSearchRadius`), so "the village you are standing in" and "the village that gave you the
+quest" can differ. Note both ids from `/mcareputation debug community`.
+
+### The observability gate — run this first, and after every step below
+
+| Step | Expected | ⬜ |
+|---|---|:---:|
+| `/mcareputation debug standing` | Prints raw score, baseline, incident count, active tier and its threshold, next tier and the **exact remaining amount**, the store being read, the community the screen would select, whether you have a record there, registered mirrors, and the MCA binding status | ⬜ |
+| `/mcareputation debug standing <player> <dimension>/<villageId>` | Same, for another player and an explicit community; an operator can answer "is the number moving?" without a source checkout | ⬜ |
+| A community with no record | Says `NO RECORD … the screen shows a synthesised floor-tier detail here (score 0), which is not a stored value` — the line that distinguishes "0 stored" from "nothing stored" | ⬜ |
+
+### S1 — standing moves, and the screen shows the standing you have
+
+| Step | Expected | ⬜ |
+|---|---|:---:|
+| Complete any bundled MCA: Quests quest | Standing with the giver's village rises; `debug standing` shows a non-zero score and a shrinking "remaining"; the action-bar line appears | ⬜ |
+| Same, with `debugLogging = true` in MCA: Quests | One DEBUG line naming the quest when a quest genuinely declares no outcome — never silence | ⬜ |
+| Repeat until the score reaches 25 | Tier flips to Acquaintance exactly at 25, the toast fires once, and the caption becomes "50 more to Friend" | ⬜ |
+| Walk to the **other** village, one you have no record with, and open the standing screen | It shows the village you have standing in — **not** "Stranger, 25 more to Acquaintance". This is the regression | ⬜ |
+| With standing in exactly one village, stand in the other and open the screen | The `<` `>` selector arrows are present, and one press reaches the village you have standing with | ⬜ |
+| Click a villager of the unknown village and press **Standing** | *Now* it says Stranger — an explicit look at that village is the one case where the floor-tier detail is the honest answer | ⬜ |
+| Relog, then restart the server | Score, tier and remaining are unchanged | ⬜ |
+| **Dedicated server, second client:** both players complete quests for the same village | Each sees only their own figure; neither sees the other's; both update without reopening the screen twice | ⬜ |
+
+### S2 — a delivery credits the moment it is handed over
+
+| Step | Expected | ⬜ |
+|---|---|:---:|
+| Accept a `deliver_to_villager` quest with `"recipient": {"mode": "self"}` (e.g. *last banner home*), then right-click the giver holding the payload | Objective goes 1/1 within a second; the payload is consumed | ⬜ |
+| Accept *a warm meal* / *a meal for mother* (`mode: family`, `require: nearby`) | The quest log names the bound parent by name and village, and the highlight glows them | ⬜ |
+| **Walk the parent well away from the giver** (or wait for them to wander), then hand over the bread | Objective goes 1/1. Before the fix this credited only while the parent stood within 12 blocks of the *giver* — i.e. never, once you had gone to find them | ⬜ |
+| Accept the same quest when no relative can be bound (kill or remove the parent between the offer being drawn and accepting) | One WARN naming the quest and the relation, and the quest log shows a reason line instead of a silent 0/1 | ⬜ |
+| Deliver to a **different** villager of the same relation | Nothing is credited and nothing is consumed | ⬜ |
+| Relog mid-quest, then finish the delivery | Progress and the bound recipient both survive; the delivery still credits | ⬜ |
+| **Dedicated server, second client:** both players run the same delivery quest from the same giver | Each binds their own recipient; one player's hand-over never credits the other's objective | ⬜ |
+
 ## 3. Security and exploit scenarios
 
 | Attempt | Expected | ⬜ |

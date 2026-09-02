@@ -185,18 +185,21 @@ public final class ReputationNetwork {
                     }
                 }
             }
-            // Fall back to wherever the player is standing, then to their best-known community.
-            if (player.level() instanceof ServerLevel level) {
-                Optional<CommunityKey> here = CommunityResolver.resolveNearest(level, player.blockPosition());
-                if (here.isPresent()) {
-                    return here;
-                }
-            }
-            return ReputationService.knownCommunities(player.server, player.getUUID(), gameTime).stream()
-                    .findFirst()
-                    .map(ReputationSnapshot::community);
+            // Nothing was asked about in particular, so the answer is positional or historical.
+            Optional<CommunityKey> here = player.level() instanceof ServerLevel level
+                    ? CommunityResolver.resolveNearest(level, player.blockPosition())
+                    : Optional.empty();
+            boolean knowsHere = here.isPresent()
+                    && dev.otectus.mcareputation.state.ReputationSavedData.get(player.server)
+                            .knows(player.getUUID(), here.get());
+            Optional<CommunityKey> bestKnown =
+                    ReputationService.knownCommunities(player.server, player.getUUID(), gameTime).stream()
+                            .findFirst()
+                            .map(ReputationSnapshot::community);
+            return SnapshotSelection.unprompted(here, knowsHere, bestKnown);
         }
     }
+
 
     // ==================================================================
     // S2C
@@ -423,7 +426,12 @@ public final class ReputationNetwork {
         Optional<ReputationSnapshot> detail = selected
                 .flatMap(key -> ReputationService.snapshot(player.server, player.getUUID(), key, gameTime));
         // A community the player has never interacted with has no record. Rather than showing nothing,
-        // synthesise an empty selection so the screen can say "you are a stranger here" honestly.
+        // synthesise an empty selection so the screen can say "you are a stranger here".
+        //
+        // That is honest only when this community is genuinely the one to talk about -- the villager
+        // the player clicked, the village they asked for, or the one they are standing in when they
+        // have no standing anywhere. It is a lie when it displaces a record they do have, which is
+        // what it used to do; SnapshotSelection is where that is now decided, and why.
         Optional<SelectedDetail> selectedDetail = detail.map(ReputationNetwork::toDetail);
         if (selectedDetail.isEmpty() && selected.isPresent()) {
             selectedDetail = Optional.of(emptyDetail(player, selected.get(), gameTime));

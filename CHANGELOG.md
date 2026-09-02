@@ -5,6 +5,151 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — unreleased
+
+Three things: the standing screen now looks like part of the game, it now shows the standing you
+actually have, and MCA: Crime can finally be installed alongside this mod without the two of them
+charging the same punch twice.
+
+The screen was drawn entirely with flat `fill()` rectangles in a violet scheme of its own — a poor fit
+for a screen the player reaches one click from MCA's own interaction screen, and not what §28.2 asks
+for when it says to use MCA's visual language rather than a visually unrelated menu. Nothing about
+what it *says* changed with the redraw: the same server-authoritative snapshot, the same fields, the
+same empty states.
+
+What it said was wrong for a different reason, and a player found it before we did: *"no matter what I
+do I have '25 more to acquaintance' and my rank is 'stranger'."* The number was not stuck — the screen
+was reading a different village from the one their deeds were written to, and answering honestly about
+a place they had never been. That is the Fixed section below, and `DIAGNOSIS.md` carries the full
+pipeline trace, the alternatives that were ruled out, and the evidence for each.
+
+The compatibility half is the core-incident authority handshake below. It is a small API and a large
+consequence: it is the difference between the two mods being usable together and not.
+
+### Changed
+
+- **The standing screen is drawn from textures, in vanilla's container idiom.** A new sheet at
+  `assets/mcareputation/textures/gui/reputation.png` supplies the panel frame, the sunken well the
+  deed ledger sits in, the progress track and its fill, the scroller channel and thumb, the section
+  rule, and the selector arrow faces. The frame is pixel-identical to vanilla's own container GUI —
+  every colour was sampled from the 1.20.1 client jar rather than eyeballed, including the detail
+  that the four corners are not alike: where the light and dark bevels meet, vanilla steps the
+  outline out by one pixel and leaves a single face-coloured pixel in the notch. The generator that
+  produces the sheet, `tools/GenerateGuiTexture.java`, is committed alongside it, so the art can be
+  re-derived and reviewed rather than edited blind.
+- **Every sprite is nine-sliced, so the panel still shrinks to fit.** §28.2's small-GUI-scale rules
+  rule out a fixed-size container texture, so corners are copied and edges repeat instead. When the
+  panel gets short enough that the ledger's heading would be written over the tier line, the heading
+  and its rule are dropped rather than overlapped.
+- **The community selector uses arrow sprites instead of the literal characters `<` and `>`,** which
+  is the one part of a Minecraft screen that never looks native. The new `SpriteButton` overrides
+  only the label step of vanilla's button rendering, so the frame, the hover, focus and disabled
+  states, the click sound and resource-pack compatibility remain vanilla's own. Each button keeps a
+  translatable message for narration and reuses it as a tooltip, since it no longer has a caption.
+- **Two text colours, both vanilla's.** Fifteen inline hex literals became `0x404040` and
+  `0x7F7F7F`, the pair vanilla labels its container screens with. That also settles §28.4 outright:
+  with a neutral palette there is no polarity left to encode in colour, so the sign, status and
+  wording on each deed's meta line carry it alone rather than merely reinforcing a hue.
+- **The header and the deed ledger are wrapped once when the screen opens,** rather than
+  re-measured on every frame. It is cheaper, but the point is that the drawn height and the height
+  the scrollbar is scaled against were previously two separate walks over the same data and could
+  drift apart; now there is one.
+- The scroller channel is reserved beside the ledger whether or not it overflows. Reserving it only
+  when needed is circular — the wrap width would depend on the wrap — and put the measured and drawn
+  heights in disagreement for exactly the lists sitting on the boundary.
+
+### Fixed
+
+- **The standing screen showed "Stranger — 25 more to Acquaintance" for players who had earned
+  standing.** Asked for a snapshot with no village named, the server picked whichever village was
+  nearest the player's feet and detailed that one; a village with no record is answered with a
+  synthesised floor-tier detail, so a player standing anywhere within the 128-block search radius of
+  a village they had never dealt with was shown a score of zero however much standing they had
+  elsewhere. The write key (the home village of the villager a deed was about) and the read key (the
+  nearest village to the player) are answers to two different questions.
+
+  Where you are now wins only when you have a history there; otherwise the reply details the standing
+  you actually have; and "you are a stranger here" is reserved for a village you explicitly asked
+  about, or for a player who genuinely has no standing anywhere. The decision has a name and a home
+  of its own, `SnapshotSelection`, so it can be tested and printed rather than being three lines
+  inside a packet handler. No packet shape changed and the protocol version is unmoved.
+
+- **With one village on record, there was no way to reach it from an unknown one.** The selector
+  arrows were drawn only when the community *list* held more than one entry, but the detailed
+  community need not be in that list at all. One real village plus the village you are standing in is
+  two destinations; the arrows now appear, and cycling forward from an off-list selection enters the
+  list at the front instead of skipping its first entry. `SelectorMath` holds both decisions as pure
+  functions.
+
+### Added
+
+- **`/mcareputation debug standing [<player>] [<community>]`** — everything the standing pipeline
+  believes about one player, in one screenful: the raw stored score and baseline, the incident count,
+  the active tier and its threshold, the next tier and the exact remaining amount, which store is
+  being read, which community the screen would open on and whether the player has a record there,
+  the registered mirrors, the integration toggles, and the MCA binding status.
+
+  This is the deliverable half of the bug above. Two opposite faults — a stored number that never
+  moves, and a stored number the screen is not reading — produce the same sentence out of a player,
+  and until now telling them apart needed a source checkout. The "screen would select" line beside
+  the "standing in / has record" line is the pair whose disagreement *is* the fault.
+
+- **Full compatibility with MCA: Crime**, through a core-incident authority handshake.
+
+  This mod detects two deeds entirely by itself — harming an MCA villager and killing one — and MCA:
+  Crime detects the same two. Two mods watching the same `LivingHurtEvent` and both filing an assault
+  do not produce a disagreement, they produce two penalties for one punch, and neither mod can prevent
+  that from its own side. There was no supported way for either to stand down, so the integration was
+  unbuildable: MCA: Crime's adapter has been written against
+  `McaReputationApi.registerCoreIncidentAuthority` for a version, and until now that method did not
+  exist. Installing both mods meant either double-counted villager harm or no integration at all.
+
+  A companion now claims one or more `CoreIncidentKind`s and this mod stands down from detecting them,
+  while continuing to own everything downstream — the claimant files the same incident type through
+  `record`, so the ledger, scores, decay, gossip and witnesses are byte-for-byte what they would have
+  been. `McaReputationApi.hasExternalAuthority` reports whether a claim is currently held, and
+  `/mcareputation debug authorities` answers the question an operator actually has, which is "why have
+  villager assaults stopped appearing in the ledger".
+
+  Three decisions in it are worth stating, because each has a silent failure mode on the other side:
+
+  - **Ownership is asked per event, not read once at registration.** A companion's detection is
+    normally conditional on its own config; a one-time flag would let an operator switch that config
+    off and silently disable villager detection in *both* mods, with nothing in either log to connect
+    it to. Asking every time means detection returns here on the very next event, no restart.
+  - **A claimant that throws is treated as not claiming,** so detection stays with this mod. The risk
+    of that direction is a duplicate, which is visible in the ledger the moment it happens; the risk
+    of the other is a deed recorded by nobody. A silent loss is worse than a loud duplicate.
+  - **Withdrawal is by handle, not by `unregister(authority)`.** Companions commonly register an
+    anonymous implementation, and an equality-based removal works right up until a config reload leaks
+    a claim nothing can withdraw — which would suppress this mod's detection permanently.
+
+  Additive to API version 1: `getApiVersion()` deliberately does **not** move, because a bridge
+  written against the original version neither calls this nor is affected by it, and bumping it would
+  make every existing bridge refuse an API it is still fully compatible with.
+
+- **The scroller can be dragged,** and clicking the bare channel takes it to the pointer, as
+  vanilla's own lists do. The mapping from a pointer position back to a scroll offset lives in
+  `ScrollMath` next to the one that paints the thumb, so the two cannot part company.
+
+### Fixed
+
+- **The scroller no longer creeps away from the pointer as it is dragged.** `ScrollMath.thumbY`
+  truncated, so wherever the division landed just under an integer the thumb repainted one pixel
+  above where it had been grabbed. It rounds now. This surfaced from asserting the round trip
+  through the new drag mapping, not from the re-skin itself.
+- **The scroller thumb can no longer be taller than the track it runs in.** Its sixteen-pixel floor,
+  there to keep it grabbable, could exceed the available track at punishing GUI scales and produce a
+  negative offset.
+
+### Notes
+
+- 244 automated tests, including a round-trip assertion between the scrollbar's paint and drag
+  mappings.
+- The frame was verified against the one vanilla actually ships by regenerating it at
+  `container/generic_54.png`'s own dimensions and diffing, but the screen has not yet been looked at
+  in a running client. [PRODUCTION_TESTS.md](PRODUCTION_TESTS.md) still governs a tag.
+
 ## [0.2.1] — unreleased
 
 A crash fix. MCA Reborn `7.7.1-alpha.2` renamed its base package from `net.mca` to `net.conczin.mca`,
