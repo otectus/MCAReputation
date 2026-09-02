@@ -59,7 +59,7 @@ Nothing is ever deleted — but deeds can be **resolved**. An incident can becom
 *atoned*, *forgiven*, or *disproven*, each reducing its remaining penalty by that deed's own
 rules. A public apology is a small good deed in its own right, but it never erases the original —
 being sorry isn't the same as making it right. Some wounds also fade on their own (an assault
-decays after a couple of days); a killing never does.
+starts decaying after a couple of days); a killing never does.
 
 ### 🛡️ Deliberately hard to farm
 The mod automatically watches a *narrow, reliable* set of actions: attacking villagers (one
@@ -72,8 +72,10 @@ situations, conversation choices, datapacks, and commands.
 ### 🖥️ The Standing screen
 A **Standing** button on MCA's own villager interaction screen (plus an optional keybind, unbound
 by default) opens a clean summary: the village, your tier and progress toward the next, your
-titles, and the scrollable list of what they remember. Prefer mystery? A client toggle hides
-exact numbers and shows only tiers and qualitative progress.
+titles, and the scrollable list of what they remember. It is drawn from a texture sheet in
+vanilla's own container idiom — the same panel frame, the same two text colours, a real draggable
+scrollbar — so it reads as part of the game rather than as a menu bolted on beside it. Prefer
+mystery? A client toggle hides exact numbers and shows only tiers and qualitative progress.
 
 ### 🔒 Multiplayer-safe by construction
 Everything is server-authoritative — clients can't submit scores, deeds, or witnesses. Storage is
@@ -89,42 +91,62 @@ changes behavior only: no saved record is ever deleted by a config change.
 | | |
 |---|---|
 | **Minecraft** | 1.20.1 |
-| **Mod loader** | Forge 47.x |
-| **Required** | [MCA Reborn](https://www.curseforge.com/minecraft/mc-mods/minecraft-comes-alive-reborn) `7.6` – `7.7` (built against 7.7.0-beta.2; **not** 7.7.0-beta.1, which is broken upstream) |
+| **Mod loader** | Forge 47.x (built with 47.4.10) |
+| **Required** | [MCA Reborn](https://www.curseforge.com/minecraft/mc-mods/minecraft-comes-alive-reborn) `7.6` – `7.7` |
 | **Only if MCA needs it** | [Architectury API](https://www.curseforge.com/minecraft/mc-mods/architectury-api) — required by MCA 7.6, dropped by MCA 7.7. This mod never asks for it |
 | **Optional** | MCA: Quests — quests, projects, and situations become named public deeds |
 | **Optional** | MCA: Conversations — villagers gossip about your actual deeds and treat you accordingly |
+| **Optional** | MCA: Crime — safe to install alongside; the two mods agree on who detects villager harm |
 
 > This is an **add-on** — MCA Reborn must be installed for it to do anything.
+
+**One jar, every supported MCA.** MCA renamed its base package in 7.7.1, the kind of change that
+normally forces a version-specific build. This mod resolves MCA by name at runtime instead, so the
+same file works on 7.6 and on 7.7.1+, and an MCA it genuinely cannot read switches its own
+integration off and logs why rather than taking the server down. Runtime-tested against MCA
+`7.6.20`, `7.7.0-beta.2`, and `7.7.1-alpha.2`; at startup the log states which MCA build was
+detected and whether integration came up — that line is the first thing to include in a bug report.
 
 ---
 
 ## Optional: MCA: Quests integration
 
-With **MCA: Quests** (1.1.0+) installed, Reputation becomes the single source of truth for
-village standing. Quest completions, failures, and abandons, project phases, and situation
-outcomes all become *named* public deeds — `Finished "The Missing Shipment"`, not an anonymous
-`+12`. The Journal shows the same canonical standing, and restitution quests can formally resolve
-a bad deed as *atoned*.
+With **MCA: Quests** installed, Reputation becomes the single source of truth for village
+standing. Quest completions, failures, and abandons, project phases, and situation outcomes all
+become *named* public deeds — `Finished "The Missing Shipment"`, not an anonymous `+12`. The
+Journal shows the same canonical standing, and restitution quests can formally resolve a bad deed
+as *atoned*.
 
 Your existing Quests reputation, tier progress, and titles **migrate automatically** into the new
 per-player system — nothing you earned is lost, and Quests alone keeps working exactly as before
 if Reputation isn't installed.
 
----
+*Quests `1.1.0+` integrates; the Journal's **[View Deeds]** link needs `1.2.0+`.*
 
 ## Optional: MCA: Conversations integration
 
-With **MCA: Conversations** (1.1.0+) installed, the ledger comes alive. Villagers who know a deed
-tell it as gossip — by name, in their own personality's voice, once per teller. Your public
-standing gently colors trust and respect in conversation checks (it flavors outcomes; it can
-never single-handedly decide them). And you can simply ask: *"What do people think of me around
-here?"* — the answer names your tier, you can press for the deed people actually talk about, and
-if something genuinely hangs over you, an amends path lets you apologise in public and have it
+With **MCA: Conversations** installed, the ledger comes alive. Villagers who know a deed tell it
+as gossip — by name, in their own personality's voice, once per teller. Your public standing
+gently colors trust and respect in conversation checks (it flavors outcomes; it can never
+single-handedly decide them). And you can simply ask: *"What do people think of me around here?"*
+— the answer names your tier, you can press for the deed people actually talk about, and if
+something genuinely hangs over you, an amends path lets you apologise in public and have it
 recorded for what an apology is worth.
+
+*Conversations `1.1.0+` integrates; deed gossip and the standing topic need `1.2.0+`.*
 
 All three add-ons together close the loop: a promise made in conversation becomes a quest, the
 finished quest becomes a public deed, and the deed becomes a story the village tells about you.
+
+## Optional: MCA: Crime compatibility
+
+Both mods watch for villagers being harmed, so with no agreement between them, installing both
+would file two penalties for one punch — and neither side could prevent that alone. Since 0.3.0
+there is a public handshake: MCA: Crime claims villager assault and killing, this mod stands down
+from detecting them, and Crime files the *same* deed through the same API. The ledger, scores,
+decay, gossip and witnesses come out identical whichever mod saw it, and giving the claim up
+restores detection here on the very next event, no restart. `/mcareputation debug authorities`
+says who currently holds what.
 
 ---
 
@@ -137,16 +159,17 @@ integration and the legacy migration independently. `config/mcareputation-client
 presentation only: the Standing button, toasts, action-bar feedback, and whether exact scores and
 deltas are shown.
 
----
-
 ## Commands
 
-`/mcareputation` lets any player check their own standing (`get`, `list`, `history`), while
-operators get the full tree: adjust scores, record or resolve incidents, pin notable deeds,
-grant and revoke titles, inspect tier ladders, validate datapack content, and run or inspect the
-legacy migration. Every mutation is audit-logged with who did it and why.
-
----
+`/mcareputation` (alias `/mcarep`) lets any player check their own standing (`get`, `list`,
+`history`), while operators get the full tree: adjust scores, record or resolve incidents, pin
+notable deeds, grant and revoke titles, inspect tier ladders, validate datapack content, and run
+or inspect the legacy migration. A `debug` branch answers support questions directly:
+`debug standing` prints everything the standing pipeline believes about one player — stored score,
+active tier, the exact amount remaining to the next one, which community the screen would open on
+and whether they have a record there, the integration toggles and the MCA binding — and
+`debug community`, `debug witnesses` and `debug authorities` cover the rest. Every mutation is
+audit-logged with who did it and why.
 
 ## For datapack & modpack authors
 
@@ -157,19 +180,16 @@ line, and pack-defined tier ladders can reshape the whole social climb. Legacy `
 and title packs keep loading unchanged. `/mcareputation validate` reports every content problem
 with the exact file and field.
 
----
-
 ## For mod developers
 
 A stable, documented Java API (`dev.otectus.mcareputation.api`) and five Forge events
 (reputation changed, tier changed, incident created, incident resolved, title granted) let other
 mods record deeds, query standing, and react to changes. Every write goes through one atomic,
 idempotent transaction — dedupe keys guarantee a deed lands exactly once, no matter how many
-systems report it.
-
----
+systems report it. A mod that does its own villager-harm detection can claim it through
+`registerCoreIncidentAuthority` so the two never double-count.
 
 ## Status & license
 
-Alpha — first public release, actively developed; feedback and bug reports welcome. Licensed
-**GPL-3.0-only**, matching MCA Reborn.
+**0.3.0** — alpha, first public release, actively developed; feedback and bug reports welcome.
+Licensed **GPL-3.0-only**, matching MCA Reborn.
