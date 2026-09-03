@@ -1,31 +1,45 @@
 package dev.otectus.mcareputation.api;
 
-import dev.otectus.mcareputation.reputation.CoreIncidentAuthorityRegistry;
+import dev.otectus.mcareputation.McaReputation;
+import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
+import dev.otectus.mcareputation.incident.BuiltinIncidents;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The core-incident authority truth table (integration spec §17.2).
+ * The core-incident authority handshake (§20, §25.1): the mechanism that lets MCA: Crime detect
+ * villager assault and killing without this mod recording the same deed a second time.
  *
- * <p>Every row here answers the same question — <em>who produces this deed?</em> — and the property
- * being defended is that the answer is always exactly one party. Two producers charge the player
- * twice for one swing; zero producers is an incident black hole that no log line explains. Of the
- * two, the black hole is far worse, so every ambiguous or broken case must resolve to "Reputation
- * keeps producing".
+ * <p>The behaviours worth pinning are the ones whose failure is silent. A claim that cannot be
+ * withdrawn, or one that survives its owner's config being switched off, disables villager detection
+ * across the whole server with nothing in the log to connect it to.
  */
 class CoreIncidentAuthorityTest {
 
-    private static final ResourceLocation CRIME = ResourceLocation.fromNamespaceAndPath("mcacrime", "crime_detector");
-    private static final ResourceLocation OTHER = ResourceLocation.fromNamespaceAndPath("othermod", "detector");
+    @AfterEach
+    void tearDown() {
+        CoreIncidentAuthorities.clear();
+    }
 
-    /** A stub companion authority whose health and claims the test drives directly. */
-    private record Stub(ResourceLocation id, boolean healthy) implements CoreIncidentAuthority {
+    /** A claimant whose ownership is a mutable switch, exactly as a companion's config would be. */
+    private static final class TestAuthority implements CoreIncidentAuthority {
+        private final ResourceLocation id;
+        boolean owning = true;
+        boolean explode;
+
+        TestAuthority(String path) {
+            this.id = McaReputation.id(path);
+        }
+
         @Override
         public ResourceLocation authorityId() {
             return id;
@@ -33,169 +47,134 @@ class CoreIncidentAuthorityTest {
 
         @Override
         public boolean owns(CoreIncidentKind kind) {
-            return healthy;
+            if (explode) {
+                throw new IllegalStateException("a companion mod with a bug in one boolean");
+            }
+            return owning;
         }
     }
 
-    @BeforeEach
-    @AfterEach
-    void clearRegistry() {
-        CoreIncidentAuthorityRegistry.clear();
-    }
-
-    // ------------------------------------------------------------------ the truth table
-
     @Test
-    void noAuthorityLeavesNativeDetectionOn() {
+    void nothingIsClaimedOnAStandaloneInstall() {
         for (CoreIncidentKind kind : CoreIncidentKind.values()) {
-            assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(kind),
-                    kind + " must be produced natively when nobody has claimed it");
+            assertFalse(McaReputationApi.hasExternalAuthority(kind));
         }
     }
 
     @Test
-    void oneHealthyAuthorityTakesOver() {
-        CoreIncidentAuthorityRegistration handle =
-                CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
+    void aRegisteredAuthorityClaimsTheKindsItOwns() {
+        CoreIncidentAuthorityRegistration registration =
+                McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("crime_detector"));
+        assertTrue(registration.isActive());
+        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
+        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL));
+    }
 
-        assertTrue(handle.isActive());
-        assertEquals(CRIME, handle.authorityId());
-        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
-            assertTrue(CoreIncidentAuthorityRegistry.hasExternalAuthority(kind));
-        }
+    /**
+     * The reason ownership is asked per event rather than read once. A companion whose own detection
+     * is switched off in config must hand the deed straight back, with no re-registration.
+     */
+    @Test
+    void aClaimantThatStopsOwningHandsDetectionBackImmediately() {
+        TestAuthority authority = new TestAuthority("crime_detector");
+        McaReputationApi.registerCoreIncidentAuthority(authority);
+        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
+
+        authority.owning = false;
+
+        assertFalse(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT),
+                "detection must return on the next event, not on the next restart");
     }
 
     @Test
-    void aRegisteredButUnhealthyAuthorityDoesNotClaim() {
-        // The "present but disabled" and "present but incompatible" rows: the bridge registered, then
-        // its handshake failed or its config was switched off. It must answer false, and Reputation
-        // must keep producing rather than trusting the registration itself.
-        CoreIncidentAuthorityRegistry.register(new Stub(CRIME, false));
+    void closingTheRegistrationWithdrawsTheClaim() {
+        CoreIncidentAuthorityRegistration registration =
+                McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("crime_detector"));
+        registration.close();
 
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL));
+        assertFalse(registration.isActive());
+        assertFalse(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
+        assertTrue(CoreIncidentAuthorities.registeredNames().isEmpty());
     }
 
     @Test
-    void aThrowingAuthorityFailsSafeToNativeDetection() {
-        CoreIncidentAuthorityRegistry.register(new CoreIncidentAuthority() {
-            @Override
-            public ResourceLocation authorityId() {
-                return CRIME;
-            }
+    void closingTwiceIsANoOpRatherThanAnError() {
+        CoreIncidentAuthorityRegistration registration =
+                McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("crime_detector"));
+        registration.close();
+        registration.close();
+        assertFalse(registration.isActive());
+    }
 
-            @Override
-            public boolean owns(CoreIncidentKind kind) {
-                throw new IllegalStateException("bridge is broken");
-            }
-        });
+    /**
+     * A throwing claimant leaves detection here. Failing the other way would take villager assault
+     * detection off the server entirely, with the deed recorded by nobody — a silent loss is worse
+     * than a duplicate somebody can see in the ledger.
+     */
+    @Test
+    void aThrowingAuthorityLeavesDetectionWithThisMod() {
+        TestAuthority authority = new TestAuthority("crime_detector");
+        authority.explode = true;
+        McaReputationApi.registerCoreIncidentAuthority(authority);
 
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT),
-                "a throwing owns() must read as unclaimed, not as ownership");
+        assertFalse(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
     }
 
     @Test
-    void twoClaimantsAreAmbiguousSoNativeDetectionStaysOn() {
-        CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
-        CoreIncidentAuthorityRegistry.register(new Stub(OTHER, true));
+    void oneThrowingAuthorityDoesNotHideAWorkingOne() {
+        TestAuthority broken = new TestAuthority("broken");
+        broken.explode = true;
+        TestAuthority working = new TestAuthority("working");
+        McaReputationApi.registerCoreIncidentAuthority(broken);
+        McaReputationApi.registerCoreIncidentAuthority(working);
 
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT),
-                "there is no defensible way to pick a winner, so neither is accepted as exclusive");
-        assertEquals(2, CoreIncidentAuthorityRegistry.registeredIds().size());
+        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL));
     }
 
     @Test
-    void ambiguityClearsWhenOneClaimantGoesQuiet() {
-        CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
-        CoreIncidentAuthorityRegistration other = CoreIncidentAuthorityRegistry.register(new Stub(OTHER, true));
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL));
+    void oneClaimantWithdrawingLeavesTheOtherStanding() {
+        CoreIncidentAuthorityRegistration first =
+                McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("first"));
+        McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("second"));
 
-        other.close();
+        first.close();
 
-        assertTrue(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL),
-                "with the ambiguity gone the single remaining claimant owns the kind again");
-    }
-
-    // ------------------------------------------------------------------ registration hygiene
-
-    @Test
-    void aDuplicateIdIsRejectedAndTheFirstRegistrationSurvives() {
-        CoreIncidentAuthorityRegistration first = CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
-        CoreIncidentAuthorityRegistration second = CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
-
-        assertTrue(first.isActive());
-        assertFalse(second.isActive(), "the duplicate must come back inert rather than as a second claimant");
-        assertEquals(1, CoreIncidentAuthorityRegistry.registeredIds().size());
-        // Critically, the rejected duplicate must not have created ambiguity that switches detection
-        // back on — a bridge that initialised twice is still exactly one producer.
-        assertTrue(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
+        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
+        assertEquals(List.of(McaReputation.id("second").toString()),
+                CoreIncidentAuthorities.registeredNames());
     }
 
     @Test
-    void aNullAuthorityIsRejectedWithoutThrowing() {
-        CoreIncidentAuthorityRegistration handle = CoreIncidentAuthorityRegistry.register(null);
+    void registeringNullIsRejectedRatherThanStored() {
+        assertThrows(IllegalArgumentException.class,
+                () -> McaReputationApi.registerCoreIncidentAuthority(null));
+    }
 
-        assertFalse(handle.isActive());
-        assertEquals(0, CoreIncidentAuthorityRegistry.registeredIds().size());
+    /**
+     * A claimant is expected to file the same incident type this mod would have, so the ledger reads
+     * identically whichever mod detected the deed.
+     */
+    @Test
+    void everyKindNamesTheIncidentItWouldHaveProduced() {
+        assertEquals(BuiltinIncidents.VILLAGER_ASSAULTED,
+                CoreIncidentKind.MCA_VILLAGER_ASSAULT.incidentType());
+        assertEquals(BuiltinIncidents.VILLAGER_KILLED,
+                CoreIncidentKind.MCA_VILLAGER_KILL.incidentType());
     }
 
     @Test
-    void anAuthorityThatThrowsFromAuthorityIdIsRejected() {
-        CoreIncidentAuthorityRegistration handle = CoreIncidentAuthorityRegistry.register(
-                new CoreIncidentAuthority() {
-                    @Override
-                    public ResourceLocation authorityId() {
-                        throw new IllegalStateException("no id");
-                    }
-
-                    @Override
-                    public boolean owns(CoreIncidentKind kind) {
-                        return true;
-                    }
-                });
-
-        assertFalse(handle.isActive());
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
+    void incidentTypesMapBackToTheirKind() {
+        assertEquals(Optional.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT),
+                CoreIncidentKind.forIncident(BuiltinIncidents.VILLAGER_ASSAULTED));
+        assertEquals(Optional.empty(), CoreIncidentKind.forIncident(BuiltinIncidents.QUEST_COMPLETED));
+        assertEquals(Optional.empty(), CoreIncidentKind.forIncident(null));
     }
 
+    /** Two kinds must never share an incident type, or a claim on one would silently cover the other. */
     @Test
-    void closingIsIdempotentAndRestoresNativeDetection() {
-        CoreIncidentAuthorityRegistration handle =
-                CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
-        assertTrue(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
-
-        handle.close();
-        handle.close();
-
-        assertFalse(handle.isActive());
-        assertEquals(0, CoreIncidentAuthorityRegistry.registeredIds().size());
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
-    }
-
-    @Test
-    void ownershipIsCheckedPerKindNotPerRegistration() {
-        // A companion may own assault while leaving killing to Reputation. Registration alone must
-        // never be read as a claim on everything.
-        CoreIncidentAuthorityRegistry.register(new CoreIncidentAuthority() {
-            @Override
-            public ResourceLocation authorityId() {
-                return CRIME;
-            }
-
-            @Override
-            public boolean owns(CoreIncidentKind kind) {
-                return kind == CoreIncidentKind.MCA_VILLAGER_ASSAULT;
-            }
-        });
-
-        assertTrue(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL));
-    }
-
-    @Test
-    void aNullKindNeverClaimsOwnership() {
-        CoreIncidentAuthorityRegistry.register(new Stub(CRIME, true));
-
-        assertFalse(CoreIncidentAuthorityRegistry.hasExternalAuthority(null));
+    void kindsDoNotShareAnIncidentType() {
+        long distinct = java.util.Arrays.stream(CoreIncidentKind.values())
+                .map(CoreIncidentKind::incidentType).distinct().count();
+        assertEquals(CoreIncidentKind.values().length, distinct);
     }
 }

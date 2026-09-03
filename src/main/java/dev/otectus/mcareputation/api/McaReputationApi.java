@@ -4,8 +4,8 @@ import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.community.CommunityResolver;
+import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
 import dev.otectus.mcareputation.incident.IncidentStatus;
-import dev.otectus.mcareputation.reputation.CoreIncidentAuthorityRegistry;
 import dev.otectus.mcareputation.reputation.ReputationService;
 import dev.otectus.mcareputation.reputation.ReputationTierSet;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
@@ -90,38 +90,41 @@ public final class McaReputationApi {
     // ------------------------------------------------------------------
 
     /**
-     * Hands ownership of one or more natively detected deeds to another mod (integration spec §7.1).
+     * Claims one or more {@linkplain CoreIncidentKind core detection kinds} for a companion mod, so
+     * this mod stops detecting them itself (§20, §25.1).
      *
-     * <p>Reputation detects MCA villager assault and death itself. A mod that detects the same
-     * gameplay events — MCA: Crime does — must claim them here, or one swing produces two deeds.
-     * Reputation stands down only for the kinds a single healthy authority actually claims, checked
-     * per event, so a bridge that later disables itself hands detection straight back.
+     * <p>This exists to solve double detection and nothing else. Two mods watching the same
+     * {@code LivingDamageEvent.Post} and both filing an assault charge one punch twice, and neither
+     * can fix that alone. The claimant files the equivalent incident through {@link #record} instead;
+     * because it is the same incident type, scores, decay, gossip, witnesses and the ledger are
+     * unchanged.
      *
-     * <p>Never returns null and never throws: a rejected registration (null authority, null or
-     * duplicate id) comes back as an inert handle and one logged error. Close the handle to withdraw.
+     * <p>Call at mod setup. Hold the returned handle: closing it is the only way to withdraw the
+     * claim, after which detection resumes here on the very next event.
+     *
+     * @return the handle that withdraws the claim; never null
+     * @since MCA: Reputation 0.3.0
      */
     public static CoreIncidentAuthorityRegistration registerCoreIncidentAuthority(CoreIncidentAuthority authority) {
-        try {
-            return CoreIncidentAuthorityRegistry.register(authority);
-        } catch (Throwable t) {
-            McaReputation.LOGGER.error("[MCA: Reputation] registerCoreIncidentAuthority failed; the caller keeps no "
-                    + "authority and native detection continues.", t);
-            return CoreIncidentAuthorityRegistry.register(null);
-        }
+        return CoreIncidentAuthorities.register(authority);
     }
 
     /**
-     * Whether exactly one healthy external authority currently owns {@code kind}. False when nobody
-     * claims it, when the only claimant is unhealthy, and — deliberately — when two claim it, because
-     * ambiguity must leave Reputation producing rather than nobody producing.
+     * Whether a companion is currently detecting this kind, leaving this mod stood down for it.
+     *
+     * <p>The question a claimant asks straight after registering, to confirm the claim actually took —
+     * and the question an operator is really asking when villager assaults stop appearing in the
+     * ledger. Also drives {@code /mcareputation debug authorities}.
+     *
+     * <p>False when nobody has claimed it, when every claimant's own configuration currently says it
+     * is not detecting, and when a claimant threw while being asked. That last case is deliberate:
+     * detection staying here risks a visible duplicate, whereas assuming the claim held would lose the
+     * deed silently.
+     *
+     * @since MCA: Reputation 0.3.0
      */
     public static boolean hasExternalAuthority(CoreIncidentKind kind) {
-        try {
-            return CoreIncidentAuthorityRegistry.hasExternalAuthority(kind);
-        } catch (Throwable t) {
-            McaReputation.LOGGER.debug("[MCA: Reputation] hasExternalAuthority failed; assuming none", t);
-            return false;
-        }
+        return CoreIncidentAuthorities.isClaimed(kind);
     }
 
     // ------------------------------------------------------------------

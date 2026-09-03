@@ -15,18 +15,21 @@ import dev.otectus.mcareputation.api.ImportResult;
 import dev.otectus.mcareputation.api.ReputationIncidentView;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
+import dev.otectus.mcareputation.api.ReputationSnapshot;
 import dev.otectus.mcareputation.api.ResolutionResult;
 import dev.otectus.mcareputation.api.CoreIncidentKind;
 import dev.otectus.mcareputation.api.McaReputationApi;
 import dev.otectus.mcareputation.community.CommunityKey;
-import dev.otectus.mcareputation.reputation.CoreIncidentAuthorityRegistry;
 import dev.otectus.mcareputation.community.CommunityResolver;
+import dev.otectus.mcareputation.compat.McaReflect;
 import dev.otectus.mcareputation.data.ReputationContentValidator;
+import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
 import dev.otectus.mcareputation.event.LegacyImportProviders;
 import dev.otectus.mcareputation.incident.BuiltinIncidents;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
+import dev.otectus.mcareputation.network.SnapshotSelection;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationService;
 import dev.otectus.mcareputation.reputation.ReputationTier;
@@ -50,6 +53,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
+import org.jetbrains.annotations.Nullable;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -747,7 +751,22 @@ public final class ReputationCommand {
                 .requires(source -> source.hasPermission(2))
                 .then(Commands.literal("community").executes(ReputationCommand::debugCommunity))
                 .then(Commands.literal("witnesses").executes(ReputationCommand::debugWitnesses))
-                .then(Commands.literal("integrations").executes(ReputationCommand::debugIntegrations));
+                .then(Commands.literal("integrations").executes(ReputationCommand::debugIntegrations))
+                .then(Commands.literal("authorities").executes(ReputationCommand::debugAuthorities))
+                .then(Commands.literal("standing")
+                        .executes(ctx -> debugStanding(ctx, self(ctx), null))
+                        .then(Commands.argument("community", CommunityArgument.community())
+                                .suggests(COMMUNITY_SUGGESTIONS)
+                                .executes(ctx -> debugStanding(ctx, self(ctx),
+                                        CommunityArgument.getCommunity(ctx, "community"))))
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(ctx -> debugStanding(ctx,
+                                        EntityArgument.getPlayer(ctx, "player"), null))
+                                .then(Commands.argument("community", CommunityArgument.community())
+                                        .suggests(COMMUNITY_SUGGESTIONS)
+                                        .executes(ctx -> debugStanding(ctx,
+                                                EntityArgument.getPlayer(ctx, "player"),
+                                                CommunityArgument.getCommunity(ctx, "community"))))));
     }
 
     /**
@@ -761,17 +780,146 @@ public final class ReputationCommand {
                 + McaReputationConfig.questsIntegrationEnabled()
                 + " conversations=" + McaReputationConfig.conversationsIntegrationEnabled()
                 + " crime=" + McaReputationConfig.crimeIntegrationEnabled()), false);
-        List<net.minecraft.resources.ResourceLocation> authorities = CoreIncidentAuthorityRegistry.registeredIds();
+        List<String> authorities = CoreIncidentAuthorities.registeredNames();
         source.sendSuccess(() -> Component.literal("core-incident authorities registered: "
                 + authorities.size()), false);
-        authorities.forEach(id -> source.sendSuccess(() ->
-                Component.literal("  " + id).withStyle(ChatFormatting.DARK_GRAY), false));
+        authorities.forEach(name -> source.sendSuccess(() ->
+                Component.literal("  " + name).withStyle(ChatFormatting.DARK_GRAY), false));
         for (CoreIncidentKind kind : CoreIncidentKind.values()) {
-            boolean external = CoreIncidentAuthorityRegistry.hasExternalAuthority(kind);
+            List<String> claimants = CoreIncidentAuthorities.claimantsOf(kind);
             source.sendSuccess(() -> Component.literal("  " + kind + " -> "
-                    + (external ? "external authority (native detection OFF)" : "native detection ON")), false);
+                    + (claimants.isEmpty() ? "native detection ON"
+                            : "claimed by " + String.join(", ", claimants) + " (native detection OFF)")), false);
         }
         return authorities.size();
+    }
+
+    /**
+     * Everything the standing pipeline believes about one player, in one screenful.
+     *
+     * <p>This exists because a player reported "no matter what I do I have 25 more to acquaintance",
+     * and there was no way to tell from inside the game whether the stored number was not moving or
+     * the screen was reading a different community from the one being written to. Those are opposite
+     * bugs with the same symptom, and separating them took a source checkout. Every line below is one
+     * of the hops between a deed and the pixels:
+     *
+     * <ul>
+     *   <li><b>store</b> - which record this mod is reading, and whether one exists at all;</li>
+     *   <li><b>score/baseline</b> - the raw stored value, before any tier or format arithmetic;</li>
+     *   <li><b>tier / next / remaining</b> - all derived from that same score and printed beside it,
+     *       so a frozen figure can be told from a frozen <em>lookup</em>;</li>
+     *   <li><b>screen would select</b> - the community the standing screen opens on for this player
+     *       when nothing in particular was asked about, and whether they have a record there. When
+     *       that line names a different community from the one being written to, the score is moving
+     *       and the screen is looking somewhere else;</li>
+     *   <li><b>mirrors / MCA</b> - the two things outside this mod that can silently swallow a deed.</li>
+     * </ul>
+     */
+    private static int debugStanding(CommandContext<CommandSourceStack> ctx, ServerPlayer subject,
+                                     @Nullable String rawCommunity) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        MinecraftServer server = source.getServer();
+        long gameTime = server.overworld().getGameTime();
+        ReputationSavedData data = ReputationSavedData.get(server);
+
+        source.sendSuccess(() -> Component.literal("standing for " + subject.getGameProfile().getName()
+                + " (" + subject.getUUID() + ")"), false);
+        source.sendSuccess(() -> Component.literal(
+                "  store: mcareputation SavedData (canonical; this mod has no second backend)")
+                .withStyle(ChatFormatting.DARK_GRAY), false);
+
+        List<CommunityKey> known = data.player(subject.getUUID())
+                .map(record -> record.communities().stream()
+                        .map(CommunityReputationRecord::key).toList())
+                .orElse(List.of());
+        source.sendSuccess(() -> Component.literal("  records: " + known.size() + " community/ies "
+                + known.stream().map(CommunityKey::asString).limit(8).toList()), false);
+
+        // What the screen would open on, unprompted. This is the READ key; the WRITE key is whichever
+        // community the deed's villager belongs to, and the two diverging is invisible from the UI.
+        Optional<CommunityKey> here = CommunityResolver.resolveAround(subject);
+        boolean knowsHere = here.isPresent() && data.knows(subject.getUUID(), here.get());
+        Optional<CommunityKey> best = ReputationService
+                .knownCommunities(server, subject.getUUID(), gameTime).stream()
+                .findFirst().map(ReputationSnapshot::community);
+        Optional<CommunityKey> screen =
+                SnapshotSelection.unprompted(here, knowsHere, best);
+        source.sendSuccess(() -> Component.literal("  standing in: "
+                + here.map(CommunityKey::asString).orElse("(no village within "
+                        + McaReputationConfig.villageSearchRadius() + " blocks)")
+                + (here.isPresent() ? (knowsHere ? " [has record]" : " [NO record]") : "")), false);
+        source.sendSuccess(() -> Component.literal("  screen would select: "
+                + screen.map(CommunityKey::asString).orElse("(nothing)")), false);
+
+        CommunityKey community = rawCommunity != null
+                ? resolveCommunity(ctx, rawCommunity)
+                : screen.orElseThrow(NO_COMMUNITY::create);
+        source.sendSuccess(() -> Component.literal("  inspecting: " + community.asString()), false);
+
+        Optional<ReputationSnapshot> snapshot =
+                ReputationService.snapshot(server, subject.getUUID(), community, gameTime);
+        if (snapshot.isEmpty()) {
+            source.sendSuccess(() -> Component.literal("  NO RECORD for this community - the screen "
+                    + "shows a synthesised floor-tier detail here (score 0), which is not a stored value")
+                    .withStyle(ChatFormatting.YELLOW), false);
+        } else {
+            ReputationSnapshot snap = snapshot.get();
+            source.sendSuccess(() -> Component.literal("  score: " + snap.score()
+                    + "  baseline: " + snap.baseline()
+                    + "  incidents: " + snap.totalIncidentCount()
+                    + "  ladder: " + snap.ladder()), false);
+            source.sendSuccess(() -> Component.literal("  tier: " + snap.tierId()
+                    + " (>= " + snap.tier().threshold() + ")"
+                    + "  high-water: " + snap.highWaterTierId().orElse("(none)")), false);
+            source.sendSuccess(() -> Component.literal("  next: "
+                    + snap.nextTier().map(next -> next.id() + " (>= " + next.threshold() + ")")
+                            .orElse("(top of ladder)")
+                    + "  remaining: " + snap.pointsToNextTier()
+                            .map(String::valueOf).orElse("(none)")), false);
+        }
+
+        source.sendSuccess(() -> Component.literal("  mirrors: "
+                + (ReputationService.mirrors().isEmpty() ? "(none registered)"
+                        : ReputationService.mirrors().stream()
+                                .map(dev.otectus.mcareputation.api.ReputationMirror::mirrorName).toList())
+                + "  quests-integration: " + McaReputationConfig.questsIntegrationEnabled()
+                + "  enabled: " + McaReputationConfig.enabled())
+                .withStyle(ChatFormatting.DARK_GRAY), false);
+        source.sendSuccess(() -> Component.literal("  MCA binding: "
+                + (McaReflect.isAvailable() ? "active" : "UNAVAILABLE")
+                + " (root " + McaReflect.root() + ", " + McaReflect.installedMca() + ")")
+                .withStyle(McaReflect.isAvailable() ? ChatFormatting.DARK_GRAY : ChatFormatting.RED), false);
+        return snapshot.map(ReputationSnapshot::score).orElse(0);
+    }
+
+    /**
+     * Which mod is detecting each core deed.
+     *
+     * <p>The question this answers is "why have villager assaults stopped appearing in the ledger",
+     * and without it the answer lives in another mod's config and is effectively unfindable. A kind
+     * shown as claimed is being recorded by the named companion instead of by this mod; a kind shown
+     * as unclaimed is detected here, whatever is registered.
+     */
+    private static int debugAuthorities(CommandContext<CommandSourceStack> ctx) {
+        CommandSourceStack source = ctx.getSource();
+        List<String> registered = CoreIncidentAuthorities.registeredNames();
+        source.sendSuccess(() -> Component.literal(registered.isEmpty()
+                ? "no core incident authorities registered; this mod detects everything itself"
+                : "registered core incident authorities: " + String.join(", ", registered)), false);
+
+        int claimed = 0;
+        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
+            List<String> claimants = CoreIncidentAuthorities.claimantsOf(kind);
+            if (!claimants.isEmpty()) {
+                claimed++;
+            }
+            String detail = claimants.isEmpty()
+                    ? "detected by MCA: Reputation"
+                    : "claimed by " + String.join(", ", claimants);
+            source.sendSuccess(() -> Component.literal("  " + kind.name() + " (" + kind.incidentType()
+                    + "): " + detail).withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        return claimed;
     }
 
     private static int debugCommunity(CommandContext<CommandSourceStack> ctx) {

@@ -148,6 +148,43 @@ class CommandTreeTest {
     }
 
     // ------------------------------------------------------------------
+    // debug: the diagnostics added with the authority contract and the selection fix
+    // ------------------------------------------------------------------
+
+    @Test
+    void debugAuthoritiesIsAnOperatorLeaf() {
+        assertEquals(List.of("mcareputation", "debug", "authorities"),
+                path(assertParses(dispatcher(), "mcareputation debug authorities", source(2))));
+    }
+
+    @Test
+    void debugStandingDefaultsToTheSourcePlayer() {
+        assertEquals(List.of("mcareputation", "debug", "standing"),
+                path(assertParses(dispatcher(), "mcareputation debug standing", source(2))));
+    }
+
+    @Test
+    void debugStandingTakesACommunityOrAPlayerAndBoth() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertEquals(List.of("mcareputation", "debug", "standing", "community"),
+                path(assertParses(dispatcher, "mcareputation debug standing here", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "standing", "player"),
+                path(assertParses(dispatcher, "mcareputation debug standing Steve", source(2))),
+                "a bare name must reach the player branch, not be swallowed by the community argument");
+        assertEquals(List.of("mcareputation", "debug", "standing", "player", "community"),
+                path(assertParses(dispatcher,
+                        "mcareputation debug standing Steve minecraft:overworld/3", source(2))));
+    }
+
+    @Test
+    void theDebugBranchIsOperatorOnly() {
+        ParseResults<CommandSourceStack> parse =
+                dispatcher().parse("mcareputation debug authorities", source(0));
+        assertFalse(parse.getExceptions().isEmpty() && !parse.getReader().canRead(),
+                "debug is permission level 2; it must not parse for an ordinary player");
+    }
+
+    // ------------------------------------------------------------------
     // Titles: the global literal is its own branch
     // ------------------------------------------------------------------
 

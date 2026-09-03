@@ -3,7 +3,6 @@ package dev.otectus.mcareputation.event;
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.CoreIncidentKind;
-import dev.otectus.mcareputation.reputation.CoreIncidentAuthorityRegistry;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
 import dev.otectus.mcareputation.community.CommunityKey;
@@ -103,7 +102,7 @@ public final class ReputationGameplayEvents {
         // Checked per event rather than once at startup: an authority that disables itself mid-session
         // hands detection straight back, and the check sits ahead of every coalescing/folding path
         // below so none of that state is touched while somebody else owns the deed.
-        if (CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT)) {
+        if (CoreIncidentAuthorities.isClaimed(CoreIncidentKind.MCA_VILLAGER_ASSAULT)) {
             return;
         }
         if (!McaCompat.isLivingMcaVillager(target)) {
@@ -206,7 +205,7 @@ public final class ReputationGameplayEvents {
         }
         // See onLivingHurt: stepping aside here also skips the assault-into-kill fold, which is
         // correct -- with an external authority there is no assault of ours to fold.
-        if (CoreIncidentAuthorityRegistry.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL)) {
+        if (CoreIncidentAuthorities.isClaimed(CoreIncidentKind.MCA_VILLAGER_KILL)) {
             return;
         }
         if (!McaCompat.isMcaVillager(victim)) {

@@ -1,27 +1,39 @@
 package dev.otectus.mcareputation.api;
 
-import net.minecraft.resources.ResourceLocation;
-
 /**
- * The handle returned by
- * {@link McaReputationApi#registerCoreIncidentAuthority(CoreIncidentAuthority)}.
+ * The handle returned when a {@link CoreIncidentAuthority} is registered, and the only way to revoke it.
  *
- * <p>Closing it withdraws the claim, and Reputation's native detector resumes for every kind that
- * authority owned. Closing twice is harmless. A registration that was rejected (duplicate id, null
- * authority) still returns a handle — a closed, inert one — so a caller never has to null-check.
+ * <p>A handle rather than an {@code unregister(authority)} method because revocation has to be
+ * unambiguous. Companions commonly register an anonymous or short-lived implementation, and asking
+ * them to hold onto the exact instance for an equality-based removal is the kind of contract that
+ * works until a mod reloads its config and quietly leaks a claim that nothing can any longer withdraw.
+ * A claim that cannot be withdrawn suppresses this mod's detection forever.
  *
- * <p>{@link AutoCloseable#close()} is narrowed to throw nothing: withdrawing a claim can always
- * succeed, and a bridge shutting down should not have to handle an exception.
+ * <p>Extends {@link AutoCloseable} with the checked exception removed, so a claim can be held in a
+ * try-with-resources block during a reload without a pointless {@code catch}.
+ *
+ * @since MCA: Reputation 0.3.0
  */
 public interface CoreIncidentAuthorityRegistration extends AutoCloseable {
 
-    /** The id this registration was made under. */
-    ResourceLocation authorityId();
+    /** The authority this handle registered. */
+    CoreIncidentAuthority authority();
 
-    /** Whether this registration is currently active. False once closed, or if it was rejected. */
+    /**
+     * Whether the claim still stands.
+     *
+     * <p>False once {@link #close()} has been called. It never becomes false on its own: this reports
+     * whether the <em>registration</em> is live, not whether the authority currently
+     * {@linkplain CoreIncidentAuthority#owns owns} anything — those are different questions, and a
+     * companion whose config has temporarily switched its detection off is still registered.
+     */
     boolean isActive();
 
-    /** Withdraws the claim. Idempotent. */
+    /**
+     * Withdraws the claim. Idempotent: closing twice is a no-op, never an error.
+     *
+     * <p>Detection returns to this mod on the next event.
+     */
     @Override
     void close();
 }

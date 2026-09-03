@@ -8,7 +8,6 @@ import dev.otectus.mcareputation.event.ReputationGameplayEvents;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.network.ReputationFeedback;
 import dev.otectus.mcareputation.network.ReputationNetwork;
-import dev.otectus.mcareputation.reputation.CoreIncidentAuthorityRegistry;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
 import dev.otectus.mcareputation.reputation.Titles;
 import net.minecraft.commands.synchronization.ArgumentTypeInfo;
@@ -102,9 +101,6 @@ public final class McaReputationMod {
         ReputationNetwork.clearAll();
         ReputationFeedback.clearAll();
         ReputationGameplayEvents.resetTickCounter();
-        // Authority claims are per-JVM, not per-world, but a companion that failed to withdraw would
-        // otherwise leave the next world's native detection switched off with nobody producing.
-        CoreIncidentAuthorityRegistry.clear();
         McaReputation.LOGGER.debug("[MCA: Reputation] server stopped; {} incident type(s), {} ladder(s), "
                         + "{} title(s) were live", IncidentRegistry.size(), ReputationTiers.ids().size(),
                 Titles.ids().size());
