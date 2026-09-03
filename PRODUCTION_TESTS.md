@@ -1,6 +1,6 @@
 # MCA: Reputation — production verification matrix
 
-> **Status: NOT YET RUN.** This file is the checklist that must pass before 0.2.0 is tagged as
+> **Status: NOT YET RUN.** This file is the checklist that must pass before 0.3.0 is tagged as
 > released, not a record of it having passed.
 
 ## Why this file exists
@@ -16,7 +16,7 @@ MCA's NeoForge artifact is mojmap and loads as a real mod in the dev runs, so `r
 `runServer` here *do* exercise genuine MCA behaviour. The gate remains anyway, for the reason Spec
 Appendix D actually gives: "production verified" means the built jars were tested in a production-style
 instance, not that compilation and unit tests passed. There is no reobfuscation step to worry about any
-more — `build/libs/mcareputation-0.2.0.jar` *is* the artifact that ships.
+more — `build/libs/mcareputation-0.3.0.jar` *is* the artifact that ships.
 
 ## What has passed so far
 
@@ -24,7 +24,7 @@ more — `build/libs/mcareputation-0.2.0.jar` *is* the artifact that ships.
 |---|---|---|
 | Phase 0 audit and reconciliation | ✅ | [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) |
 | MCA 7.7.36-beta.3 signature confirmation | ✅ | `javap` over the pinned `mca-neoforge` jar; every consumed signature present and compatible (IMPLEMENTATION_NOTES §2.1) |
-| MCA: Reputation compiles and unit tests | ✅ | **296 tests, 0 failures, 0 skipped** (1.20.1 Forge baseline was 255) |
+| MCA: Reputation compiles and unit tests | ✅ | **343 tests, 0 failures, 0 skipped** (1.20.1 Forge baseline was 255) |
 | Golden 1.20.1 saved data loads under 1.21.1 | ✅ | `GoldenSavedDataCompatibilityTest` against a fixture written by the unmodified Forge serializer |
 | Config keys and defaults unchanged | ✅ | `ConfigParityTest` pins both key sets and both filenames exactly |
 | No Forge or relocated-MCA reference survives | ✅ | `NeoForgePortLintTest` (source, 19 idioms) + `OptionalClassloadTest` (bytecode) + `checkJarContents` (packaged bytecode) |
@@ -74,12 +74,12 @@ step. Record the exact filenames and hashes below.
 
 | Artifact | File | SHA-256 |
 |---|---|---|
-| MCA: Reputation | `mcareputation-0.2.0.jar` | `b1fbe0fa91048317ee549520f1c8b3570ddd9cef5e73ce6c238e67ad6b9a3fd6` |
-| MCA: Quests | `mcaquests-1.1.0.jar` | `22f380d5f72d57968b851e4ead82560c1e078eb56ad17bf5881a4ce7bcdc7a08` |
-| MCA: Conversations | `mcaconversations-neoforge-2.0.0+1.21.1.jar` | `b1dd4b0dcf8c790d3daf2b595266406784047f1966d5a1d7c8513dea566b55f6` |
+| MCA: Reputation | `mcareputation-0.3.0.jar` | `2f5f8089f0655090cceba6ae6dfe8f8e8a806f1d6d61acb5e9ab5d76eb882d72` |
+| MCA: Quests | `mcaquests-1.1.0.jar` | (to be recorded) |
+| MCA: Conversations | `mcaconversations-neoforge-2.0.0+1.21.1.jar` | (to be recorded) |
 | MCA Reborn | `mca-neoforge-7.7.36-beta.3+1.21.1.jar` | `de4763d34a41cb84ffa392b87cdb23191beddda2323b56552a1a2fcd7c436fc3` |
 
-Environment to record with the results: Minecraft `1.21.1`, NeoForge `21.1.248`, Java `21`, plus the
+Environment to record with the results: Minecraft `1.21.1`, NeoForge `21.1.249`, Java `21`, plus the
 tester and date.
 
 ---

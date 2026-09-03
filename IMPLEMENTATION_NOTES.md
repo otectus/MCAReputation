@@ -38,7 +38,30 @@ Two notes on the pin, both of which cost time to discover:
   names, `fabric.mod.json`). MCA: Quests worked around it by pinning a Modrinth file id. The Conczin
   Maven puts the loader in the artifact id (`mca-neoforge`), so the ambiguity does not arise.
 
-### 2.1 Every consumed signature, confirmed present on 7.7.36-beta.3
+### 2.1 MCA binding through reflection (McaReflect)
+
+**Change from the initial Forge 1.20.1 design:** the original plan imported `net.conczin.mca.*` classes
+directly in `McaCompat` and `McaScreenCompat`. That works across a narrow MCA range, but a package rename
+or a missing class hard-fails at classload time. For better resilience and to support wider MCA versions,
+Reputation now resolves MCA entirely by name at runtime through `compat/McaReflect.java`, bound to the
+single unrelocated root `net.conczin.mca`.
+
+**How it works:**
+
+- `McaReflect` holds the reflected surface — the class objects, method handles, and field accessors for
+  every MCA type and member this mod needs. It is populated once at common mod setup via `selfTest()`.
+- A missing MCA member (class not found, method removed, signature changed) logs one startup error line
+  with the exact member name, disables MCA integration for the session, and degrades the feature instead
+  of crashing the server.
+- The failure policy is **non-throwing** on every path: `instanceof` checks wrap the reflection in
+  try-catch so a linkage error does not propagate to a damage event handler or a screen render.
+- Every other class is forbidden from importing `net.conczin.mca` by `checkJarContents` and
+  `OptionalClassloadTest`, which also forbid any Forge or relocated-MCA (`forge.net.mca.*` / `forge.net.conczin.mca.*`)
+  bytecode reference.
+- `McaBinaryAbiTest` verifies that every reflected member is actually present in the pinned MCA jar
+  (`mca-neoforge-7.7.36-beta.3+1.21.1`), whose SHA-256 is recorded in `gradle.properties`.
+
+**Signatures audited and resolved by reflection:**
 
 | Signature | Used for |
 |---|---|
@@ -58,10 +81,8 @@ Two notes on the pin, both of which cost time to discover:
 | `VillagerLike#getAgeState() : AgeState`, `AgeState.ADULT` | age gating for the Conversations bridge |
 | `InteractScreen` | the Standing button's host screen |
 
-**Every one is present with a compatible shape.** The port to 1.21.1 is therefore an import-package
-change inside the two `compat` classes and nothing more — no reflection, no version branch, no
-adapter. `OptionalClassloadTest` and `checkJarContents` both fail the build if any other class starts
-naming `net.conczin.mca`, or if a reference to the old `forge.net.mca` root survives anywhere.
+**Coordinates:** MCA Reborn NeoForge `7.7.36-beta.3+1.21.1` from the Conczin Maven
+(`net.conczin.mca:mca-neoforge`). SHA-256 digest `de4763d34a41cb84ffa392b87cdb23191beddda2323b56552a1a2fcd7c436fc3`.
 
 ### 2.2 Personality is still read through `toString()`
 
@@ -102,11 +123,38 @@ ever appears in the artifact.
 | Decision | Why |
 |---|---|
 | Declared MCA range `[7.7,8)`, wider than the compile pin | MCA: Quests declares `[7.7,8)` and MCA: Conversations `[7.7.36-beta.3,7.7.37)`. A narrow range here would make the three mods mutually uninstallable. Every MCA call is `instanceof`-guarded and `catch (Throwable)`, so drift inside 7.7 degrades a feature rather than crashing a server. `[7.7.36,8)` specifically would **not** work: a Maven range excludes prereleases below its lower bound, so it rejects `7.7.36-beta.3`. |
-| Gradle 8.12 + ModDevGradle 2.0.141 | Matches both sibling ports exactly. ModDevGradle 2.0.x targets the Gradle 8 API; adding a Gradle 9 migration to an already-large port buys nothing. |
-| NeoForge range `[21.1.248,21.2)` | Bounded above so the artifact can never load on 1.21.2+. Overlaps Quests' `[21.1.0,21.2)` and Conversations' `[21.1.234,21.2)`. |
+| Gradle 9.2.1 + ModDevGradle 2.0.146 | Audited as coherent on 2026-09-03; matches both sibling ports exactly. |
+| NeoForge range `[21.1.249,21.2)` | Bounded above so the artifact can never load on 1.21.2+. Overlaps Quests' `[21.1.0,21.2)` and Conversations' `[21.1.234,21.2)`. |
 | Network protocol `2` → `3` | The framing, payload ids and component encoding all changed. A 1.20.1 client could not reach a 1.21.1 server anyway, but the bump makes the incompatible wire revision auditable. |
 | `LivingDamageEvent.Post`, not `LivingIncomingDamageEvent` | The chip-damage threshold is defined on health *actually lost*. `LivingIncomingDamageEvent` is the cancellable pre-mitigation stage and would compare against the wrong number. |
 | Saved data stays format `1` | The target API grew a `HolderLookup.Provider` parameter; the schema did not change. The provider is an adapter parameter, and `savePayload`/`loadPayload` stay provider-neutral so a fixture written by the 1.20.1 build reads back unchanged. |
+
+## 2.6 Implementation details of 0.3.0 changes
+
+**Standing screen sprite conversion:** the upstream 256×256 nine-sliced sheet was decomposed into nine
+individual GUI sprites under `assets/mcareputation/textures/gui/sprites/reputation/`. Seven sprites
+have `.mcmeta` nine-slice definitions: panel, well, progress track, progress fill, scroll groove,
+scroll thumb, and separator. The two selector arrows are fixed-size 8×8 sprites with no `.mcmeta`.
+`tools/GenerateGuiTexture.java` regenerates the full set from the original sheet's layout, assuring
+pixel-perfect fidelity and making re-derivation and visual review possible without editing binaries.
+The frame remains pixel-identical to vanilla's `container/generic_54` layout. The toast deliberately
+keeps the vanilla `toast/advancement` sprite (not `toast/system`), retaining visual parity with the
+Forge 0.3.0 look.
+
+**Core-incident authority contract:** `CoreIncidentAuthorities` replaces the internal registry with
+upstream's public handshake. Any healthy claimant stands the native detector down; a claimant that
+throws is treated as not claiming; withdrawal is by handle (not `unregister(authority)`), surviving
+config reloads; and claims are no longer cleared when a server stops. `CoreIncidentKind.incidentType()`
+carries the incident type each kind maps to. See [API.md](API.md) for full semantics.
+
+**Snapshot selection fix:** `SnapshotSelection` decides which community an unprompted snapshot describes.
+Where the player stands wins only if they have a history there; otherwise the standing they actually
+hold is shown; "stranger" appears only when it is true. Server authority over requested keys and
+context entities is unchanged; the wire protocol stays at 3.
+
+**ProcessResources expansion:** `neoforge.mods.toml` lives under `src/main/resources/META-INF` and is
+expanded by `processResources` (not the spec's `src/main/templates` layout). This mirrors the Forge
+1.20.1 pattern and maintains compatibility with existing tooling.
 
 ## 3. Quests reputation surface — complete enumeration (spec §39 item 3)
 
@@ -216,7 +264,7 @@ Build order for a full-suite build: **MCAReputation → MCAQuests → MCAConvers
 
 ## 6. Loader event availability (spec §39 item 5)
 
-Confirmed present in NeoForge 21.1.248 for 1.21.1 and used as follows:
+Confirmed present in NeoForge 21.1.249 for 1.21.1 and used as follows:
 
 - `LivingHurtEvent` — assault attribution (fires after armour/absorption, carries the final amount,
   is cancellable, and is server-side-checkable via `entity.level().isClientSide`).

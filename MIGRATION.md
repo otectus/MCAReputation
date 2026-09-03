@@ -1,5 +1,25 @@
 # MCA: Reputation — migration, removal, and rollback
 
+## If you are upgrading from 0.2.0 (Forge 1.20.1) to 0.3.0 (NeoForge 1.21.1)
+
+World data and structure are unchanged. The same `mcareputation.dat` file loads identically; the NBT
+schema is format 1 and will not change. Config keys and defaults are unchanged.
+
+What you must update:
+
+- **MCA Reborn** must be the 1.21.1 NeoForge build (`7.7.x`). The Forge 1.20.1 jar cannot load on
+  NeoForge.
+- **The optional companions**, if installed, must likewise be their 1.21.1 NeoForge builds. A Forge
+  1.20.1 companion jar is simply not seen by the loader.
+- **Bridges and add-ons that call this mod's API** must be recompiled. The API version is now `2`.
+  Versions built against `1` will fail with `NoSuchMethodError` when they try to call a 0.3.0 method.
+  See [API.md](API.md).
+
+After the upgrade, trigger one new deed, save, exit fully, and restart. Old and new state should both
+be there.
+
+---
+
 ## If you are moving a world from Minecraft 1.20.1 (Forge) to 1.21.1 (NeoForge)
 
 **Back the world up first, and keep the backup.** Vanilla's world upgrade is one-way, independently of
@@ -26,8 +46,9 @@ What you must update:
 - **MCA Reborn** must be a 1.21.1 build (`7.7.x`). The Forge 1.20.1 jar cannot load on NeoForge.
 - **The optional companions**, if you use them, must likewise be their 1.21.1 NeoForge builds. A Forge
   1.20.1 companion jar is simply not seen by the loader; it will not half-work.
-- **Add-ons that call this mod's API** must be recompiled. The API generation is still `1`, but the
-  event base class moved with the platform. See [API.md](API.md).
+- **Add-ons that call this mod's API** must be recompiled. The API version is now `2`; version `1`
+  built against the Forge artifact will fail with `NoSuchMethodError` when 0.3.0 methods are called.
+  The event base class also moved with the platform. See [API.md](API.md).
 
 After the upgrade, trigger one new deed, save, exit fully, and restart. Old and new state should both
 be there. If a score has reset, stop and restore the backup rather than playing on — reputation is

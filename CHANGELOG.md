@@ -5,64 +5,155 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — unreleased
+## [0.3.0] — unreleased
 
-A full-tree review before first release: score-integrity fixes, command and interface repairs,
-config that does what it says, and the transaction finally under test. 0.1.0 was never published;
-0.2.0 is the version that ships.
+Three things: the standing screen now looks like part of the game, it now shows the standing you
+actually have, and MCA: Crime can finally be installed alongside this mod without the two of them
+charging the same punch twice.
 
-**This release targets Minecraft 1.21.1 on NeoForge.** The platform moved; the feature contract did
-not. See *Ported* below for what that changed and what it deliberately did not.
+The screen was drawn entirely with flat `fill()` rectangles in a violet scheme of its own — a poor fit
+for a screen the player reaches one click from MCA's own interaction screen, and not what the design
+asks for when it says to use MCA's visual language rather than a visually unrelated menu. Nothing about
+what it *says* changed with the redraw: the same server-authoritative snapshot, the same fields, the
+same empty states.
+
+What it said was wrong for a different reason, and a player found it before we did: *"no matter what I
+do I have '25 more to acquaintance' and my rank is 'stranger'."* The number was not stuck — the screen
+was reading a different village from the one their deeds were written to, and answering honestly about
+a place they had never been. The standing screen now shows the standing you actually have.
+
+The compatibility half is the core-incident authority handshake. It is a small API and a large
+consequence: it is the difference between Reputation and MCA: Crime being usable together and not.
+
+**Carries the upstream Forge 0.3.0 feature set to Minecraft 1.21.1 / NeoForge.** The platform moved;
+the feature contract did not. See *Platform* below for what that changed and what it deliberately did not.
 
 | Mod | Version |
 |---|---|
 | Minecraft | `1.21.1` (metadata range `[1.21.1,1.21.2)`) |
-| NeoForge | `21.1.248+` (metadata range `[21.1.248,21.2)`) |
+| NeoForge | `21.1.249+` (metadata range `[21.1.249,21.2)`) |
 | Java | `21` |
 | MCA Reborn | `7.7.x` (metadata range `[7.7,8)`) — built and verified against `7.7.36-beta.3+1.21.1` |
-| MCA: Quests | `1.1.0+` (optional) |
-| MCA: Conversations | `2.0.0+` (optional) |
+| MCA: Quests | `1.1.0+` (optional, requires API version 2) |
+| MCA: Conversations | `2.0.0+` (optional, requires API version 2) |
 | MCA: Crime | `0.1.0+` (optional) |
 
 The optional companions: the Journal's **[View Deeds]** link needs **MCA: Quests**, and villager
 gossip about deeds plus the standing topic need **MCA: Conversations**. Each must be a 1.21.1 NeoForge
-build; a Forge 1.20.1 companion cannot load on this platform at all. Without them those features
-simply are not offered.
+build targeting API version 2; a Forge 1.20.1 companion cannot load on this platform at all. Without
+them those features simply are not offered. Bridges built against API version 1 must be re-targeted and
+recompiled.
 
-### Ported
+### Changed
 
-**Minecraft 1.21.1 / NeoForge 21.1.248, from Minecraft 1.20.1 / Forge 47.4.10.**
+- **The standing screen is drawn from textures, in vanilla's container idiom.** Nine GUI sprites under
+  `assets/mcareputation/textures/gui/sprites/reputation/` supply the panel frame, the sunken well the
+  deed ledger sits in, the progress track and its fill, the scroller channel and thumb, the section
+  rule, and the selector arrow faces. Seven sprites are nine-sliced; the two selector arrows are
+  fixed-size 8×8. The frame is pixel-identical to vanilla's own container GUI. The generator that
+  produces the sprites, `tools/GenerateGuiTexture.java`, is committed alongside them, so the art can
+  be re-derived and reviewed rather than edited blind.
+- **The header and the deed ledger are wrapped once when the screen opens,** rather than re-measured on
+  every frame. It is cheaper, but the point is that the drawn height and the height the scrollbar is
+  scaled against are now guaranteed not to drift apart.
+- **The community selector uses arrow sprites instead of literal `<` and `>` characters.** The new
+  `SpriteButton` overrides only the label step of vanilla's button rendering, so the frame, hover,
+  focus and disabled states, the click sound and resource-pack compatibility remain vanilla's own.
+- **Two text colours, both vanilla's.** Hundreds of inline hex literals became `0x404040` and
+  `0x7F7F7F`, the pair vanilla labels its container screens with.
+- **The scroller can be dragged,** and clicking the bare channel takes it to the pointer, as
+  vanilla's own lists do. The mapping from a pointer position back to a scroll offset lives in
+  `ScrollMath` next to the one that paints the thumb, so the two cannot part company.
 
-- The build moved from ForgeGradle 6 to ModDevGradle 2.0.141 on Gradle 8.12 and Java 21. There is no
+### Added
+
+- **`/mcareputation debug standing [<player>] [<community>]`** — everything the standing pipeline
+  believes about one player, in one screenful: the raw stored score and baseline, the incident count,
+  the active tier and its threshold, the next tier and the exact remaining amount, which store is
+  being read, which community the screen would open on and whether the player has a record there,
+  the registered mirrors, the integration toggles, and the MCA binding status.
+- **`/mcareputation debug authorities`** — a list of every registered core-incident authority and
+  which kinds it currently claims.
+- **Full compatibility with MCA: Crime**, through a core-incident authority handshake. The two mods
+  both detect villager assault and death; without an agreement, installing both would file two
+  penalties for one punch. Reputation now exposes `McaReputationApi.registerCoreIncidentAuthority`
+  and `hasExternalAuthority`. A companion claims one or more `CoreIncidentKind`s and Reputation stands
+  down from detecting them, while continuing to own everything downstream — the claimant files the
+  same incident type through `record`, so the ledger, scores, decay, gossip and witnesses are
+  byte-for-byte what they would have been.
+- **API version 2** identifies the NeoForge generation. The public event types now extend
+  `net.neoforged.bus.api.Event` instead of the Forge equivalents. Bridges built against API version 1
+  must be re-targeted and recompiled: their event linkage no longer holds and their loader imports
+  moved with the platform.
+
+### Fixed
+
+- **The standing screen showed "Stranger — 25 more to Acquaintance" for players who had earned
+  standing.** Asked for a snapshot with no village named, the server picked whichever village was
+  nearest the player's feet; a village with no record is answered with a synthesised floor-tier detail,
+  so a player standing within 128 blocks of a village they had never dealt with was shown a score of
+  zero however much standing they had elsewhere. The screen now shows the standing you actually have:
+  where you are now wins only when you have a history there; otherwise the reply details the standing
+  you actually have; and "stranger" is reserved for a village you explicitly asked about, or for a
+  player who genuinely has no standing anywhere.
+- **With one village on record, there was no way to reach it from an unknown one.** The selector arrows
+  were drawn only when the community *list* held more than one entry, but the detailed community need
+  not be in that list at all. The arrows now appear, and cycling forward from an off-list selection
+  enters the list at the front.
+- **The scroller no longer creeps away from the pointer as it is dragged.** `ScrollMath.thumbY` truncated,
+  so wherever the division landed just under an integer the thumb repainted one pixel above where it had
+  been grabbed. It rounds now.
+- **The scroller thumb can no longer be taller than the track it runs in.** Its sixteen-pixel floor
+  could exceed the available track at punishing GUI scales and produce a negative offset.
+
+### Notes
+
+- 343 automated tests, including round-trip assertions on the scrollbar's paint and drag mappings, the
+  snapshot-selection logic, and the core-incident authority claim truth table.
+- The standing screen frame was verified against vanilla's own container by regenerating it at that
+  screen's dimensions and diffing pixel-for-pixel.
+- The frame keeps the vanilla `toast/advancement` sprite rather than moving to `toast/system`, retaining
+  pixel parity with the Forge 0.3.0 visual.
+- NBT format 1 is unchanged; 1.20.1 worlds carry over without a conversion step.
+
+### Platform
+
+**Minecraft 1.21.1 / NeoForge 21.1.249, Gradle 9.2.1, ModDevGradle 2.0.146, foojay 1.0.0, from
+Minecraft 1.20.1 / Forge 47.4.10.**
+
+- The build moved from ForgeGradle 6 to ModDevGradle 2.0.146 on Gradle 9.2.1 and Java 21. There is no
   reobfuscation step any more: NeoForge runs official Mojang names in dev and in production, so
-  `build/libs/mcareputation-0.2.0.jar` is the distributable artifact directly.
-- MCA Reborn's classes moved from the Forgix-relocated `forge.net.mca.*` root to `net.conczin.mca.*`.
-  Every signature this mod consumes was verified present and compatible against the pinned artifact;
-  the change is an import swap confined to the two `compat` classes, exactly as designed.
+  `build/libs/mcareputation-0.3.0.jar` is the distributable artifact directly.
+- MCA Reborn's classes are resolved by name at runtime through a reflection-only binding in `McaReflect`,
+  bound to the single unrelocated `net.conczin.mca` root. A missing MCA member logs one startup error
+  and degrades the feature instead of failing at classload. `McaBinaryAbiTest` audits every reflected
+  member against the pinned MCA jar SHA-256. Every other class is forbidden from importing MCA by
+  `checkJarContents` and `OptionalClassloadTest`, which now also forbid any Forge or relocated-MCA
+  bytecode.
 - Networking was rewritten from a `SimpleChannel` with numeric discriminators to five named
   `CustomPacketPayload`s on a `PayloadRegistrar`, protocol version `3`. Decoding is now bounded as
-  well as encoding: an oversized collection count is rejected before anything is allocated, where the
-  Forge build read whatever the sender claimed.
+  well as encoding: an oversized collection count is rejected before anything is allocated.
 - `LivingHurtEvent` became `LivingDamageEvent.Post`, and the damage threshold now reads
   `getNewDamage()` — the health actually lost after armour, enchantments and absorption. This is what
   keeps the chip-damage threshold and the assault/death coalescing meaning what they always meant.
 - The client dispatch seam no longer uses `DistExecutor`, which NeoForge removed. Common packet code
   now calls an installable sink expressed only in this mod's own payload records, and the client
-  installs a real implementation during client setup. A dedicated server still resolves no client
-  class — now checked directly against the compiled bytecode rather than trusted to an idiom.
+  installs a real implementation during client setup. A dedicated server still resolves no client class.
 
 **Deliberately unchanged.** The saved-data format is still version `1` and the file is still
-`mcareputation.dat` in the overworld's data storage: a world from the 1.20.1 build loads here with
-every score, incident, witness, title, dedupe entry and high-water mark intact, and there is a
-checked-in golden fixture written by the old serializer that proves it. Every config key, default and
-filename is unchanged. Every datapack path is unchanged, including the legacy `mcaquests` ones. The
-public API generation is still `1` — though add-ons compiled against the Forge artifact must be
-rebuilt, because their loader and event-bus imports moved with the platform.
+`mcareputation.dat` in the overworld's data storage: a 1.20.1 world loads here with every score,
+incident, witness, title, dedupe entry and high-water mark intact. Every config key, default and
+filename is unchanged. Every datapack path is unchanged, including the legacy `mcaquests` ones.
 
 **No downgrade.** Opening a world in 1.21.1 is not a supported path back to 1.20.1. Vanilla's world
 upgrade is one-way regardless of this mod.
 
-### Fixed
+### Folded in: [0.2.0] — the full-tree review before first release
+
+A full-tree review: score-integrity fixes, command and interface repairs, config that does what it
+says, and the transaction finally under test.
+
+#### Fixed
 
 **Score integrity**
 
@@ -126,7 +217,7 @@ upgrade is one-way regardless of this mod.
   over-limit tier bias is an error (the runtime clamps it), and malformed tags or gossip variables
   are caught with the exact file and field.
 
-### Added
+#### Added
 
 - **Core-incident authority** — `McaReputationApi.registerCoreIncidentAuthority` and
   `hasExternalAuthority`, with the public `CoreIncidentKind`, `CoreIncidentAuthority`, and
@@ -164,14 +255,14 @@ Superseded by 0.2.0 before any release was tagged.
 | Mod | Version |
 |---|---|
 | Minecraft | `1.21.1` |
-| NeoForge | `21.1.248+` (metadata range `[21.1.248,21.2)`) |
+| NeoForge | `21.1.249+` (metadata range `[21.1.249,21.2)`) |
 | MCA Reborn | `7.7.x` (metadata range `[7.7,8)`) — built against `7.7.36-beta.3+1.21.1` |
 | MCA: Quests | `1.1.0+` (optional) |
 | MCA: Conversations | `2.0.0+` (optional) |
 | MCA: Crime | `0.1.0+` (optional) |
 
-*Historical note: 0.2.0 was originally developed against Minecraft 1.20.1 / Forge 47.4.10 with MCA
-`7.6`–`7.7`. It was ported to the platform above before first release; see* Ported *above.*
+*Historical note: 0.1.0 and 0.2.0 were never published; their change set is folded into 0.3.0.
+This section shows the feature foundation that preceded the first public release.*
 
 ### Added
 

@@ -1,8 +1,14 @@
 # MCA: Reputation — Java API
 
-**API version 1.** `McaReputationApi.getApiVersion()` returns the generation this build implements.
+**API version 2.** `McaReputationApi.getApiVersion()` returns the generation this build implements.
 Check it before using anything below; a bridge that refuses an unexpected version degrades gracefully,
 whereas one that assumes gets a `NoSuchMethodError` in the middle of somebody's quest turn-in.
+
+Version 2 identifies the NeoForge generation. The public event types (`ReputationChangedEvent`,
+`ReputationTierChangedEvent`, `ReputationIncidentCreatedEvent`, `ReputationIncidentResolvedEvent`,
+`ReputationTitleGrantedEvent`) now extend `net.neoforged.bus.api.Event` instead of the Forge
+equivalents. Bridges built against version 1 must be re-targeted and recompiled: their event base
+class no longer links and their loader imports moved with the platform.
 
 Everything stable lives in `dev.otectus.mcareputation.api`. Nothing there exposes an MCA internal type
 or a mutable internal record.
@@ -189,14 +195,15 @@ honest — answer `false` the moment your detector or your bridge is off, and Re
 detection on the very next event. This is deliberately stronger than a `ModList.isLoaded` check: an
 installed-but-broken companion cannot create an incident black hole, because it simply stops claiming.
 
-Reputation stands down only when **exactly one healthy authority** claims the kind. Zero claims means
-it produces the deed itself. Two or more means the setup is ambiguous, and rather than pick a winner
-it logs an error and keeps producing — a visible duplicate is recoverable, a deed that silently never
-existed is not.
+Reputation stands down if **any registered authority** claims the kind. The first claimant wins; if zero
+authorities claim it, this mod produces the deed. A claimant that throws is treated as not claiming,
+so detection stays with this mod — the risk of that direction is a duplicate, which is visible in the
+ledger the moment it happens; the other risk is a deed recorded by nobody, which is not recoverable.
 
-A throwing `owns` reads as unclaimed (rate-limited in the log). A null, id-less, or duplicate-id
-authority is rejected with one error and an inert handle; the handle is never null. Close the handle
-to withdraw the claim; closing twice is harmless.
+A null authority is rejected immediately with `IllegalArgumentException`. Withdraw a claim by calling
+`close()` on the returned handle; the claim ceases immediately and detection returns to this mod on the
+very next event. `close()` is idempotent. Claims survive a server stop and remain active for the next
+world loaded in the same JVM.
 
 Reserved surface, carried but not yet consumed in this version: `TitleDefinition.revocable`,
 `TitleDefinition.icon`, and the `BuiltinIncidents.SOURCE_*` constants. Set them freely; they gain
@@ -258,11 +265,10 @@ public final class MyReputationListener {
 }
 ```
 
-> **Add-ons built against the Forge 1.20.1 artifact must be recompiled.** `getApiVersion()` still
-> returns `1` — the operations and their meanings are unchanged — but the event base class and the
-> bus moved from `net.minecraftforge.eventbus.api.Event` / `MinecraftForge.EVENT_BUS` to the NeoForge
-> equivalents above. That is a platform boundary, not a new API contract, so nothing in the tables
-> below changed. Java 21 is required.
+> **Add-ons built against the Forge 1.20.1 artifact must be recompiled.** The event base class and
+> the bus moved from `net.minecraftforge.eventbus.api.Event` / `MinecraftForge.EVENT_BUS` to the
+> NeoForge equivalents above. `getApiVersion()` returns `2` to identify this generation; a bridge
+> should refuse any other value. Java 21 is required.
 
 
 All five are **server-side, posted after the canonical commit, immutable, and non-cancellable**. The

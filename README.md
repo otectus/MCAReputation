@@ -6,7 +6,7 @@ An add-on for [Minecraft Comes Alive: Reborn](https://modrinth.com/mod/minecraft
 gives every MCA village a memory. Help people and word gets around. Hurt someone where others can see,
 and word gets around about that too.
 
-- **Minecraft** 1.21.1 · **NeoForge** 21.1.248+ · **Java** 21
+- **Minecraft** 1.21.1 · **NeoForge** 21.1.249+ · **Java** 21
 - **Requires** MCA Reborn 7.7.x (built and verified against `7.7.36-beta.3+1.21.1`)
 - **Optional companions** MCA: Quests, MCA: Conversations, MCA: Crime
 - **Licence** GPL-3.0-only
@@ -110,8 +110,9 @@ worked examples are in **[DATAPACK.md](DATAPACK.md)**.
 ## For mod authors
 
 A stable, server-authoritative Java API plus five NeoForge events. See **[API.md](API.md)**.
-The API generation is still `1`, but add-ons built against the Forge 1.20.1 artifact must be
-recompiled: the event bus and loader imports moved with the platform.
+The API generation is `2`. Add-ons built against the Forge 1.20.1 artifact or the first NeoForge port
+must be recompiled: the public event types now extend NeoForge's Event class instead of Forge's,
+which breaks their event bus imports and linkage.
 
 ## Upgrading an existing world
 
