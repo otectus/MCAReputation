@@ -33,9 +33,42 @@ class ScrollMathTest {
                 "clamped to the shorter list's overflow after cycling communities");
     }
 
+    /** Dragging the scroller must land where the painted thumb already is, at both ends. */
+    @Test
+    void draggingTheThumbRoundTripsThroughItsPaintedPosition() {
+        int trackHeight = 100;
+        int contentHeight = 400;
+        assertEquals(0.0, ScrollMath.scrollForThumbTop(0, contentHeight, trackHeight),
+                "the top of the track is the top of the content");
+        int travel = trackHeight - ScrollMath.thumbHeight(contentHeight, trackHeight);
+        assertEquals(ScrollMath.maxScroll(contentHeight, trackHeight),
+                ScrollMath.scrollForThumbTop(travel, contentHeight, trackHeight),
+                "the bottom of the track is the bottom of the content");
+        assertEquals(0.0, ScrollMath.scrollForThumbTop(-40, contentHeight, trackHeight),
+                "a drag above the track clamps rather than scrolling backwards");
+        assertEquals(ScrollMath.maxScroll(contentHeight, trackHeight),
+                ScrollMath.scrollForThumbTop(999, contentHeight, trackHeight));
+
+        for (int thumbTop = 0; thumbTop <= travel; thumbTop++) {
+            double scroll = ScrollMath.scrollForThumbTop(thumbTop, contentHeight, trackHeight);
+            assertEquals(thumbTop, ScrollMath.thumbY(scroll, contentHeight, trackHeight),
+                    "the drag and the paint disagreed at thumb offset " + thumbTop);
+        }
+    }
+
+    /** Content that fits has nowhere to drag to, and must not divide by a zero-length travel. */
+    @Test
+    void draggingContentThatFitsDoesNothing() {
+        assertEquals(0.0, ScrollMath.scrollForThumbTop(50, 80, 100));
+        assertEquals(0.0, ScrollMath.scrollForThumbTop(50, 4000, 12),
+                "no travel once the thumb fills the track");
+    }
+
     @Test
     void thumbStaysGrabbableAndInTrack() {
         assertTrue(ScrollMath.thumbHeight(4000, 100) >= 16, "never too small to grab");
+        assertEquals(12, ScrollMath.thumbHeight(4000, 12),
+                "but never taller than the track, however small the GUI scale gets");
         int trackHeight = 100;
         int contentHeight = 400;
         int atBottom = ScrollMath.thumbY(ScrollMath.maxScroll(contentHeight, trackHeight),

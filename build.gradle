@@ -252,16 +252,31 @@ tasks.register('checkJarContents') {
         }
 
         // --- required metadata ---
-        ['META-INF/neoforge.mods.toml', 'assets/mcareputation/lang/en_us.json',
-         'data/mcareputation/mcareputation/reputation_tiers/default.json',
-         'data/mcareputation/mcareputation/incidents/villager_assaulted.json',
-         'data/mcaquests/mcaquests/titles/honored_of_village.json'].each {
+        // The nine GUI sprites and the seven nine-slice records the atlas reads their
+        // scaling from. A sprite that ships without its .mcmeta does not fail to load: it
+        // silently stretches, which looks like a layout bug and is a packaging one.
+        def slicedSprites = ['panel', 'well', 'progress_track', 'progress_fill',
+                             'scroll_groove', 'scroll_thumb', 'separator']
+        def guiSprites = slicedSprites + ['arrow_left', 'arrow_right']
+        def required = ['META-INF/neoforge.mods.toml', 'assets/mcareputation/lang/en_us.json',
+                        'data/mcareputation/mcareputation/reputation_tiers/default.json',
+                        'data/mcareputation/mcareputation/incidents/villager_assaulted.json',
+                        'data/mcaquests/mcaquests/titles/honored_of_village.json']
+        def spriteDir = 'assets/mcareputation/textures/gui/sprites/reputation/'
+        // .toString() is load-bearing: a GString is never equal to the String jar entry, so
+        // an interpolated name would report every sprite missing however well it packaged.
+        guiSprites.each { required << "${spriteDir}${it}.png".toString() }
+        slicedSprites.each { required << "${spriteDir}${it}.png.mcmeta".toString() }
+        required.each {
             if (!entries.contains(it)) {
                 problems << "missing ${it}"
             }
         }
         // NeoForge synthesises pack metadata for mods; a shipped 1.20.1 pack.mcmeta would be stale.
-        ['META-INF/mods.toml', 'pack.mcmeta'].each {
+        // The 1.20.1 sprite sheet goes with them: nothing blits UVs into it any more, and shipping
+        // it would leave two sources of truth for the same frame.
+        ['META-INF/mods.toml', 'pack.mcmeta',
+         'assets/mcareputation/textures/gui/reputation.png'].each {
             if (entries.contains(it)) {
                 problems << "${it} must not be packaged (Forge-era file)"
             }
