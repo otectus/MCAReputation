@@ -76,6 +76,9 @@ public final class McaReputationMod {
     private void onCommonSetup(net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent event) {
         McaReputation.LOGGER.info("[MCA: Reputation] {} ready (API v{})", McaReputation.MOD_ID,
                 dev.otectus.mcareputation.api.McaReputationApi.getApiVersion());
+        // Forces the MCA binding to resolve before any gameplay, so an incompatibility is one ERROR
+        // line at startup rather than a surprise mid-tick.
+        event.enqueueWork(dev.otectus.mcareputation.compat.McaReflect::selfTest);
     }
 
     @SubscribeEvent

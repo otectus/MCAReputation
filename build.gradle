@@ -103,6 +103,48 @@ test {
     // the real shipped resources off disk (ContentValidationTest, LangParityTest,
     // OptionalClassloadTest, NeoForgePortLintTest) cannot reach src/ through a relative path.
     systemProperty 'mcareputation.projectRoot', project.projectDir.absolutePath
+
+    // The exact MCA artifact this build compiled against, for McaBinaryAbiTest. Resolved lazily so a
+    // checkout that cannot reach the Conczin Maven still runs every other test: the property is then
+    // absent and the ABI audit disables itself rather than failing.
+    systemProperty 'mcareputation.mcaJar', providers.provider { mcaJarFile()?.absolutePath ?: '' }.get()
+    // Digest of the artifact the surface in McaReflect was audited against. Empty until filled in;
+    // the audit then skips the identity check rather than pinning to nothing. See gradle.properties.
+    systemProperty 'mcareputation.mcaJarSha256', project.findProperty('mca_jar_sha256') ?: ''
+}
+
+/**
+ * The resolved mca-neoforge jar, or null when it cannot be resolved. Never throws: a missing artifact
+ * must degrade the ABI audit, not break `test`.
+ */
+File mcaJarFile() {
+    try {
+        return configurations.compileClasspath.incoming.artifactView { view ->
+            view.lenient = true
+        }.artifacts.artifacts.find { artifact ->
+            artifact.id.componentIdentifier.hasProperty('module')
+                    ? artifact.id.componentIdentifier.module == 'mca-neoforge'
+                    : false
+        }?.file
+    } catch (Exception ignored) {
+        return null
+    }
+}
+
+tasks.register('mcaJarInfo') {
+    group = 'verification'
+    description = 'Prints the resolved MCA jar and its SHA-256, for the mca_jar_sha256 pin.'
+    doLast {
+        def jar = mcaJarFile()
+        if (jar == null) {
+            logger.lifecycle('mcaJarInfo: mca-neoforge did not resolve on the compile classpath.')
+            return
+        }
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        def hex = digest.digest(jar.bytes).encodeHex().toString()
+        logger.lifecycle("mcaJarInfo: path   = ${jar.absolutePath}")
+        logger.lifecycle("mcaJarInfo: sha256 = ${hex}")
+    }
 }
 
 // Expand metadata placeholders into neoforge.mods.toml at build time.
@@ -235,9 +277,9 @@ tasks.register('checkJarContents') {
                 problems << "${shaded.size()} shaded class(es) under ${prefix}, e.g. ${shaded.first()}"
             }
         }
-        // Our own two compat classes legitimately name MCA in their constant pool; nothing else may.
-        def mcaAllowed = ['dev/otectus/mcareputation/compat/McaCompat.class',
-                          'dev/otectus/mcareputation/compat/McaScreenCompat.class'] as Set
+        // MCA is reflection-only: every MCA name lives in a string literal, so no class in the jar
+        // may carry a net/conczin/mca/ constant-pool entry at all.
+        def mcaAllowed = [] as Set
         bytecodeHits.each { prefix, hits ->
             def offenders = prefix == 'net/conczin/mca/'
                     ? hits.findAll { !mcaAllowed.contains(it) }

@@ -1,5 +1,6 @@
 package dev.otectus.mcareputation;
 
+import dev.otectus.mcareputation.compat.McaReflect;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -10,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -66,26 +68,32 @@ class OptionalClassloadTest {
     }
 
     /**
-     * §11: only {@code compat} may import {@code net.conczin.mca.*}. Everything else must go through
-     * it, so an MCA signature change has exactly one place to be fixed.
+     * §14: MCA stays reflection-only, so <em>no</em> source file may import
+     * {@code net.conczin.mca.*} - not even {@code compat}, which used to be the one exemption.
+     * {@link McaReflect} resolves every MCA class by name, so an import anywhere would re-bind this
+     * jar to a single MCA generation.
      */
     @Test
-    void onlyTheCompatPackageImportsMca() throws IOException {
+    void noSourceFileImportsMca() throws IOException {
         List<String> offenders = new ArrayList<>();
         Path sourceRoot = TestPaths.mainSourceRoot();
         try (Stream<Path> files = Files.walk(sourceRoot)) {
             for (Path file : files.filter(path -> path.toString().endsWith(".java")).toList()) {
-                if (file.toString().replace('\\', '/').contains("/compat/")) {
-                    continue;
-                }
                 String source = Files.readString(file, StandardCharsets.UTF_8);
                 if (source.contains("import net.conczin.mca.")) {
                     offenders.add(sourceRoot.relativize(file).toString());
                 }
             }
         }
-        assertTrue(offenders.isEmpty(), () -> "MCA imports outside compat:\n  "
+        assertTrue(offenders.isEmpty(), () -> "MCA must be reflection-only; imports found in:\n  "
                 + String.join("\n  ", offenders));
+    }
+
+    /** §14.1: exactly one supported package root, and it is the unrelocated 1.21.1 one. */
+    @Test
+    void theOnlySupportedMcaRootIsTheUnrelocatedOne() {
+        assertEquals(List.of("net.conczin.mca"), McaReflect.SUPPORTED_ROOTS,
+                "the 1.20.1 Forgix roots cannot satisfy a 1.21.1 MCA and must not be probed");
     }
 
     /** §36.5: a dedicated server must never be handed a client class by mod initialisation. */
@@ -107,6 +115,42 @@ class OptionalClassloadTest {
         }
         assertTrue(offenders.isEmpty(), () -> "client references outside the client package:\n  "
                 + String.join("\n  ", offenders));
+    }
+
+    /**
+     * §14.3: {@code McaScreenCompat} keeps its {@code compat} package to minimise churn, so it is
+     * the one class outside {@code client} allowed to name {@code net.minecraft.client}. That
+     * exemption is only safe while nothing but the client entry point can reach it.
+     */
+    @Test
+    void onlyTheScreenBridgeNamesAClientTypeOutsideTheClientPackage() throws IOException {
+        String screenBridge = "dev/otectus/mcareputation/compat/McaScreenCompat";
+        List<String> offenders = new ArrayList<>();
+        List<String> reachers = new ArrayList<>();
+        Path classRoot = TestPaths.compiledMainClasses();
+        try (Stream<Path> files = Files.walk(classRoot)) {
+            for (Path file : files.filter(path -> path.toString().endsWith(".class")).toList()) {
+                String name = classRoot.relativize(file).toString().replace('\\', '/');
+                String owner = name.substring(0, name.length() - ".class".length());
+                String content = new String(Files.readAllBytes(file), StandardCharsets.ISO_8859_1);
+                boolean inClientPackage = owner.startsWith("dev/otectus/mcareputation/client/");
+                if (!inClientPackage && !owner.equals(screenBridge)
+                        && content.contains("net/minecraft/client/")) {
+                    offenders.add(owner);
+                }
+                // Nested and synthetic classes carry the outer name, so trim at the first '$'.
+                String outer = owner.contains("$") ? owner.substring(0, owner.indexOf('$')) : owner;
+                if (!outer.equals(screenBridge) && content.contains(screenBridge)
+                        && !reachers.contains(outer)) {
+                    reachers.add(outer);
+                }
+            }
+        }
+        assertTrue(offenders.isEmpty(), () -> "only McaScreenCompat may name a client type outside "
+                + "the client package:\n  " + String.join("\n  ", offenders));
+        assertEquals(List.of("dev/otectus/mcareputation/client/ReputationClient"), reachers,
+                "ReputationClient must stay the only route to the screen bridge, so a dedicated "
+                        + "server never loads it");
     }
 
     /**

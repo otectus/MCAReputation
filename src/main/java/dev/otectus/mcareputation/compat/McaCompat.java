@@ -2,15 +2,7 @@ package dev.otectus.mcareputation.compat;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
-import net.conczin.mca.entity.VillagerEntityMCA;
-import net.conczin.mca.entity.VillagerLike;
-import net.conczin.mca.entity.ai.relationship.AgeState;
-import net.conczin.mca.server.world.data.FamilyTree;
-import net.conczin.mca.server.world.data.FamilyTreeNode;
-import net.conczin.mca.server.world.data.Village;
-import net.conczin.mca.server.world.data.VillageManager;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Vec3i;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
@@ -25,27 +17,34 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The single point of contact with Minecraft Comes Alive: Reborn (spec §11, §12.4).
  *
- * <p><b>Why {@code net.conczin.mca.*} and not {@code net.mca.*}?</b> MCA Reborn ships a Forgix-merged
- * "Universal" jar covering Forge, Fabric, and Quilt. Forgix relocates each loader's classes under a
- * loader-named root package, so the Forge classes are physically {@code net.conczin.mca.*} in both the
- * production jar and the dev-remapped one. The sibling MCA add-ons take the same approach.
+ * <p>This class names no MCA type. MCA moves its base package between releases — {@code net.mca}
+ * became {@code net.conczin.mca} in 7.7.1 — so every MCA class and method is resolved by name at
+ * runtime in {@link McaReflect}, and this class is the policy layer on top: guards, safe defaults,
+ * and the vanilla calls that must stay vanilla. See {@link McaReflect} for why reflection is the
+ * mechanism and why vanilla methods are deliberately <em>not</em> reflected.
  *
- * <p><b>Every method fails safe.</b> {@code instanceof} guards, {@code try/catch (Throwable)}, a DEBUG
- * log, and a documented default. MCA publishes no stable API, so a signature that moves between 7.6
- * and 7.7 — or in a future release — must degrade this mod's behaviour, never crash a server mid-tick.
- * The DEBUG logs are gated behind {@code debugLogging} so a persistent incompatibility does not fill
- * the log at one line per event.
+ * <p><b>Every method fails safe, and this time the guard is in the right place.</b> Version 0.2.0
+ * claimed the same thing but put its {@code instanceof} <em>outside</em> the {@code try}: class
+ * resolution happens at that instruction, so a renamed MCA package threw
+ * {@code NoClassDefFoundError} straight through {@code LivingHurtEvent} and killed the server tick
+ * loop. Here the type test lives inside the guarded region, and {@link LinkageError} is caught
+ * <b>before</b> {@link Throwable} in every method — that ordering is the whole point.
  *
- * <p>Phase 0 verified with {@code javap} that every signature consumed here is byte-identical on MCA
- * {@code 7.6.20} and {@code 7.7.0-beta.2}, so no reflection or version branch is needed. The one known
- * drift — {@code Personality} moving from an enum to a registry class — is consumed only through
- * {@code Object#toString()}, which exists on both.
+ * <p>A {@code LinkageError} means the ABI assumption is wrong, so it trips a one-shot latch that
+ * disables MCA integration for the session and logs one ERROR. Retrying per call would re-throw once
+ * per damage tick, which is the log-flood this class was already written to avoid. Ordinary
+ * per-call failures keep the old behaviour: a {@code debugLogging}-gated DEBUG line and the
+ * documented default.
  */
 public final class McaCompat {
+
+    /** Tripped by the first {@link LinkageError}; never reset. See the class javadoc. */
+    private static final AtomicBoolean DISABLED = new AtomicBoolean();
 
     private McaCompat() {
     }
@@ -56,38 +55,92 @@ public final class McaCompat {
         }
     }
 
+    /** Exactly one ERROR per JVM however many threads race here. */
+    private static void linkageFailure(String what, LinkageError error) {
+        if (DISABLED.compareAndSet(false, true)) {
+            McaReputation.LOGGER.error("[MCA: Reputation] MCA integration DISABLED for this session: "
+                    + "{} failed to link against the installed MCA. Detected MCA: {}, package root {}. "
+                    + "This build supports {}. Update MCA: Reputation, or roll MCA back to a supported "
+                    + "version. No new deeds will be recorded; standing already in the save is "
+                    + "untouched and still readable with /mcareputation.",
+                    what, McaReflect.installedMca(), McaReflect.root(),
+                    McaReflect.SUPPORTED_ROOTS, error);
+        }
+    }
+
+    /** False once MCA integration has been switched off, or when no supported MCA was found. */
+    private static boolean live() {
+        return !DISABLED.get() && McaReflect.isAvailable();
+    }
+
     // ------------------------------------------------------------------
     // Villager identity
     // ------------------------------------------------------------------
 
     /** True for an MCA human villager. Zombie variants are a different class and are excluded (§20.1). */
     public static boolean isMcaVillager(Entity entity) {
-        return entity instanceof VillagerEntityMCA;
+        if (entity == null || !live()) {
+            return false;
+        }
+        try {
+            return McaReflect.isVillager(entity);
+        } catch (LinkageError e) {
+            linkageFailure("isMcaVillager", e);
+            return false;
+        } catch (Throwable t) {
+            fail("isMcaVillager", t);
+            return false;
+        }
     }
 
     /** True for a living MCA villager — the only thing that can witness or be a victim. */
     public static boolean isLivingMcaVillager(Entity entity) {
-        return entity instanceof VillagerEntityMCA villager && villager.isAlive();
+        if (entity == null || !live()) {
+            return false;
+        }
+        try {
+            // isAlive() on a vanilla receiver: reobfJar rewrites the call site, so it must not be
+            // reflected. VillagerEntityMCA extends Villager, so the dispatch is the same one 0.2.0 made.
+            return McaReflect.isVillager(entity) && entity.isAlive();
+        } catch (LinkageError e) {
+            linkageFailure("isLivingMcaVillager", e);
+            return false;
+        } catch (Throwable t) {
+            fail("isLivingMcaVillager", t);
+            return false;
+        }
     }
 
     /** The villager's display name, for caching onto a subject. Safe default: empty. */
     public static Optional<String> villagerName(Entity entity) {
-        if (entity instanceof VillagerEntityMCA villager) {
-            try {
-                return Optional.ofNullable(villager.getDisplayName()).map(name -> name.getString());
-            } catch (Throwable t) {
-                fail("villagerName", t);
-            }
+        if (entity == null || !live()) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        try {
+            if (!McaReflect.isVillager(entity)) {
+                return Optional.empty();
+            }
+            // Vanilla call on a vanilla receiver, for the same reason as isAlive() above.
+            return Optional.ofNullable(entity.getDisplayName()).map(name -> name.getString());
+        } catch (LinkageError e) {
+            linkageFailure("villagerName", e);
+            return Optional.empty();
+        } catch (Throwable t) {
+            fail("villagerName", t);
+            return Optional.empty();
+        }
     }
 
     /** Resolves a possibly-unloaded villager's name from MCA's family tree. Safe default: empty. */
     public static Optional<String> familyTreeName(ServerLevel level, UUID villagerUuid) {
+        if (!live()) {
+            return Optional.empty();
+        }
         try {
-            return FamilyTree.get(level).getOrEmpty(villagerUuid)
-                    .map(FamilyTreeNode::getName)
-                    .filter(name -> !name.isBlank());
+            return McaReflect.familyTreeName(level, villagerUuid).filter(name -> !name.isBlank());
+        } catch (LinkageError e) {
+            linkageFailure("familyTreeName", e);
+            return Optional.empty();
         } catch (Throwable t) {
             fail("familyTreeName", t);
             return Optional.empty();
@@ -102,27 +155,23 @@ public final class McaCompat {
      * of the player's standing (§30.5).
      */
     public static Optional<String> ageGroup(Entity villager) {
-        if (villager instanceof VillagerLike<?> like) {
-            try {
-                AgeState state = like.getAgeState();
-                return state == null ? Optional.empty() : Optional.of(state.name().toLowerCase(Locale.ROOT));
-            } catch (Throwable t) {
-                fail("ageGroup", t);
-            }
+        if (villager == null || !live()) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        try {
+            return McaReflect.ageStateName(villager).map(name -> name.toLowerCase(Locale.ROOT));
+        } catch (LinkageError e) {
+            linkageFailure("ageGroup", e);
+            return Optional.empty();
+        } catch (Throwable t) {
+            fail("ageGroup", t);
+            return Optional.empty();
+        }
     }
 
     /** True when the villager is an adult. Fails <b>closed</b>: an MCA read failure means "not adult". */
     public static boolean isAdult(Entity villager) {
-        if (villager instanceof VillagerLike<?> like) {
-            try {
-                return like.getAgeState() == AgeState.ADULT;
-            } catch (Throwable t) {
-                fail("isAdult", t);
-            }
-        }
-        return false;
+        return ageGroup(villager).filter("adult"::equals).isPresent();
     }
 
     /**
@@ -131,21 +180,24 @@ public final class McaCompat {
      *
      * <p>Version-agnostic on purpose: MCA 7.6 declares {@code Personality} as an enum and 7.7 as a
      * registry-backed class, so neither {@code name()} (gone in 7.7) nor {@code getPersonalityId()}
-     * (absent in 7.6) can be called from one binary without reflection. {@code toString()} exists in
-     * both — {@code "ODD"} on 7.6, {@code "mca:odd"} on 7.7 — and normalising strips the difference.
+     * (absent in 7.6) can be relied on. {@code toString()} exists in both — {@code "ODD"} on 7.6,
+     * {@code "mca:odd"} on 7.7 — and normalising strips the difference.
      */
     public static Optional<String> personality(Entity villager) {
-        if (villager instanceof VillagerEntityMCA mca) {
-            try {
-                return Optional.ofNullable(mca.getVillagerBrain().getPersonality())
-                        .map(Object::toString)
-                        .map(McaCompat::normalizePersonality)
-                        .filter(id -> !id.isEmpty());
-            } catch (Throwable t) {
-                fail("personality", t);
-            }
+        if (villager == null || !live()) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        try {
+            return McaReflect.personalityString(villager)
+                    .map(McaCompat::normalizePersonality)
+                    .filter(id -> !id.isEmpty());
+        } catch (LinkageError e) {
+            linkageFailure("personality", e);
+            return Optional.empty();
+        } catch (Throwable t) {
+            fail("personality", t);
+            return Optional.empty();
+        }
     }
 
     private static String normalizePersonality(String raw) {
@@ -160,24 +212,30 @@ public final class McaCompat {
 
     /** The id of the villager's home village. Safe default: empty. */
     public static OptionalInt homeVillageId(Entity villager) {
-        if (villager instanceof VillagerEntityMCA mca) {
-            try {
-                return mca.getResidency().getHomeVillage()
-                        .map(village -> OptionalInt.of(village.getId()))
-                        .orElseGet(OptionalInt::empty);
-            } catch (Throwable t) {
-                fail("homeVillageId", t);
-            }
+        if (villager == null || !live()) {
+            return OptionalInt.empty();
         }
-        return OptionalInt.empty();
+        try {
+            return McaReflect.homeVillageId(villager);
+        } catch (LinkageError e) {
+            linkageFailure("homeVillageId", e);
+            return OptionalInt.empty();
+        } catch (Throwable t) {
+            fail("homeVillageId", t);
+            return OptionalInt.empty();
+        }
     }
 
     /** The nearest village id within {@code radius} of a position. Safe default: empty. */
     public static OptionalInt nearestVillageId(ServerLevel level, BlockPos pos, int radius) {
+        if (!live()) {
+            return OptionalInt.empty();
+        }
         try {
-            return VillageManager.get(level).findNearestVillage(pos, radius)
-                    .map(village -> OptionalInt.of(village.getId()))
-                    .orElseGet(OptionalInt::empty);
+            return McaReflect.nearestVillageId(level, pos, radius);
+        } catch (LinkageError e) {
+            linkageFailure("nearestVillageId", e);
+            return OptionalInt.empty();
         } catch (Throwable t) {
             fail("nearestVillageId", t);
             return OptionalInt.empty();
@@ -186,8 +244,14 @@ public final class McaCompat {
 
     /** True when a village with this id currently exists in this level. Safe default: false. */
     public static boolean villageExists(ServerLevel level, int villageId) {
+        if (!live()) {
+            return false;
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId).isPresent();
+            return McaReflect.villageExists(level, villageId);
+        } catch (LinkageError e) {
+            linkageFailure("villageExists", e);
+            return false;
         } catch (Throwable t) {
             fail("villageExists", t);
             return false;
@@ -196,8 +260,14 @@ public final class McaCompat {
 
     /** The village's current name. Safe default: empty (the caller falls back to its cached copy). */
     public static Optional<String> villageName(ServerLevel level, int villageId) {
+        if (!live()) {
+            return Optional.empty();
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId).map(Village::getName);
+            return McaReflect.villageName(level, villageId);
+        } catch (LinkageError e) {
+            linkageFailure("villageName", e);
+            return Optional.empty();
         } catch (Throwable t) {
             fail("villageName", t);
             return Optional.empty();
@@ -206,11 +276,14 @@ public final class McaCompat {
 
     /** The village's centre anchor. Safe default: empty. */
     public static Optional<BlockPos> villageCenter(ServerLevel level, int villageId) {
+        if (!live()) {
+            return Optional.empty();
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId).map(village -> {
-                Vec3i center = village.getCenter();
-                return new BlockPos(center.getX(), center.getY(), center.getZ());
-            });
+            return McaReflect.villageCenter(level, villageId);
+        } catch (LinkageError e) {
+            linkageFailure("villageCenter", e);
+            return Optional.empty();
         } catch (Throwable t) {
             fail("villageCenter", t);
             return Optional.empty();
@@ -219,10 +292,14 @@ public final class McaCompat {
 
     /** True when a position lies inside the village's border. Safe default: false. */
     public static boolean isWithinVillage(ServerLevel level, int villageId, BlockPos pos) {
+        if (!live()) {
+            return false;
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId)
-                    .map(village -> village.isWithinBorder(pos, 0))
-                    .orElse(false);
+            return McaReflect.isWithinVillage(level, villageId, pos);
+        } catch (LinkageError e) {
+            linkageFailure("isWithinVillage", e);
+            return false;
         } catch (Throwable t) {
             fail("isWithinVillage", t);
             return false;
@@ -235,11 +312,14 @@ public final class McaCompat {
      * must use. Safe default: empty set.
      */
     public static Set<UUID> residentUuids(ServerLevel level, int villageId) {
+        if (!live()) {
+            return new HashSet<>();
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId)
-                    .map(village -> village.getResidentsUUIDs()
-                            .collect(java.util.stream.Collectors.toCollection(HashSet<UUID>::new)))
-                    .orElseGet(HashSet::new);
+            return McaReflect.residentUuids(level, villageId);
+        } catch (LinkageError e) {
+            linkageFailure("residentUuids", e);
+            return new HashSet<>();
         } catch (Throwable t) {
             fail("residentUuids", t);
             return new HashSet<>();
@@ -253,10 +333,14 @@ public final class McaCompat {
 
     /** Currently-loaded resident entities. Safe default: empty list. */
     public static List<Entity> loadedResidents(ServerLevel level, int villageId) {
+        if (!live()) {
+            return new ArrayList<>();
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId)
-                    .map(village -> new ArrayList<Entity>(village.getResidents(level)))
-                    .orElseGet(ArrayList::new);
+            return McaReflect.loadedResidents(level, villageId);
+        } catch (LinkageError e) {
+            linkageFailure("loadedResidents", e);
+            return new ArrayList<>();
         } catch (Throwable t) {
             fail("loadedResidents", t);
             return new ArrayList<>();
@@ -265,10 +349,14 @@ public final class McaCompat {
 
     /** UUID → name for the full residency set, including unloaded residents. Safe default: empty map. */
     public static Map<UUID, String> residentNames(ServerLevel level, int villageId) {
+        if (!live()) {
+            return new HashMap<>();
+        }
         try {
-            return VillageManager.get(level).getOrEmpty(villageId)
-                    .map(village -> new HashMap<>(village.getResidentNames()))
-                    .orElseGet(HashMap::new);
+            return McaReflect.residentNames(level, villageId);
+        } catch (LinkageError e) {
+            linkageFailure("residentNames", e);
+            return new HashMap<>();
         } catch (Throwable t) {
             fail("residentNames", t);
             return new HashMap<>();
@@ -282,11 +370,14 @@ public final class McaCompat {
     /**
      * Whether {@code observer} can actually see {@code target}.
      *
-     * <p>Fails <b>open</b> (returns true) on an MCA/vanilla read failure, unlike most of this class.
+     * <p>Fails <b>open</b> (returns true) on a vanilla read failure, unlike most of this class.
      * The asymmetry is deliberate: the alternative default would mean a broken line-of-sight check
      * silently makes every crime unwitnessed, which is both the more exploitable outcome and the
      * harder one to notice. Witnessing something that was in fact behind a wall is a cosmetic
      * inaccuracy; letting murder go unnoticed is not.
+     *
+     * <p>Touches no MCA type, so it sits deliberately <b>outside</b> the disable latch: switching it
+     * off when MCA fails to link would silently un-witness every deed for the rest of the session.
      */
     public static boolean hasLineOfSight(LivingEntity observer, Entity target) {
         try {
