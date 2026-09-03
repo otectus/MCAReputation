@@ -45,11 +45,15 @@ import java.util.UUID;
  * <p>{@link #getApiVersion()} lets a bridge refuse an incompatible future version gracefully instead
  * of dying on a {@code NoSuchMethodError}. Bump it only for a breaking change to these signatures;
  * {@code API.md} documents what each version guarantees.
+ *
+ * <p><b>This is version 2.</b> The public event types in {@code api.event} now extend NeoForge's
+ * event base rather than Forge's, so the bytecode a bridge compiled against version 1 no longer
+ * links: a companion written against 1 must re-target this API and recompile, not merely re-resolve.
  */
 public final class McaReputationApi {
 
     /** Incremented only on a breaking change to this class's signatures (§25). */
-    private static final int API_VERSION = 1;
+    private static final int API_VERSION = 2;
 
     private McaReputationApi() {
     }
