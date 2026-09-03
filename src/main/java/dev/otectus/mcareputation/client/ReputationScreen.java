@@ -5,6 +5,7 @@ import dev.otectus.mcareputation.network.ReputationNetwork;
 import dev.otectus.mcareputation.reputation.ReputationMath;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Renderable;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
@@ -370,19 +371,29 @@ public final class ReputationScreen extends Screen {
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         // 1.21.1 takes the pointer and partial tick too; the old one-argument form is gone.
+        // This is the ONLY background pass. Screen.render() would call renderBackground again,
+        // and in 1.21 that runs the blur post-effect over everything already drawn - the panel
+        // and its text included - so the widgets are rendered directly instead of via super.
         renderBackground(graphics, mouseX, mouseY, partialTick);
         GuiTextures.panel(graphics, panelLeft, panelTop, panelWidth, panelHeight);
 
         Optional<ReputationNetwork.SelectedDetail> detail = ClientReputationData.selected();
         if (detail.isEmpty()) {
             renderEmptyState(graphics);
-            super.render(graphics, mouseX, mouseY, partialTick);
+            renderWidgets(graphics, mouseX, mouseY, partialTick);
             return;
         }
         renderHeader(graphics, detail.get());
         renderDeeds(graphics);
         renderFooter(graphics);
-        super.render(graphics, mouseX, mouseY, partialTick);
+        renderWidgets(graphics, mouseX, mouseY, partialTick);
+    }
+
+    /** The widget half of {@link net.minecraft.client.gui.screens.Screen#render}, without its background pass. */
+    private void renderWidgets(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        for (Renderable renderable : renderables) {
+            renderable.render(graphics, mouseX, mouseY, partialTick);
+        }
     }
 
     private void renderEmptyState(GuiGraphics graphics) {
