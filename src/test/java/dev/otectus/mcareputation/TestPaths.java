@@ -64,6 +64,17 @@ public final class TestPaths {
         return requireDirectory(projectRoot().resolve("src/test/resources"));
     }
 
+    /**
+     * {@code build/resources/main} — the {@code processResources} output.
+     *
+     * <p>The metadata tests must read this rather than {@code src/main/resources}: the shipped
+     * {@code neoforge.mods.toml} is a template until the build expands its placeholders, and a
+     * template parses to the literal string {@code ${mod_version}}.
+     */
+    public static Path processedMainResources() {
+        return requireDirectory(projectRoot().resolve("build/resources/main"));
+    }
+
     /** {@code build/classes/java/main} — the compiled main classes, for constant-pool scans. */
     public static Path compiledMainClasses() {
         return requireDirectory(projectRoot().resolve("build/classes/java/main"));

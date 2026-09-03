@@ -88,7 +88,7 @@ public final class ReputationGameplayEvents {
             Entity attacker = event.getSource().getEntity();
             // Only a hit that actually cost health opens the self-defence window; a fully absorbed
             // or negated swing is not something the player needs to answer for retaliating against.
-            if (attacker != null && event.getNewDamage() > 0.0F && McaCompat.isMcaVillager(attacker)) {
+            if (attacker != null && isEffectiveHit(event.getNewDamage()) && McaCompat.isMcaVillager(attacker)) {
                 AssaultTracker.recordVillagerHitPlayer(attacker.getUUID(), player.getUUID(), gameTime);
             }
             return;
@@ -108,7 +108,7 @@ public final class ReputationGameplayEvents {
         if (!McaCompat.isLivingMcaVillager(target)) {
             return;
         }
-        if (event.getNewDamage() < McaReputationConfig.minimumIncidentDamage()) {
+        if (!isRecordableAssault(event.getNewDamage(), McaReputationConfig.minimumIncidentDamage())) {
             return;
         }
         Optional<ServerPlayer> responsible = attribute(event.getSource());
@@ -122,6 +122,30 @@ public final class ReputationGameplayEvents {
             return;
         }
         recordAssault(level, player, target, community.get(), event.getNewDamage(), gameTime);
+    }
+
+    /**
+     * Whether a swing actually cost the victim health.
+     *
+     * <p>Split out of the handler so it can be tested without an event object. A fully absorbed or
+     * negated hit is not something anybody has to answer for: it opens no self-defence window and it
+     * is never a deed. {@code LivingDamageEvent.Post} is not the cancellable stage, so a hit another
+     * mod cancelled never arrives here at all - this covers the hit that arrives worth nothing.
+     */
+    static boolean isEffectiveHit(float appliedDamage) {
+        return appliedDamage > 0.0F;
+    }
+
+    /**
+     * Whether a hit on a villager is worth recording as an assault (§20.1).
+     *
+     * <p>{@code appliedDamage} is post-mitigation health lost, so the threshold means what the option
+     * says it means. The zero check is deliberate and independent of the threshold: with
+     * {@code minimumIncidentDamage} configured to 0 a comparison alone would let a swing that cost no
+     * health become a deed, which is the one thing this hook must never do.
+     */
+    static boolean isRecordableAssault(float appliedDamage, double minimumDamage) {
+        return isEffectiveHit(appliedDamage) && appliedDamage >= minimumDamage;
     }
 
     private static void recordAssault(ServerLevel level, ServerPlayer player, LivingEntity victim,
