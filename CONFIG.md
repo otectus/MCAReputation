@@ -43,11 +43,17 @@ The narrow set of MCA actions detected automatically. See DATAPACK.md for what e
 |---|---|---|---|
 | `enableCoreAssaultIncidents` | `true` | — | Record an incident when a player harms an MCA villager. |
 | `enableCoreKillingIncidents` | `true` | — | Record an incident when a player kills one. |
+| `enableCoreRescueIncidents` | `true` | — | Record an incident when a player kills the mob attacking an MCA villager. |
+| `enableCoreCureIncidents` | `true` | — | Record an incident when a player cures a zombie MCA villager. |
+| `enableCoreRaidIncidents` | `true` | — | Record an incident when a player is credited with a village surviving a raid. |
+| `enableCorePvpIncidents` | `false` | — | Record an incident when a player kills another player where a village can see. Off by default: on most servers duelling is not the village's business. |
 | `minimumIncidentDamage` | `1.0` | `0.0 … 1024.0` | Damage below this is ignored, so chip damage and thorns do not create incidents. Measured *after* armour and absorption. |
 | `attributeTamedDamage` | `true` | — | Attribute damage from a player's tamed animal to that player. Arrows and thrown potions are always attributed to whoever fired or threw them, independently of this. |
 | `selfDefenseWindowTicks` | `100` | `0 … 6000` | If the villager damaged the player within this many ticks first, the retaliation counts as self-defence. `0` disables the concept. |
 | `selfDefenseMultiplier` | `0.25` | `0.0 … 1.0` | Penalty multiplier for a self-defence assault, rounded toward zero. Reduced rather than waived: a brawl in the square is still a brawl. |
 | `assaultCoalesceTicks` | `200` | `1 … 24000` | Repeated hits on the same villager inside this window are one incident, so a sustained beating is not charged once per damage tick. |
+| `rescueThreatWindowTicks` | `100` | `1 … 1200` | How recently a mob must have struck a villager for killing it to still count as a rescue, when the mob is no longer targeting them. |
+| `rescueCoalesceTicks` | `6000` | `0 … 72000` | Rescues of the same villager by the same player within one bucket of this length count once, so a kited mob farm earns nothing. `0` disables bucketing. |
 
 ## `[witnesses]`
 
@@ -58,8 +64,11 @@ The narrow set of MCA actions detected automatically. See DATAPACK.md for what e
 | `requireWitnessLineOfSight` | `true` | — | Require unobstructed sight. A villager on the far side of a wall did not see it. |
 | `minRumorDelayTicks` | `6000` | `0 … 1000000` | Shortest deterministic delay before a non-witness resident hears a rumour. |
 | `maxRumorDelayTicks` | `48000` | `0 … 10000000` | Longest such delay. Normalised upward if set below the minimum. |
+| `enableVillagerOpinion` | `true` | — | Derive what one villager personally makes of a player from the deeds that villager knows about. Nothing extra is saved; turning this off only stops the question being answered. |
+| `opinionHearsayPercent` | `50` | `0 … 100` | Weight, in percent, of a deed a villager only heard about — and of the community baseline, which reaches them the same way. |
+| `opinionInvolvedPercent` | `150` | `100 … 300` | Weight, in percent, of a deed the villager was a subject of. Above 100 because what was done to you counts for more than what you watched. |
 
-Each (incident, villager, community) triple hashes to its own fixed delay inside this window, so a
+Each (incident, villager, community) triple hashes to its own fixed delay inside the rumour window, so a
 village learns gradually rather than all at once — with no stored per-villager knowledge and no tick
 cost. Once a villager knows something they cannot un-know it, not even by winding the clock back.
 
@@ -88,6 +97,18 @@ Each of these is a no-op when the mod in question is absent.
 | `mirrorQuestsFallbackState` | `true` | After each commit, mirror score/tier/title into Quests' own fallback store, so removing this mod later leaves Quests with sensible standing instead of resetting everyone. |
 | `migrateLegacyQuestsData` | `true` | Import a pre-Reputation world's shared Quests village scores into per-player baselines, exactly once per player. See MIGRATION.md. |
 
+## `[visibility]`
+
+Display of standing outside the standing screen. Both are off by default: they are always-on surfaces,
+and a server that wants one will say so.
+
+| Option | Default | Range | What it does |
+|---|---|---|---|
+| `enableScoreboardObjective` | `false` | — | Keep a dummy scoreboard objective holding each online player's standing with the village the standing screen would open on. The objective is created and written; which slot it is displayed in, if any, is left to the server. |
+| `scoreboardObjectiveName` | `mcareputation` | non-blank | Name of that objective. An existing objective with this name is used as it is, never recreated. |
+| `enableTabListTier` | `false` | — | Append the tier name to each player's tab-list entry. Appended to whatever name other mods produced, so it stacks rather than overwrites. |
+| `displayRefreshIntervalTicks` | `100` | `20 … 1200` | How often the displays are swept for online players. Standing changes and dimension changes update immediately; this sweep exists because walking into another village raises no event. |
+
 ---
 
 ## Client — `[display]`
@@ -103,6 +124,7 @@ None of these change what the server records. They change what you are shown.
 | `mergeChangeNotifications` | `true` | When several villages' standing changes arrive in the same tick, combine them into one action-bar line (deltas summed, newest village's name as the label). With this off, only the newest change shows. Tier messages go to chat and are never merged away. |
 | `showExactScore` | `true` | Show the number. With this off, standing is described by tier name and qualitative progress — the server's arithmetic is identical either way. |
 | `showIncidentDeltas` | `true` | Show each deed's numeric contribution in the Standing screen. |
+| `showVillagerOpinion` | `true` | When the screen was opened from a villager, show what that villager personally makes of you beneath the village's own view. |
 
 ## Playing with it turned down
 

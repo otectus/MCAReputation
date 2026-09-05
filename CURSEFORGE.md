@@ -64,10 +64,13 @@ starts decaying after a couple of days); a killing never does.
 ### 🛡️ Deliberately hard to farm
 The mod automatically watches a *narrow, reliable* set of actions: attacking villagers (one
 incident per beating, not per hit — and genuine self-defense costs a quarter of the penalty) and
-killing them (which upgrades the beating rather than stacking on top of it). There is
-deliberately **no** reputation from trading, gifts, or chat spam — those overlap MCA's own hearts
-and are trivially farmable. Everything else comes from authored content: quests, projects,
-situations, conversation choices, datapacks, and commands.
+killing them (which upgrades the beating rather than stacking on top of it). It also records
+rescues when you kill a mob attacking a villager, cures when you free them from zombification,
+and raids when the village survives under your watch — each bringing the village's gratitude. PvP
+killings can be witnessed too (off by default: most servers' duelling is the village's business
+only if an operator says so). There is deliberately **no** reputation from trading, gifts, or
+chat spam — those overlap MCA's own hearts and are trivially farmable. Everything else comes from
+authored content: quests, projects, situations, conversation choices, datapacks, and commands.
 
 ### 🖥️ The Standing screen
 A **Standing** button on MCA's own villager interaction screen (plus an optional keybind, unbound
@@ -76,6 +79,10 @@ titles, and the scrollable list of what they remember. It is drawn from a textur
 vanilla's own container idiom — the same panel frame, the same two text colours, a real draggable
 scrollbar — so it reads as part of the game rather than as a menu bolted on beside it. Prefer
 mystery? A client toggle hides exact numbers and shows only tiers and qualitative progress.
+
+You can also see your standing outside the screen: a scoreboard objective tracks your tier with
+each village, and your tier name can appear in the player tab list. Both are off by default,
+available for servers that want them.
 
 ### 🔒 Multiplayer-safe by construction
 Everything is server-authoritative — clients can't submit scores, deeds, or witnesses. Storage is
@@ -133,6 +140,11 @@ single-handedly decide them). And you can simply ask: *"What do people think of 
 something genuinely hangs over you, an amends path lets you apologise in public and have it
 recorded for what an apology is worth.
 
+Beyond the public standing, each villager forms their own personal opinion of you, drawn from the
+deeds they witnessed or heard about. It is the same reputation ledger, but filtered through what
+that individual villager knows — so a villager who heard a rumor forms a quieter judgment than one
+who saw it happen.
+
 *Conversations `1.1.0+` integrates; deed gossip and the standing topic need `1.2.0+`.*
 
 All three add-ons together close the loop: a promise made in conversation becomes a quest, the
@@ -163,8 +175,9 @@ deltas are shown.
 
 `/mcareputation` (alias `/mcarep`) lets any player check their own standing (`get`, `list`,
 `history`), while operators get the full tree: adjust scores, record or resolve incidents, pin
-notable deeds, grant and revoke titles, inspect tier ladders, validate datapack content, and run
-or inspect the legacy migration. A `debug` branch answers support questions directly:
+notable deeds, grant and revoke titles, inspect tier ladders, validate datapack content, run
+or inspect the legacy migration, export standing data as JSON, rank top players in a village,
+and control which communities are immune to decay. A `debug` branch answers support questions directly:
 `debug standing` prints everything the standing pipeline believes about one player — stored score,
 active tier, the exact amount remaining to the next one, which community the screen would open on
 and whether they have a record there, the integration toggles and the MCA binding — and
@@ -191,5 +204,6 @@ systems report it. A mod that does its own villager-harm detection can claim it 
 
 ## Status & license
 
-**0.3.0** — alpha, first public release, actively developed; feedback and bug reports welcome.
+**0.4.0** — unreleased, in active development.
+**0.3.0** — alpha, first public release.
 Licensed **GPL-3.0-only**, matching MCA Reborn.

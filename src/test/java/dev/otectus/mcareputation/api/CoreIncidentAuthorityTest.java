@@ -66,8 +66,20 @@ class CoreIncidentAuthorityTest {
         CoreIncidentAuthorityRegistration registration =
                 McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("crime_detector"));
         assertTrue(registration.isActive());
-        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_ASSAULT));
-        assertTrue(McaReputationApi.hasExternalAuthority(CoreIncidentKind.MCA_VILLAGER_KILL));
+        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
+            assertTrue(McaReputationApi.hasExternalAuthority(kind), kind + " must be claimable");
+        }
+    }
+
+    /** Withdrawing a claim must hand every kind back, including the ones added after 0.3.0. */
+    @Test
+    void closingTheRegistrationUnclaimsEveryKind() {
+        CoreIncidentAuthorityRegistration registration =
+                McaReputationApi.registerCoreIncidentAuthority(new TestAuthority("crime_detector"));
+        registration.close();
+        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
+            assertFalse(McaReputationApi.hasExternalAuthority(kind), kind + " must be unclaimable");
+        }
     }
 
     /**
@@ -160,6 +172,14 @@ class CoreIncidentAuthorityTest {
                 CoreIncidentKind.MCA_VILLAGER_ASSAULT.incidentType());
         assertEquals(BuiltinIncidents.VILLAGER_KILLED,
                 CoreIncidentKind.MCA_VILLAGER_KILL.incidentType());
+        assertEquals(BuiltinIncidents.VILLAGER_RESCUED,
+                CoreIncidentKind.MCA_VILLAGER_RESCUE.incidentType());
+        assertEquals(BuiltinIncidents.VILLAGER_CURED,
+                CoreIncidentKind.MCA_VILLAGER_CURE.incidentType());
+        assertEquals(BuiltinIncidents.RAID_REPELLED,
+                CoreIncidentKind.MCA_RAID_REPELLED.incidentType());
+        assertEquals(BuiltinIncidents.PLAYER_KILLED_IN_VILLAGE,
+                CoreIncidentKind.PLAYER_KILL_IN_VILLAGE.incidentType());
     }
 
     @Test
@@ -168,6 +188,9 @@ class CoreIncidentAuthorityTest {
                 CoreIncidentKind.forIncident(BuiltinIncidents.VILLAGER_ASSAULTED));
         assertEquals(Optional.empty(), CoreIncidentKind.forIncident(BuiltinIncidents.QUEST_COMPLETED));
         assertEquals(Optional.empty(), CoreIncidentKind.forIncident(null));
+        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
+            assertEquals(Optional.of(kind), CoreIncidentKind.forIncident(kind.incidentType()));
+        }
     }
 
     /** Two kinds must never share an incident type, or a claim on one would silently cover the other. */

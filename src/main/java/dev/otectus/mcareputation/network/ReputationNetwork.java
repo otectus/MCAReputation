@@ -1,14 +1,18 @@
 package dev.otectus.mcareputation.network;
 
 import dev.otectus.mcareputation.McaReputation;
+import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.McaReputationApi;
 import dev.otectus.mcareputation.api.ReputationIncidentView;
 import dev.otectus.mcareputation.api.ReputationSnapshot;
+import dev.otectus.mcareputation.api.VillagerOpinion;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.community.CommunityMetadata;
 import dev.otectus.mcareputation.community.CommunityResolver;
 import dev.otectus.mcareputation.compat.McaCompat;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationService;
+import dev.otectus.mcareputation.reputation.ReputationTiers;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
@@ -48,7 +52,7 @@ import java.util.function.Supplier;
  */
 public final class ReputationNetwork {
 
-    private static final String PROTOCOL_VERSION = "2";
+    private static final String PROTOCOL_VERSION = "3";
 
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             McaReputation.id("main"),
@@ -146,7 +150,8 @@ public final class ReputationNetwork {
                 LAST_REQUEST_TICK.put(player.getUUID(), gameTime);
 
                 Optional<CommunityKey> selected = resolveSelection(player, packet, gameTime);
-                sendTo(player, buildSnapshot(player, selected, gameTime));
+                sendTo(player, buildSnapshot(player, selected, gameTime,
+                        contextOpinion(player, packet.contextEntityId(), selected)));
             });
             ctx.setPacketHandled(true);
         }
@@ -189,14 +194,7 @@ public final class ReputationNetwork {
             Optional<CommunityKey> here = player.level() instanceof ServerLevel level
                     ? CommunityResolver.resolveNearest(level, player.blockPosition())
                     : Optional.empty();
-            boolean knowsHere = here.isPresent()
-                    && dev.otectus.mcareputation.state.ReputationSavedData.get(player.server)
-                            .knows(player.getUUID(), here.get());
-            Optional<CommunityKey> bestKnown =
-                    ReputationService.knownCommunities(player.server, player.getUUID(), gameTime).stream()
-                            .findFirst()
-                            .map(ReputationSnapshot::community);
-            return SnapshotSelection.unprompted(here, knowsHere, bestKnown);
+            return ReputationService.unpromptedCommunity(player.server, player.getUUID(), here);
         }
     }
 
@@ -253,6 +251,30 @@ public final class ReputationNetwork {
     }
 
     /**
+     * What the villager the player is looking at personally makes of them (spec 19.3).
+     *
+     * <p>Present only when the request named a villager and the server agreed it was one. The tier
+     * name is resolved server-side for the same reason titles are: a dedicated-server client holds
+     * the ladder it shipped with, not the one the server's datapack loaded.
+     */
+    public record OpinionSummary(Component villagerName, Component tierName,
+                                 VillagerOpinion.OpinionBasis basis) {
+
+        public static void write(FriendlyByteBuf buf, OpinionSummary summary) {
+            buf.writeComponent(summary.villagerName);
+            buf.writeComponent(summary.tierName);
+            buf.writeEnum(summary.basis);
+        }
+
+        public static OpinionSummary read(FriendlyByteBuf buf) {
+            Component villagerName = buf.readComponent();
+            Component tierName = buf.readComponent();
+            return new OpinionSummary(villagerName, tierName,
+                    buf.readEnum(VillagerOpinion.OpinionBasis.class));
+        }
+    }
+
+    /**
      * The selected community, in full.
      *
      * <p>Titles travel as resolved {@link Component}s, not ids. The {@code Titles} registry is
@@ -265,7 +287,8 @@ public final class ReputationNetwork {
                                  Optional<Component> tierDescription, int tierThreshold,
                                  Optional<String> nextTierId, Optional<Component> nextTierName,
                                  int nextThreshold, List<Component> titles,
-                                 List<IncidentSummary> incidents, int totalIncidents) {
+                                 List<IncidentSummary> incidents, int totalIncidents,
+                                 Optional<OpinionSummary> opinion) {
 
         public static void write(FriendlyByteBuf buf, SelectedDetail detail) {
             detail.key.write(buf);
@@ -282,6 +305,8 @@ public final class ReputationNetwork {
             buf.writeCollection(detail.titles, FriendlyByteBuf::writeComponent);
             buf.writeCollection(detail.incidents, IncidentSummary::write);
             buf.writeVarInt(Math.max(0, detail.totalIncidents));
+            // Written last, so every field a reader already knew keeps the offset it had.
+            buf.writeOptional(detail.opinion, OpinionSummary::write);
         }
 
         public static SelectedDetail read(FriendlyByteBuf buf) {
@@ -299,8 +324,10 @@ public final class ReputationNetwork {
             List<Component> titles = buf.readList(FriendlyByteBuf::readComponent);
             List<IncidentSummary> incidents = buf.readList(IncidentSummary::read);
             int total = buf.readVarInt();
+            Optional<OpinionSummary> opinion = buf.readOptional(OpinionSummary::read);
             return new SelectedDetail(key, name, score, baseline, tierId, tierName, tierDescription,
-                    tierThreshold, nextTierId, nextTierName, nextThreshold, titles, incidents, total);
+                    tierThreshold, nextTierId, nextTierName, nextThreshold, titles, incidents, total,
+                    opinion);
         }
     }
 
@@ -412,6 +439,15 @@ public final class ReputationNetwork {
 
     /** Builds the reply for one player, bounded and ready to encode. */
     public static SnapshotS2C buildSnapshot(ServerPlayer player, Optional<CommunityKey> selected, long gameTime) {
+        return buildSnapshot(player, selected, gameTime, Optional.empty());
+    }
+
+    /**
+     * As above, carrying the opinion of the villager the request named — the one part of the reply
+     * that depends on <em>who</em> was asked rather than only on which community was selected.
+     */
+    public static SnapshotS2C buildSnapshot(ServerPlayer player, Optional<CommunityKey> selected,
+                                            long gameTime, Optional<OpinionSummary> opinion) {
         List<ReputationSnapshot> all = ReputationService.knownCommunities(player.server, player.getUUID(),
                 gameTime);
         List<CommunitySummary> summaries = new ArrayList<>();
@@ -432,9 +468,9 @@ public final class ReputationNetwork {
         // the player clicked, the village they asked for, or the one they are standing in when they
         // have no standing anywhere. It is a lie when it displaces a record they do have, which is
         // what it used to do; SnapshotSelection is where that is now decided, and why.
-        Optional<SelectedDetail> selectedDetail = detail.map(ReputationNetwork::toDetail);
+        Optional<SelectedDetail> selectedDetail = detail.map(snapshot -> toDetail(snapshot, opinion));
         if (selectedDetail.isEmpty() && selected.isPresent()) {
-            selectedDetail = Optional.of(emptyDetail(player, selected.get(), gameTime));
+            selectedDetail = Optional.of(emptyDetail(player, selected.get(), gameTime, opinion));
         }
 
         // Resolved server-side: the client's Titles registry is empty on a dedicated server.
@@ -449,7 +485,8 @@ public final class ReputationNetwork {
         return dev.otectus.mcareputation.reputation.Titles.getOrUnknown(titleId).name();
     }
 
-    private static SelectedDetail toDetail(ReputationSnapshot snapshot) {
+    private static SelectedDetail toDetail(ReputationSnapshot snapshot,
+                                           Optional<OpinionSummary> opinion) {
         List<IncidentSummary> incidents = new ArrayList<>();
         for (ReputationIncidentView view : snapshot.incidents()) {
             if (incidents.size() >= ReputationBounds.MAX_SYNCED_INCIDENTS) {
@@ -473,11 +510,13 @@ public final class ReputationNetwork {
                 snapshot.nextTier().map(tier -> tier.threshold()).orElse(snapshot.tier().threshold()),
                 snapshot.villageTitles().stream().map(ReputationNetwork::resolveTitleName).toList(),
                 incidents,
-                snapshot.totalIncidentCount());
+                snapshot.totalIncidentCount(),
+                opinion);
     }
 
     /** The "you have no history here yet" selection, built without creating a saved record. */
-    private static SelectedDetail emptyDetail(ServerPlayer player, CommunityKey key, long gameTime) {
+    private static SelectedDetail emptyDetail(ServerPlayer player, CommunityKey key, long gameTime,
+                                              Optional<OpinionSummary> opinion) {
         var ladder = dev.otectus.mcareputation.reputation.ReputationTiers.getDefault();
         var tier = ladder.tierFor(0);
         var next = ladder.nextTier(0);
@@ -487,6 +526,36 @@ public final class ReputationNetwork {
         return new SelectedDetail(key, name, 0, 0, tier.id(), tier.name(), tier.description(),
                 tier.threshold(), next.map(t -> t.id()), next.map(t -> t.name()),
                 next.map(t -> t.threshold()).orElse(tier.threshold()),
-                List.of(), List.of(), 0);
+                List.of(), List.of(), 0, opinion);
+    }
+
+    /**
+     * The opinion of the villager the client named, for the community the server has already selected.
+     *
+     * <p>The entity is validated exactly as {@code resolveSelection} validates it — same dimension, a
+     * living MCA villager, within reach — because it is still the one client-supplied value here, and
+     * "the villager I am looking at" must not be allowed to become "any villager on the server".
+     */
+    private static Optional<OpinionSummary> contextOpinion(ServerPlayer player, int contextEntityId,
+                                                           Optional<CommunityKey> selected) {
+        if (contextEntityId <= 0 || selected.isEmpty() || !McaReputationConfig.villagerOpinionEnabled()) {
+            return Optional.empty();
+        }
+        if (!(player.level() instanceof ServerLevel level)) {
+            return Optional.empty();
+        }
+        Entity entity = level.getEntity(contextEntityId);
+        boolean valid = entity != null
+                && entity.level().dimension().equals(player.level().dimension())
+                && McaCompat.isLivingMcaVillager(entity)
+                && entity.distanceTo(player) <= MAX_CONTEXT_DISTANCE;
+        if (!valid) {
+            return Optional.empty();
+        }
+        return McaReputationApi.getVillagerOpinion(player.server, player.getUUID(), entity.getUUID(),
+                        selected.get())
+                .map(opinion -> new OpinionSummary(entity.getName(),
+                        ReputationTiers.getDefault().tierFor(opinion.opinion()).name(),
+                        opinion.basis()));
     }
 }

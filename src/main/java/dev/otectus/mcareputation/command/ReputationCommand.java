@@ -1,5 +1,8 @@
 package dev.otectus.mcareputation.command;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
@@ -9,6 +12,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
+import com.mojang.serialization.JsonOps;
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.ImportResult;
@@ -46,14 +50,26 @@ import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.commands.arguments.UuidArgument;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.level.storage.LevelResource;
+import net.minecraftforge.fml.ModList;
 
 import javax.annotation.Nullable;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -88,6 +104,14 @@ public final class ReputationCommand {
             Component.translatable("mcareputation.command.error.no_incident"));
 
     private static final String HERE = "here";
+
+    /** One export per second per world is plenty; the stamp is what keeps two exports apart. */
+    private static final DateTimeFormatter EXPORT_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+
+    private static final Gson EXPORT_GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    /** {@code top} is a scan of every record; the ceiling keeps one command off the chat log. */
+    private static final int MAX_TOP_LIMIT = 50;
 
     /** Suggests every community the store knows about, plus {@code here}. */
     private static final SuggestionProvider<CommandSourceStack> COMMUNITY_SUGGESTIONS =
@@ -128,6 +152,9 @@ public final class ReputationCommand {
                 .then(buildIncident())
                 .then(buildTitle())
                 .then(buildTiers())
+                .then(buildExport())
+                .then(buildTop())
+                .then(buildCommunity())
                 .then(buildValidate())
                 .then(buildReload())
                 .then(buildMigrate())
@@ -641,6 +668,185 @@ public final class ReputationCommand {
                             .withStyle(ChatFormatting.DARK_GRAY)), false);
         }
         return ladder.size();
+    }
+
+    // ------------------------------------------------------------------
+    // Administration
+    // ------------------------------------------------------------------
+
+    /**
+     * Writes the whole store, or one player's part of it, to a JSON file beside the world.
+     *
+     * <p>Permission 3: the file holds every player's ledger, which is more than the level-2 read
+     * commands hand out one answer at a time. The write is synchronous on the server thread - the
+     * store is bounded by the per-player and per-community incident caps, so this is a short pause
+     * rather than a stall, and doing it off-thread would mean serialising a store another tick can
+     * mutate underneath it.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> buildExport() {
+        return Commands.literal("export")
+                .requires(source -> source.hasPermission(3))
+                .executes(ctx -> export(ctx, null))
+                .then(Commands.argument("player", EntityArgument.player())
+                        .executes(ctx -> export(ctx, EntityArgument.getPlayer(ctx, "player"))));
+    }
+
+    private static int export(CommandContext<CommandSourceStack> ctx, @Nullable ServerPlayer target) {
+        MinecraftServer server = ctx.getSource().getServer();
+        ReputationSavedData data = ReputationSavedData.get(server);
+
+        CompoundTag tag;
+        if (target == null) {
+            tag = data.save(new CompoundTag());
+        } else {
+            // The same shape as a whole-store export with one player in it, so a reader never needs a
+            // second parser for the single-player case.
+            tag = new CompoundTag();
+            tag.putInt("version", ReputationSavedData.FORMAT_VERSION);
+            CompoundTag players = new CompoundTag();
+            data.player(target.getUUID())
+                    .ifPresent(record -> players.put(target.getUUID().toString(), record.save()));
+            tag.put("players", players);
+        }
+
+        Path directory = server.getWorldPath(LevelResource.ROOT).resolve(McaReputation.MOD_ID);
+        Path file = directory.resolve("export-" + EXPORT_STAMP.format(LocalDateTime.now())
+                + (target == null ? "" : "-" + target.getGameProfile().getName()) + ".json");
+        try {
+            Files.createDirectories(directory);
+            Files.writeString(file, EXPORT_GSON.toJson(exportEnvelope(tag, modVersion(),
+                            DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(ZonedDateTime.now()))),
+                    StandardCharsets.UTF_8);
+        } catch (IOException | RuntimeException e) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] export to {} failed", file, e);
+            ctx.getSource().sendFailure(Component.translatable("mcareputation.command.export.failed",
+                    Component.literal(String.valueOf(e.getMessage()))));
+            return 0;
+        }
+        ctx.getSource().sendSuccess(() -> Component.translatable("mcareputation.command.export.written",
+                Component.literal(file.toString())), true);
+        return 1;
+    }
+
+    /**
+     * The pure half of an export: an NBT store wrapped in the envelope that says what wrote it. Takes
+     * the version and the timestamp rather than reading them, so it is exercisable without a server -
+     * and so the version can only ever come from the mod container at the call site.
+     */
+    static JsonObject exportEnvelope(CompoundTag tag, String modVersion, String exportedAt) {
+        JsonObject envelope = new JsonObject();
+        envelope.addProperty("format", ReputationSavedData.FORMAT_VERSION);
+        envelope.addProperty("mod_version", modVersion);
+        envelope.addProperty("exported_at", exportedAt);
+        envelope.add("data", NbtOps.INSTANCE.convertTo(JsonOps.INSTANCE, tag));
+        return envelope;
+    }
+
+    /** Read from the loaded mod container: this jar's version lives in exactly one place. */
+    private static String modVersion() {
+        return ModList.get().getModContainerById(McaReputation.MOD_ID)
+                .map(container -> container.getModInfo().getVersion().toString())
+                .orElse("unknown");
+    }
+
+    /** Who stands highest in one village. Level 2, like every other read of another player. */
+    private static LiteralArgumentBuilder<CommandSourceStack> buildTop() {
+        return Commands.literal("top")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.argument("community", CommunityArgument.community())
+                        .suggests(COMMUNITY_SUGGESTIONS)
+                        .executes(ctx -> top(ctx,
+                                resolveCommunity(ctx, CommunityArgument.getCommunity(ctx, "community")),
+                                10))
+                        .then(Commands.argument("limit", IntegerArgumentType.integer(1, MAX_TOP_LIMIT))
+                                .executes(ctx -> top(ctx,
+                                        resolveCommunity(ctx,
+                                                CommunityArgument.getCommunity(ctx, "community")),
+                                        IntegerArgumentType.getInteger(ctx, "limit")))));
+    }
+
+    private static int top(CommandContext<CommandSourceStack> ctx, CommunityKey community, int limit) {
+        MinecraftServer server = ctx.getSource().getServer();
+        long gameTime = server.overworld().getGameTime();
+        ReputationSavedData data = ReputationSavedData.get(server);
+        ReputationTierSet ladder = ReputationTiers.getDefault();
+
+        List<Standing> ranked = new java.util.ArrayList<>();
+        for (PlayerReputationRecord record : data.players()) {
+            // Reconcile first, or a board could rank a player above another purely because their decay
+            // had not been brought up to date yet.
+            data.reconcilePlayer(record.playerId(), gameTime);
+            record.community(community).ifPresent(entry -> ranked.add(new Standing(
+                    record.lastKnownName().isBlank() ? record.playerId().toString()
+                            : record.lastKnownName(),
+                    entry.score())));
+        }
+        if (ranked.isEmpty()) {
+            ctx.getSource().sendSuccess(() -> Component.translatable("mcareputation.command.top.empty",
+                    Component.literal(community.asString())), false);
+            return 0;
+        }
+        ranked.sort(Comparator.comparingInt(Standing::score).reversed()
+                .thenComparing(Standing::name));
+
+        List<Standing> shown = ranked.subList(0, Math.min(limit, ranked.size()));
+        ctx.getSource().sendSuccess(() -> Component.translatable("mcareputation.command.top.header",
+                Component.literal(community.asString()), shown.size(), ranked.size()), false);
+        for (int i = 0; i < shown.size(); i++) {
+            Standing standing = shown.get(i);
+            int rank = i + 1;
+            ctx.getSource().sendSuccess(() -> Component.translatable("mcareputation.command.top.line",
+                    rank, Component.literal(standing.name()), standing.score(),
+                    ladder.tierFor(standing.score()).name()), false);
+        }
+        return shown.size();
+    }
+
+    /** One row of the leaderboard, held only long enough to sort it. */
+    private record Standing(String name, int score) {
+    }
+
+    /**
+     * Per-community administration. Decay immunity is a property of the village, not of one player,
+     * so switching it off freezes every ledger there at once - hence permission 3 to change it and
+     * the ordinary level 2 to read it.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> buildCommunity() {
+        return Commands.literal("community")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.argument("community", CommunityArgument.community())
+                        .suggests(COMMUNITY_SUGGESTIONS)
+                        .then(Commands.literal("decay")
+                                .then(Commands.literal("on")
+                                        .requires(source -> source.hasPermission(3))
+                                        .executes(ctx -> decay(ctx, Boolean.TRUE)))
+                                .then(Commands.literal("off")
+                                        .requires(source -> source.hasPermission(3))
+                                        .executes(ctx -> decay(ctx, Boolean.FALSE)))
+                                .then(Commands.literal("status")
+                                        .executes(ctx -> decay(ctx, null)))));
+    }
+
+    /** {@code decayOn} null asks, true and false set. "Decay on" is the absence of immunity. */
+    private static int decay(CommandContext<CommandSourceStack> ctx, @Nullable Boolean decayOn)
+            throws CommandSyntaxException {
+        MinecraftServer server = ctx.getSource().getServer();
+        CommunityKey community = resolveCommunity(ctx, CommunityArgument.getCommunity(ctx, "community"));
+        ReputationSavedData data = ReputationSavedData.get(server);
+        if (decayOn == null) {
+            boolean immune = data.isDecayImmune(community);
+            ctx.getSource().sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.community.decay.status",
+                    Component.literal(community.asString()),
+                    Component.literal(immune ? "off" : "on")), false);
+            return immune ? 0 : 1;
+        }
+        data.setDecayImmune(community, !decayOn);
+        ctx.getSource().sendSuccess(() -> Component.translatable(decayOn
+                        ? "mcareputation.command.community.decay.on"
+                        : "mcareputation.command.community.decay.off",
+                Component.literal(community.asString())), true);
+        return decayOn ? 1 : 0;
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> buildValidate() {

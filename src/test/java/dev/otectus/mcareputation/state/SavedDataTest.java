@@ -249,6 +249,65 @@ class SavedDataTest {
                 "a hand-edited or corrupt save cannot smuggle an unbounded ledger into memory");
     }
 
+    // ------------------------------------------------------------------
+    // Decay immunity (§15.1)
+    // ------------------------------------------------------------------
+
+    @Test
+    void decayImmunitySurvivesARestart() {
+        ReputationSavedData data = ReputationSavedData.createForTest();
+        data.getOrCreatePlayer(TestFixtures.PLAYER_A).getOrCreate(TestFixtures.OVERWORLD_3)
+                .addBaseline(50, MIN, MAX);
+        assertTrue(data.setDecayImmune(TestFixtures.OVERWORLD_3, true));
+        assertFalse(data.setDecayImmune(TestFixtures.OVERWORLD_3, true), "setting it twice is no change");
+
+        ReputationSavedData loaded = data.roundTripForTest();
+        assertTrue(loaded.isDecayImmune(TestFixtures.OVERWORLD_3));
+        assertFalse(loaded.isDecayImmune(TestFixtures.NETHER_3));
+        assertEquals(List.of(TestFixtures.OVERWORLD_3), List.copyOf(loaded.decayImmuneCommunities()));
+    }
+
+    /** A 0.3.0 file has no such tag; it must load unchanged and at the same format version. */
+    @Test
+    void aSaveWithoutTheImmunityTagLoadsAsBefore() {
+        CompoundTag tag = populated().save(new CompoundTag());
+        assertFalse(tag.contains("decayImmune"), "nothing immune, nothing written");
+
+        ReputationSavedData loaded = ReputationSavedData.load(tag);
+        assertTrue(loaded.decayImmuneCommunities().isEmpty());
+        assertEquals(ReputationSavedData.FORMAT_VERSION, loaded.loadedVersion());
+        assertEquals(30, loaded.score(TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3));
+    }
+
+    /** The point of the flag: one village's ledger is frozen while the rest of the world ages. */
+    @Test
+    void reconcileSkipsAnImmuneCommunityAndDecaysTheOthers() {
+        long day = dev.otectus.mcareputation.incident.DecayPolicy.TICKS_PER_DAY;
+        dev.otectus.mcareputation.incident.IncidentRegistry.replaceAll(java.util.Map.of(
+                TestFixtures.ASSAULT, TestFixtures.definition(-8, IncidentVisibility.VILLAGE,
+                        dev.otectus.mcareputation.incident.DecayPolicy.linearToZero(0, 2))));
+        try {
+            ReputationSavedData data = ReputationSavedData.createForTest();
+            PlayerReputationRecord player = data.getOrCreatePlayer(TestFixtures.PLAYER_A);
+            for (var community : List.of(TestFixtures.OVERWORLD_3, TestFixtures.NETHER_3)) {
+                CommunityReputationRecord record = player.getOrCreate(community);
+                record.addIncident(IncidentRecord.create(UUID.randomUUID(), TestFixtures.ASSAULT,
+                        TestFixtures.PLAYER_A, community, 0L, TestFixtures.SOURCE, Optional.empty(),
+                        -8, IncidentVisibility.VILLAGE, IncidentSeverity.MODERATE, List.of()));
+                record.recomputeScore(MIN, MAX);
+            }
+            data.setDecayImmune(TestFixtures.OVERWORLD_3, true);
+
+            assertTrue(data.reconcilePlayer(TestFixtures.PLAYER_A, day));
+            assertEquals(-8, data.score(TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3),
+                    "the immune village remembers exactly what it remembered yesterday");
+            assertEquals(-6, data.score(TestFixtures.PLAYER_A, TestFixtures.NETHER_3),
+                    "everywhere else still forgives at the usual rate");
+        } finally {
+            dev.otectus.mcareputation.incident.IncidentRegistry.replaceAll(java.util.Map.of());
+        }
+    }
+
     /**
      * Cap enforcement prunes incidents and folds weight into baselines — a store mutation like any
      * other. {@code reconcilePlayer} must report it and mark the save dirty even when decay itself

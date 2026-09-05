@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation.network;
 
 import dev.otectus.mcareputation.TestFixtures;
+import dev.otectus.mcareputation.api.VillagerOpinion;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import io.netty.buffer.Unpooled;
 import net.minecraft.network.FriendlyByteBuf;
@@ -87,7 +88,7 @@ class SnapshotPacketTest {
                 Optional.of(Component.translatable("mcareputation.tier.friend.description")), 75,
                 Optional.of("honored"), Optional.of(Component.translatable("mcareputation.tier.honored")),
                 150, List.of(Component.literal("Honored of the Village")),
-                List.of(incident(-8), incident(12)), 64);
+                List.of(incident(-8), incident(12)), 64, Optional.empty());
 
         FriendlyByteBuf buf = buffer();
         ReputationNetwork.SnapshotS2C.encode(new ReputationNetwork.SnapshotS2C(communities,
@@ -108,6 +109,36 @@ class SnapshotPacketTest {
         assertEquals(1, decoded.globalTitles().size());
         assertEquals("Wanderer", decoded.globalTitles().get(0).getString());
         assertEquals(0, buf.readableBytes());
+    }
+
+    /**
+     * The opinion rides last on {@code SelectedDetail}, so everything before it keeps its offset. Both
+     * shapes must survive: the screen opened from a villager, and the screen opened from the keybind.
+     */
+    @Test
+    void theVillagerOpinionRoundTripsWhenPresentAndWhenAbsent() {
+        for (Optional<ReputationNetwork.OpinionSummary> opinion : List.of(
+                Optional.<ReputationNetwork.OpinionSummary>empty(),
+                Optional.of(new ReputationNetwork.OpinionSummary(Component.literal("Anna"),
+                        Component.translatable("mcareputation.tier.friend"),
+                        VillagerOpinion.OpinionBasis.INVOLVED)))) {
+            ReputationNetwork.SelectedDetail detail = new ReputationNetwork.SelectedDetail(
+                    TestFixtures.OVERWORLD_3, "Riverbend", 90, 10, "friend",
+                    Component.translatable("mcareputation.tier.friend"), Optional.empty(), 75,
+                    Optional.empty(), Optional.empty(), 150, List.of(), List.of(incident(-8)), 1,
+                    opinion);
+            FriendlyByteBuf buf = buffer();
+            ReputationNetwork.SelectedDetail.write(buf, detail);
+            ReputationNetwork.SelectedDetail decoded = ReputationNetwork.SelectedDetail.read(buf);
+            assertEquals(opinion.isPresent(), decoded.opinion().isPresent());
+            assertEquals(90, decoded.score(), "the fields before the opinion still read correctly");
+            opinion.ifPresent(summary -> {
+                assertEquals("Anna", decoded.opinion().orElseThrow().villagerName().getString());
+                assertEquals(VillagerOpinion.OpinionBasis.INVOLVED,
+                        decoded.opinion().orElseThrow().basis());
+            });
+            assertEquals(0, buf.readableBytes());
+        }
     }
 
     @Test

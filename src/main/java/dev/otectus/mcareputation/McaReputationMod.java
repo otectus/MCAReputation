@@ -4,17 +4,22 @@ import dev.otectus.mcareputation.command.CommunityArgument;
 import dev.otectus.mcareputation.compat.McaReflect;
 import dev.otectus.mcareputation.command.ReputationCommand;
 import dev.otectus.mcareputation.data.ReputationReloadListener;
+import dev.otectus.mcareputation.data.StandingCondition;
+import dev.otectus.mcareputation.data.TierReachedTrigger;
 import dev.otectus.mcareputation.event.AssaultTracker;
 import dev.otectus.mcareputation.event.ReputationGameplayEvents;
+import dev.otectus.mcareputation.event.StandingDisplay;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.network.ReputationFeedback;
 import dev.otectus.mcareputation.network.ReputationNetwork;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
 import dev.otectus.mcareputation.reputation.Titles;
+import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.commands.synchronization.ArgumentTypeInfo;
 import net.minecraft.commands.synchronization.ArgumentTypeInfos;
 import net.minecraft.commands.synchronization.SingletonArgumentInfo;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.AddReloadListenerEvent;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -25,6 +30,7 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.registries.DeferredRegister;
+import net.minecraftforge.registries.RegistryObject;
 
 /**
  * The Forge entry point (spec §9, §11).
@@ -46,6 +52,15 @@ public final class McaReputationMod {
     private static final DeferredRegister<ArgumentTypeInfo<?, ?>> COMMAND_ARGUMENT_TYPES =
             DeferredRegister.create(Registries.COMMAND_ARGUMENT_TYPE, McaReputation.MOD_ID);
 
+    /** The datapack gating hooks' loot condition type (§30.2). */
+    private static final DeferredRegister<LootItemConditionType> LOOT_CONDITION_TYPES =
+            DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, McaReputation.MOD_ID);
+
+    /** {@code mcareputation:standing}; looked up by {@link StandingCondition#getType()}. */
+    public static final RegistryObject<LootItemConditionType> STANDING_CONDITION =
+            LOOT_CONDITION_TYPES.register("standing",
+                    () -> new LootItemConditionType(new StandingCondition.Serializer()));
+
     static {
         COMMAND_ARGUMENT_TYPES.register("community", () -> ArgumentTypeInfos.registerByClass(
                 CommunityArgument.class, SingletonArgumentInfo.contextFree(CommunityArgument::community)));
@@ -62,6 +77,8 @@ public final class McaReputationMod {
                 .addListener(this::onCommonSetup);
         COMMAND_ARGUMENT_TYPES.register(
                 net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
+        LOOT_CONDITION_TYPES.register(
+                net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
         MinecraftForge.EVENT_BUS.register(this);
 
         // Seed the registries with the built-in fallback ladder so that tier lookups are meaningful
@@ -75,6 +92,8 @@ public final class McaReputationMod {
         // Resolve MCA once, before any gameplay, so an incompatible MCA is one ERROR line at startup
         // rather than a surprise mid-tick. See McaReflect for why this cannot be a compile-time bind.
         event.enqueueWork(McaReflect::selfTest);
+        // CriteriaTriggers holds a plain HashMap, so registration has to happen on the main thread.
+        event.enqueueWork(() -> CriteriaTriggers.register(TierReachedTrigger.INSTANCE));
         McaReputation.LOGGER.info("[MCA: Reputation] {} ready (API v{})", McaReputation.MOD_ID,
                 dev.otectus.mcareputation.api.McaReputationApi.getApiVersion());
     }
@@ -99,6 +118,7 @@ public final class McaReputationMod {
         AssaultTracker.clear();
         ReputationNetwork.clearAll();
         ReputationFeedback.clearAll();
+        StandingDisplay.clearAll();
         ReputationGameplayEvents.resetTickCounter();
         McaReputation.LOGGER.debug("[MCA: Reputation] server stopped; {} incident type(s), {} ladder(s), "
                         + "{} title(s) were live", IncidentRegistry.size(), ReputationTiers.ids().size(),

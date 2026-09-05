@@ -103,6 +103,25 @@ community — produced in one place so the Journal, the Standing screen, and a v
 disagree. `progressToNextTier()`, `pointsToNextTier()`, `contributingIncidents()`, and
 `unresolvedNegativeIncidents()` are derived helpers.
 
+### `VillagerOpinion`
+
+```java
+public record VillagerOpinion(UUID villagerId, String villagerName, CommunityKey community,
+                              int opinion, String tierId, OpinionBasis basis, int knownIncidents)
+
+public enum OpinionBasis {
+    INVOLVED,   // the villager was a subject of at least one deed
+    WITNESSED,  // the villager saw at least one deed themselves
+    HEARSAY,    // everything the villager knows, they were told
+    NONE        // the villager knows nothing about this player at all
+}
+```
+
+What one villager personally makes of a player, derived from the community ledger through what that
+villager saw, was part of, or has had time to hear. Derived per-query, never stored: nothing is added
+to the save. `enableVillagerOpinion` switches the feature off; `opinionHearsayPercent` and
+`opinionInvolvedPercent` weight the deeds by how the villager came to know them.
+
 ---
 
 ## `McaReputationApi`
@@ -130,6 +149,13 @@ boolean                      villagerKnows(MinecraftServer, Entity villager, UUI
 Optional<ExternalGossipCandidate> gossipCandidate(MinecraftServer, UUID, CommunityKey, UUID incident,
                                                   String playerName);
 
+// Per-villager opinion
+Optional<VillagerOpinion>    getVillagerOpinion(MinecraftServer, UUID player, UUID villager,
+                                               CommunityKey);
+Optional<VillagerOpinion>    getVillagerOpinion(MinecraftServer, UUID player, Entity villager);
+int                          getOpinionBias(MinecraftServer, UUID player, UUID villager,
+                                           CommunityKey, String axis);
+
 // Writes
 ReputationResult record(ReputationRequest);
 ResolutionResult resolve(MinecraftServer, UUID, CommunityKey, UUID incident, IncidentStatus,
@@ -150,10 +176,37 @@ void         unregisterImportProvider(LegacyImportProvider);
 List<String> importProviderNames();
 ImportResult importLegacy(LegacyImportRequest);
 boolean      openReputationScreen(ServerPlayer, CommunityKey);   // §29.7: push the standing screen
+
+// Decay immunity
+boolean      isDecayImmune(MinecraftServer, CommunityKey);
+boolean      setDecayImmune(MinecraftServer, CommunityKey, boolean immune);
+
+// Core incident detection
+CoreIncidentAuthorityRegistration registerCoreIncidentAuthority(CoreIncidentAuthority);
+boolean                           hasExternalAuthority(CoreIncidentKind);
 ```
 
 `getCheckBias` is non-zero only for `trust` and `respect`, and hard-clamped to ±8. Warmth, attraction,
 tension, and familiarity are private interpersonal state; public standing has no business there.
+
+### Per-villager opinion
+
+`getVillagerOpinion` queries what one villager personally makes of a player. Returns empty when the
+feature is off, when the mod is disabled, or when the player has no record with the community —
+there is nothing to have an opinion about. The variant taking a `UUID` returns the opinion and an empty
+`villagerName`; the one taking an `Entity` resolves the community from MCA and fills in the name.
+
+`getOpinionBias` answers the bounded check bias from that villager's opinion tier rather than the
+village's — same ±8 ceiling and the same two axes (`trust`, `respect`) as `getCheckBias`.
+
+### Decay immunity
+
+`isDecayImmune` returns whether decay is currently off for a community, for every player at once. A
+protected village's ledger ages only when a deed moves it. False for an unknown server or community,
+and false when anything goes wrong — the safe answer is the ordinary one.
+
+`setDecayImmune` is a write, server-thread only. Returns true when the flag actually changed. Use it
+when a companion needs to freeze a village's standing temporarily (e.g., during a quest).
 
 `registerImportProvider` is the supported registration path for §32.2 migration sources — companions
 must not reach into internal packages for it. `openReputationScreen` sends the player a fresh
@@ -170,6 +223,24 @@ and makes `matches` answer false so authored fallbacks fire.
 Reserved surface, carried but not yet consumed in this version: `TitleDefinition.revocable`,
 `TitleDefinition.icon`, and the `BuiltinIncidents.SOURCE_*` constants. Set them freely; they gain
 behaviour in a later version without a format change.
+
+## Additive additions
+
+The four new methods for per-villager opinion and the two for decay immunity are **additive to API
+version 1**. `getApiVersion()` deliberately does not move, because a bridge written against the original
+version remains fully compatible. A companion written for the original API neither calls these methods
+nor is affected by them, so a mismatch is silent and fine.
+
+For companions that must run against older servers, the recommended pattern is to probe once with
+`McaReputationApi.class.getMethod("getVillagerOpinion", MinecraftServer.class, UUID.class, UUID.class, CommunityKey.class)`,
+catch `NoSuchMethodError`, and cache the result. If found, populate the opinion line in the standing
+screen; if not, fall back to village-level standing.
+
+## Network compatibility
+
+The network protocol version is `"3"` for this release. Clients and servers must match exactly at
+handshake, or the connection is rejected before any data travels. The version bumps on any change to
+the registered packet format.
 
 ---
 
@@ -219,16 +290,19 @@ A listener that throws is caught and logged; the committed transaction stands.
 
 ## `CoreIncidentAuthority` — avoiding double detection
 
-*Added in 0.3.0.*
-
-This mod detects two things by itself: harming an MCA villager, and killing one. A companion that
-detects the same deeds — MCA: Crime does — would otherwise file a second incident for the same punch,
-and neither mod can prevent that from its own side. An authority is how one of them claims the deed.
+This mod detects several things by itself: harming, killing, curing, and rescuing MCA villagers;
+village raid victories; and rare player-on-player kills within witness range. A companion that detects
+the same deeds would otherwise file a second incident for the same punch, and neither mod can prevent
+that from its own side. An authority is how one of them claims the deed.
 
 ```java
 public enum CoreIncidentKind {
-    MCA_VILLAGER_ASSAULT,   // -> mcareputation:villager_assaulted
-    MCA_VILLAGER_KILL       // -> mcareputation:villager_killed
+    MCA_VILLAGER_ASSAULT,       // -> mcareputation:villager_assaulted
+    MCA_VILLAGER_KILL,          // -> mcareputation:villager_killed
+    MCA_VILLAGER_RESCUE,        // -> mcareputation:villager_rescued
+    MCA_VILLAGER_CURE,          // -> mcareputation:villager_cured
+    MCA_RAID_REPELLED,          // -> mcareputation:raid_repelled
+    PLAYER_KILL_IN_VILLAGE      // -> mcareputation:player_killed_in_village
 }
 
 public interface CoreIncidentAuthority {

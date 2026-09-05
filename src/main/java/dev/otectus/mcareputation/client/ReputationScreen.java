@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation.client;
 
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.VillagerOpinion;
 import dev.otectus.mcareputation.network.ReputationNetwork;
 import dev.otectus.mcareputation.reputation.ReputationMath;
 import net.minecraft.ChatFormatting;
@@ -291,6 +292,10 @@ public final class ReputationScreen extends Screen {
                     GuiPalette.TEXT_MUTED, LINE));
         }
 
+        // What the one villager the player is looking at makes of them, when the server sent it.
+        opinionLine(detail.opinion(), McaReputationConfig.showVillagerOpinion()).ifPresent(line ->
+                headerLines.add(new HeaderLine(line.getVisualOrderText(), GuiPalette.TEXT_MUTED, LINE)));
+
         headerLines.add(new HeaderLine(null, 0, PROGRESS_GAP));
 
         if (!detail.titles().isEmpty() || !ClientReputationData.globalTitles().isEmpty()) {
@@ -300,6 +305,27 @@ public final class ReputationScreen extends Screen {
                 headerLines.add(new HeaderLine(lines.get(i), GuiPalette.TEXT, LINE));
             }
         }
+    }
+
+    /**
+     * The villager's own view of the player, or nothing at all.
+     *
+     * <p>Pure and static so the two ways it disappears — the player turned it off, or the server sent
+     * no opinion because the screen was not opened from a villager — are checkable without a screen.
+     * A villager who has heard nothing still gets a line: "nobody here knows you" is an answer.
+     */
+    static Optional<Component> opinionLine(Optional<ReputationNetwork.OpinionSummary> opinion,
+                                           boolean show) {
+        if (!show || opinion.isEmpty()) {
+            return Optional.empty();
+        }
+        ReputationNetwork.OpinionSummary summary = opinion.get();
+        if (summary.basis() == VillagerOpinion.OpinionBasis.NONE) {
+            return Optional.of(Component.translatable("mcareputation.screen.opinion.none",
+                    summary.villagerName()));
+        }
+        return Optional.of(Component.translatable("mcareputation.screen.opinion", summary.villagerName(),
+                summary.tierName(), Component.translatable(summary.basis().translationKey())));
     }
 
     /** Titles arrive from the server already resolved (§27.3); the client only joins them. */

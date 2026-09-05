@@ -303,6 +303,102 @@ public final class McaReputationApi {
     }
 
     // ------------------------------------------------------------------
+    // Per-villager opinion
+    // ------------------------------------------------------------------
+
+    /**
+     * What one villager personally makes of a player (§19.3), derived from the community ledger
+     * through what that villager saw, was part of, or has had time to hear. Nothing is stored, and
+     * nothing done to the villager directly moves it.
+     *
+     * <p>Empty when the feature is switched off, when the mod is disabled, or when the player has no
+     * record with this community at all — there is nothing to have an opinion about. A villager who
+     * knows nothing yet answers with a present {@code VillagerOpinion} at {@code 0} and
+     * {@link VillagerOpinion.OpinionBasis#NONE}, which is a different and useful answer.
+     *
+     * <p>Additive to API version 1; {@link #getApiVersion()} deliberately does not move. A companion
+     * probes for this method with {@code getMethod} and degrades to village-level standing without it.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    public static Optional<VillagerOpinion> getVillagerOpinion(MinecraftServer server, UUID player,
+                                                               UUID villager, CommunityKey community) {
+        try {
+            if (!isEnabled() || !McaReputationConfig.villagerOpinionEnabled()
+                    || server == null || player == null || villager == null || community == null) {
+                return Optional.empty();
+            }
+            long gameTime = gameTime(server);
+            ReputationService.reconcile(server, player, gameTime);
+            var record = dev.otectus.mcareputation.state.ReputationSavedData.get(server).player(player)
+                    .flatMap(playerRecord -> playerRecord.community(community));
+            if (record.isEmpty()) {
+                return Optional.empty();
+            }
+            boolean resident = CommunityResolver.isResident(server, community, villager);
+            var opinion = dev.otectus.mcareputation.reputation.OpinionResolver.resolve(
+                    record.get(), villager, resident, gameTime,
+                    McaReputationConfig.minRumorDelayTicks(), McaReputationConfig.maxRumorDelayTicks(),
+                    McaReputationConfig.opinionHearsayPercent(),
+                    McaReputationConfig.opinionInvolvedPercent(),
+                    McaReputationConfig.minimumScore(), McaReputationConfig.maximumScore());
+            // The UUID overload has no entity to read a name from; the entity overload fills it in.
+            return Optional.of(new VillagerOpinion(villager, "", community,
+                    opinion.score(), ReputationTiers.getDefault().tierFor(opinion.score()).id(),
+                    opinion.basis(), opinion.knownIncidents()));
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] getVillagerOpinion failed; returning empty", t);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The same question asked about a villager entity: their community is resolved from MCA, and their
+     * name comes back with the answer.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    public static Optional<VillagerOpinion> getVillagerOpinion(MinecraftServer server, UUID player,
+                                                               Entity villager) {
+        try {
+            if (villager == null) {
+                return Optional.empty();
+            }
+            return resolveCommunity(villager)
+                    .flatMap(community -> getVillagerOpinion(server, player, villager.getUUID(), community))
+                    .map(opinion -> new VillagerOpinion(opinion.villagerId(),
+                            villager.getName().getString(), opinion.community(), opinion.opinion(),
+                            opinion.tierId(), opinion.basis(), opinion.knownIncidents()));
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] getVillagerOpinion(entity) failed; returning empty", t);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The bounded check bias for a Conversations axis, read from the <em>villager's own</em> opinion
+     * tier rather than the village's (§30.3). Same ±8 ceiling and the same two axes as
+     * {@link #getCheckBias}; {@code 0} whenever opinion is unavailable, so an authored fallback fires.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    public static int getOpinionBias(MinecraftServer server, UUID player, UUID villager,
+                                     CommunityKey community, String axis) {
+        try {
+            if (!McaReputationConfig.conversationsIntegrationEnabled()) {
+                return 0;
+            }
+            ReputationTierSet ladder = ReputationTiers.getDefault();
+            return getVillagerOpinion(server, player, villager, community)
+                    .map(opinion -> ladder.tierFor(opinion.opinion()).biasFor(axis))
+                    .orElse(0);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] getOpinionBias failed; returning 0", t);
+            return 0;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Writes
     // ------------------------------------------------------------------
 
@@ -419,6 +515,60 @@ public final class McaReputationApi {
      */
     public static boolean hasExternalAuthority(CoreIncidentKind kind) {
         return CoreIncidentAuthorities.isClaimed(kind);
+    }
+
+    // ------------------------------------------------------------------
+    // Decay immunity
+    // ------------------------------------------------------------------
+
+    /**
+     * Whether decay is currently switched off for a community, for every player at once (§15.1).
+     * A protected village's ledger ages only when a deed moves it.
+     *
+     * <p>False for an unknown server or community, and false when anything goes wrong — the safe
+     * answer is the ordinary one, where decay runs.
+     *
+     * <p>Additive to API version 1; {@link #getApiVersion()} deliberately does not move. A companion
+     * probes for this method with {@code getMethod} and treats its absence as "not immune".
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    public static boolean isDecayImmune(MinecraftServer server, CommunityKey community) {
+        try {
+            if (server == null || community == null) {
+                return false;
+            }
+            return dev.otectus.mcareputation.state.ReputationSavedData.get(server)
+                    .isDecayImmune(community);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] isDecayImmune failed; returning false", t);
+            return false;
+        }
+    }
+
+    /**
+     * Switches decay off or back on for a community. A write, so server-thread only: called from
+     * anywhere else it refuses and logs rather than racing the save.
+     *
+     * @return true when the flag actually changed
+     * @since MCA: Reputation 0.4.0
+     */
+    public static boolean setDecayImmune(MinecraftServer server, CommunityKey community, boolean immune) {
+        try {
+            if (server == null || community == null) {
+                return false;
+            }
+            if (!server.isSameThread()) {
+                McaReputation.LOGGER.warn("[MCA: Reputation] setDecayImmune called off the server thread; "
+                        + "refusing to write");
+                return false;
+            }
+            return dev.otectus.mcareputation.state.ReputationSavedData.get(server)
+                    .setDecayImmune(community, immune);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] setDecayImmune failed; nothing changed", t);
+            return false;
+        }
     }
 
     /** Registers a fallback mirror (§25.1). Call at mod setup; see {@link ReputationMirror}. */

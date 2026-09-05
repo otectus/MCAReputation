@@ -96,6 +96,14 @@ For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not install
 | Unwitnessed killing | Hidden, zero-contribution history; no public change | ⬜ |
 | Self-defence | Reduced penalty, `self_defence` recorded in context | ⬜ |
 | Sustained beating | One incident with accumulated damage, not one per damage tick | ⬜ |
+| Villager rescued | Standing rises by 6; credited once per bucket, so a second kill in the same bucket does not double-credit | ⬜ |
+| Villager cured, player online | Standing rises by 15; the curing player earns the credit | ⬜ |
+| Villager cured, player offline | Nothing happens; a logged-out curer earns no standing | ⬜ |
+| Raid repelled | Standing rises by 20; effect refresh does not double-credit, keyed by raid id | ⬜ |
+| Player killed in village, off by default | Standing and ledger do not move | ⬜ |
+| Player killed in village, enabled | Standing falls by 12 (killer's perspective) when a player is killed inside a village | ⬜ |
+| Per-villager opinion, eyewitness | Standing screen shows the breakdown for a specific villager the player has standing with | ⬜ |
+| Per-villager opinion, distant resident | A villager distant from the deed sees it later once the rumour spreads, and the score reflects it | ⬜ |
 | Relog and full restart | Score, tier, titles, and ledger all persist | ⬜ |
 | Village renamed | Display updates; identity and standing unchanged | ⬜ |
 | Village deleted | History retained with the last cached name | ⬜ |
@@ -118,6 +126,13 @@ For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not install
 | Every subsystem disabled in config | Still playable; nothing is deleted | ⬜ |
 | `/reload` with a broken datapack, lenient | Only the bad definition is skipped | ⬜ |
 | `/reload` with a broken datapack, strict | The swap is refused and the previous definitions stay live | ⬜ |
+| Scoreboard objective set to display slot | Scoreboard list appears once; selecting it shows the village leaderboard | ⬜ |
+| Tab-list suffix on tier crossing | When a player reaches a new tier, their suffix in the tab list updates | ⬜ |
+| `/mcareputation export` | Command succeeds; the json file can be read back and contains the expected data | ⬜ |
+| `/mcareputation top here` | Lists top players in the nearest village by standing | ⬜ |
+| `/mcareputation community here decay off` survives restart | The decay setting persists across server restart | ⬜ |
+| Advancement criterion with `mcareputation:standing` predicate | Loot only granted if the predicate condition matches | ⬜ |
+| Advancement fires on `mcareputation:tier_reached` | Advancement grants when a player's tier changes in the specified community | ⬜ |
 | Install into a pre-Reputation Quests world | Eligible players inherit their balance once, as a baseline | ⬜ |
 | Second login after migration | Nothing is added again | ⬜ |
 | Remove Reputation | Quests reads its mirrored fallback; standing is what it was | ⬜ |

@@ -1,0 +1,21 @@
+{
+  "display": { "translate": "mcareputation.incident.villager_rescued" },
+  "default_delta": 6,
+  "visibility": "witnessed",
+  "severity": "moderate",
+  "tags": ["service", "protection"],
+  "retention_ticks": 336000,
+  "decay": {
+    "type": "linear_to_zero",
+    "delay_ticks": 48000,
+    "amount_per_day": 2
+  },
+  "gossip": {
+    "tone": "gratitude",
+    "phrase": "mcareputation.gossip.villager_rescued",
+    "with": ["player", "subject"]
+  },
+  "pinned": false,
+  "retain_unwitnessed": false,
+  "max_override_abs": 20
+}

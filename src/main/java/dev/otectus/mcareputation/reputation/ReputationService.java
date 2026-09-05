@@ -24,6 +24,7 @@ import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
+import dev.otectus.mcareputation.network.SnapshotSelection;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.ReputationSavedData;
@@ -521,6 +522,28 @@ public final class ReputationService {
             out.add(buildSnapshot(playerRecord, community, gameTime));
         }
         return out;
+    }
+
+    /**
+     * The community to answer for when nobody named one: where the player is standing, but only if
+     * they have a history there; otherwise the standing they actually have (§27.2, §28.2).
+     *
+     * <p>Lives here rather than inside the packet handler because two callers now ask the same
+     * question — the standing screen's reply and the scoreboard/tab-list display — and DIAGNOSIS.md
+     * §2 hop 7b is what happens when that question is answered in two places. {@link SnapshotSelection}
+     * still holds the policy; this method is only the store lookups it needs.
+     *
+     * @param here the community the player is standing in, if any
+     */
+    public static Optional<CommunityKey> unpromptedCommunity(MinecraftServer server, UUID playerId,
+                                                             Optional<CommunityKey> here) {
+        long gameTime = server.overworld().getGameTime();
+        boolean knowsHere = here.isPresent()
+                && ReputationSavedData.get(server).knows(playerId, here.get());
+        Optional<CommunityKey> bestKnown = knownCommunities(server, playerId, gameTime).stream()
+                .findFirst()
+                .map(ReputationSnapshot::community);
+        return SnapshotSelection.unprompted(here, knowsHere, bestKnown);
     }
 
     /** Recent incidents, newest first, capped at {@code limit}. */

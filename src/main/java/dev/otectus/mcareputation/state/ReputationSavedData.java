@@ -4,6 +4,8 @@ import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.community.CommunityKey;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -16,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 /**
@@ -48,6 +51,11 @@ public final class ReputationSavedData extends SavedData {
     public static final int FORMAT_VERSION = 1;
 
     private final Map<UUID, PlayerReputationRecord> players = new LinkedHashMap<>();
+    /**
+     * Communities whose scores decay never touches. Ordered so the saved list is stable between
+     * writes, which keeps a diff of two saves readable.
+     */
+    private final Set<CommunityKey> decayImmune = new TreeSet<>();
     private int loadedVersion = FORMAT_VERSION;
 
     public ReputationSavedData() {
@@ -133,6 +141,11 @@ public final class ReputationSavedData extends SavedData {
         boolean changed = false;
         if (McaReputationConfig.scoreDecayEnabled()) {
             for (CommunityReputationRecord community : record.communities()) {
+                // An immune community is skipped here and nowhere else: this is the single
+                // reconciliation entry point, so one check covers login, query, mutation and sweep.
+                if (decayImmune.contains(community.key())) {
+                    continue;
+                }
                 if (community.reconcile(gameTime, min, max)) {
                     changed = true;
                 }
@@ -150,6 +163,35 @@ public final class ReputationSavedData extends SavedData {
         return changed;
     }
 
+    // --- decay immunity -----------------------------------------------------
+
+    /** Whether decay is switched off for this community, for every player at once. */
+    public boolean isDecayImmune(CommunityKey community) {
+        return community != null && decayImmune.contains(community);
+    }
+
+    /**
+     * Switches decay off or back on for one community. Marks the store dirty only when the flag
+     * actually moved, so an operator repeating the command does not force a needless write.
+     *
+     * @return true when the flag changed
+     */
+    public boolean setDecayImmune(CommunityKey community, boolean immune) {
+        if (community == null) {
+            return false;
+        }
+        boolean changed = immune ? decayImmune.add(community) : decayImmune.remove(community);
+        if (changed) {
+            setDirty();
+        }
+        return changed;
+    }
+
+    /** The immune communities, in key order. Unmodifiable. */
+    public Set<CommunityKey> decayImmuneCommunities() {
+        return Collections.unmodifiableSet(decayImmune);
+    }
+
     // --- persistence --------------------------------------------------------
 
     @Override
@@ -162,6 +204,13 @@ public final class ReputationSavedData extends SavedData {
             }
         });
         tag.put("players", playerTag);
+        // Written only when non-empty, and read only when present: a 0.3.0 file has no such tag and
+        // must keep loading unchanged, which is why FORMAT_VERSION does not move for this.
+        if (!decayImmune.isEmpty()) {
+            ListTag immuneTag = new ListTag();
+            decayImmune.forEach(key -> immuneTag.add(key.save()));
+            tag.put("decayImmune", immuneTag);
+        }
         return tag;
     }
 
@@ -194,6 +243,11 @@ public final class ReputationSavedData extends SavedData {
             } catch (Throwable t) {
                 skipped++;
                 McaReputation.LOGGER.warn("[MCA: Reputation] skipping unreadable record for player {}", playerId, t);
+            }
+        }
+        if (tag.contains("decayImmune")) {
+            for (Tag entry : tag.getList("decayImmune", Tag.TAG_COMPOUND)) {
+                CommunityKey.load((CompoundTag) entry).ifPresent(data.decayImmune::add);
             }
         }
         data.migrateFormat();
