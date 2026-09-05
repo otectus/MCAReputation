@@ -1,0 +1,16 @@
+{
+  "display": { "translate": "mcareputation.incident.villager_cured" },
+  "default_delta": 15,
+  "visibility": "witnessed",
+  "severity": "major",
+  "tags": ["service", "protection", "healing"],
+  "decay": { "type": "none" },
+  "gossip": {
+    "tone": "gratitude",
+    "phrase": "mcareputation.gossip.villager_cured",
+    "with": ["player", "subject"]
+  },
+  "pinned": false,
+  "retain_unwitnessed": true,
+  "max_override_abs": 40
+}

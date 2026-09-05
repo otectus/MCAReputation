@@ -5,6 +5,70 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — unreleased
+
+Four new automatic deeds (villagers rescued from threats, villagers cured from zombification, raid
+victories, and player kills — the last off by default), per-villager opinion derived from what each
+villager knew, standing display options (scoreboard objective and tab-list tier visibility), and
+three new admin commands for auditing and control. The network protocol bumps to version 4; the save
+format is unchanged and forward-compatible.
+
+**Carries the upstream Forge 0.4.0 feature set to Minecraft 1.21.1 / NeoForge.** The platform moved;
+the feature contract did not. See *Platform* below for what that changed and what it deliberately did not.
+
+| Mod | Version |
+|---|---|
+| Minecraft | `1.21.1` (metadata range `[1.21.1,1.21.2)`) |
+| NeoForge | `21.1.249+` (metadata range `[21.1.249,21.2)`) |
+| Java | `21` |
+| MCA Reborn | `7.7.x` (metadata range `[7.7,8)`) — built and verified against `7.7.36-beta.3+1.21.1` |
+| MCA: Quests | `1.1.0+` (optional, requires API version 2) |
+| MCA: Conversations | `2.0.0+` (optional, requires API version 2) |
+| MCA: Crime | `0.1.0+` (optional) |
+
+The optional companions and the API version move: each must be a 1.21.1 NeoForge build targeting API version 2; a Forge 1.20.1 companion cannot load on this platform at all.
+
+### Added
+
+- **Four new automatic incidents:** `villager_rescued` (+6, witnessed, decays), `villager_cured`
+  (+15, witnessed, no decay), `raid_repelled` (+20, village-wide, decays), and `player_killed_in_village`
+  (−12, witnessed, decays; off by default because it is not always the village's business).
+  Hooked in `ReputationDeedEvents` with anti-farm dedupe keys in `DeedKeys`; config keys
+  `enableCoreRescueIncidents`, `enableCoreCureIncidents`, `enableCoreRaidIncidents`,
+  `enableCorePvpIncidents`, `rescueThreatWindowTicks` (100 ticks), `rescueCoalesceTicks` (6000
+  ticks). New `CoreIncidentKind` constants for compatibility claims.
+
+- **Per-villager opinion:** A villager's personal standing with a player, derived from incidents that
+  villager knows about (through witnessing or hearing) weighted by how they found out. Stored never,
+  computed from the village ledger on demand; configured by `enableVillagerOpinion` (true),
+  `opinionHearsayPercent` (50), `opinionInvolvedPercent` (150). The standing screen shows one extra
+  line when opened from a villager, toggled by client config `showVillagerOpinion`. API:
+  `McaReputationApi.getVillagerOpinion(...)` and `getOpinionBias(...)`.
+
+- **Standing visibility:** A scoreboard objective and a tab-list tier suffix, both off by default.
+  Configured by `enableScoreboardObjective`, `scoreboardObjectiveName` (default "mcareputation"),
+  and `enableTabListTier`; refreshed every `displayRefreshIntervalTicks` (100 ticks). Shows the
+  standing in the player's current village, or their best-known one using the same selection rule as
+  the standing screen.
+
+- **Admin commands:** `/mcareputation export [player]` (permission 3; writes a timestamped JSON
+  snapshot), `/mcareputation top <community> [limit]` (permission 2, default 10, max 50), and
+  `/mcareputation community <community> decay <on|off|status>` (permission 3 for on/off, 2 for
+  status; toggled communities never decay).
+
+- **Datapack condition and advancement trigger:** `mcareputation:standing` loot condition for gating
+  loot and advancement criteria; `mcareputation:tier_reached` advancement trigger for noticing
+  standing milestones. Both documented in `DATAPACK.md`.
+
+### Changed
+
+- **Network protocol version bumped to 4.** 0.3.0 clients cannot join 0.4.0 servers and vice versa.
+
+### Notes
+
+- Save format unchanged (FORMAT_VERSION still 1); 0.3.0 saves load without migration, and a 0.4.0
+  world's optional `decayImmune` list is dropped silently by 0.3.0 on its next save.
+
 ## [0.3.0] — unreleased
 
 Three things: the standing screen now looks like part of the game, it now shows the standing you

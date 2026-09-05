@@ -15,6 +15,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -193,6 +194,46 @@ class CommandTreeTest {
         ParseResults<CommandSourceStack> parse = assertParses(dispatcher(),
                 "mcareputation title grant Steve mcareputation:wanderer global", source(2));
         assertEquals("global", path(parse).get(path(parse).size() - 1));
+    }
+
+    // ------------------------------------------------------------------
+    // Admin tooling (§24)
+    // ------------------------------------------------------------------
+
+    @Test
+    void exportParsesBareAndWithAPlayer() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertEquals(List.of("mcareputation", "export"),
+                path(assertParses(dispatcher, "mcareputation export", source(3))));
+        assertEquals(List.of("mcareputation", "export", "player"),
+                path(assertParses(dispatcher, "mcareputation export Steve", source(3))));
+    }
+
+    /** The whole store in one file is an operator's document, not a player's. */
+    @Test
+    void aPlayerCannotReachExport() {
+        assertNull(dispatcher().parse("mcareputation export", source(0)).getContext().getNodes()
+                .stream().map(node -> node.getNode().getName())
+                .filter("export"::equals).findFirst().orElse(null),
+                "export must not be reachable below permission 3");
+    }
+
+    @Test
+    void topParsesWithAndWithoutALimit() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertEquals(List.of("mcareputation", "top", "community"),
+                path(assertParses(dispatcher, "mcareputation top here", source(2))));
+        assertEquals(List.of("mcareputation", "top", "community", "limit"),
+                path(assertParses(dispatcher, "mcareputation top minecraft:overworld/3 5", source(2))));
+    }
+
+    @Test
+    void communityDecaySwitchesAndStatusParse() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertEquals(List.of("mcareputation", "community", "community", "decay", "on"),
+                path(assertParses(dispatcher, "mcareputation community here decay on", source(3))));
+        assertEquals(List.of("mcareputation", "community", "community", "decay", "status"),
+                path(assertParses(dispatcher, "mcareputation community here decay status", source(2))));
     }
 
     @Test

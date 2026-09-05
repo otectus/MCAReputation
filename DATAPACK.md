@@ -143,6 +143,10 @@ supplies the voice.
 |---|---:|---|---|---|
 | `villager_assaulted` | `-8` | witnessed | 2/day after 2 days | Coalesced: a beating is one deed. |
 | `villager_killed` | `-40` | witnessed | none | Absorbs a preceding assault so the pair totals `-40`, not `-48`. Pinned; retained even unwitnessed. |
+| `villager_rescued` | `+6` | witnessed | 2/day after 2 days | Credited once per bucket; a second kill in the same bucket does not double-credit. Raised by `ReputationDeedEvents.onThreatKilled` when a hostile mob that is targeting or has recently hurt an MCA villager is killed. |
+| `villager_cured` | `+15` | witnessed | none | Retained even unwitnessed. Raised by `ReputationDeedEvents.onVillagerCured` when a player cures a zombie villager online; an offline curer earns nothing. |
+| `raid_repelled` | `+20` | village | 1/day after 14 days | Raised by `ReputationDeedEvents.onHeroOfTheVillage` when the player receives Hero of the Village after a raid victory. Dedupe key uses the raid id to prevent double-credit on effect refreshes. |
+| `player_killed_in_village` | `-12` | witnessed | 2/day after 2 days | Off by default; an operator enables it via config. Raised by `ReputationDeedEvents.onPlayerKilled` when a player kills another player inside a village. |
 | `quest_completed` | caller | village | none | Generic fallback for MCA: Quests. |
 | `quest_failed` | caller | village | none | Only created when a quest authors it. |
 | `quest_abandoned` | caller | witnessed | none | Only created when a quest authors it. |
@@ -156,6 +160,11 @@ supplies the voice.
 | `public_apology` | `+1` | witnessed | 1/day after 1 day | Cannot erase the underlying deed. |
 | `restitution_completed` | `+4` | village | none | Usually paired with a `resolve_incident` reward. |
 | `legacy_balance` | `0` | private | none | Migration marker; the imported number lives in the baseline. |
+
+The four newest incidents — `villager_rescued`, `villager_cured`, `raid_repelled`, and
+`player_killed_in_village` — are core incident kinds. Another mod can claim any of them through the
+authority mechanism in `api/CoreIncidentKind.java` and provide its own deeds instead. Pack authors
+can override their JSON definitions exactly as they can for `villager_killed`.
 
 ---
 
@@ -268,6 +277,112 @@ no-op. That is what stops repeated clicking from farming standing.
 Template variables for `conversations_say`: `reputation_tier`, `reputation_score`,
 `reputation_village`, `reputation_recent_deed`, `reputation_title`. Each falls back to a neutral
 localized phrase when nothing resolves, so a line never breaks.
+
+---
+
+## Loot conditions and advancement triggers
+
+### The `mcareputation:standing` loot condition
+
+The `mcareputation:standing` condition gates loot tables, item modifiers, and advancement criteria on
+a player's standing with a village. It works anywhere a `LootItemCondition` does — including in
+`predicates/` files, which is how an advancement criterion uses it.
+
+```json
+{
+  "condition": "mcareputation:standing",
+  "community": "here",
+  "player": "this",
+  "min": 20,
+  "max": 80,
+  "min_tier": "friend",
+  "max_tier": "revered",
+  "has_title": "mcareputation:village_hero"
+}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `community` | string | `"here"` | `"here"` resolves the nearest village to the loot origin (or the entity's position if no origin); or an explicit `"<dimension>/<villageId>"` string like `"minecraft:overworld/3"`. Malformed strings cause a load error. |
+| `player` | string | `"this"` | `"this"` is the context entity; `"killer"` is whatever killed it. |
+| `min`, `max` | int | none | Score bounds, inclusive. Both optional. |
+| `min_tier`, `max_tier` | string | none | Tier ids from the tier ladder, compared by position (not by name). Both optional. |
+| `has_title` | string | none | A title resource location. Optional. |
+
+All standing fields are optional and ANDed together. An empty block `{}` is a deliberate no-op, not an
+error. At runtime the condition answers false — rather than throwing — when the entity is not a
+server player or when no village resolves for the given community.
+
+#### Example: a loot table predicate
+
+A `predicates/` file in `data/mypack/` that checks for standing:
+
+```json
+{
+  "condition": "mcareputation:standing",
+  "community": "minecraft:overworld/3",
+  "player": "this",
+  "min": 75,
+  "min_tier": "friend"
+}
+```
+
+#### Example: an advancement with a tier-crossing criterion
+
+An advancement that fires when a player reaches the `friend` tier in any village:
+
+```json
+{
+  "display": {
+    "title": { "translate": "mypack.adv.made_friend" },
+    "description": { "translate": "mypack.adv.made_friend.desc" },
+    "frame": "goal",
+    "show_toast": true
+  },
+  "criteria": {
+    "reached_friend": {
+      "trigger": "mcareputation:tier_reached",
+      "conditions": {
+        "tier": "friend",
+        "upward_only": true,
+        "player": [
+          { "condition": "mcareputation:standing", "min_tier": "friend" }
+        ]
+      }
+    }
+  },
+  "requirements": [["reached_friend"]]
+}
+```
+
+Note that `player` must be a JSON array; a bare object is parsed as a vanilla entity predicate and the standing condition would be ignored.
+
+### The `mcareputation:tier_reached` advancement trigger
+
+The `mcareputation:tier_reached` trigger fires when a player's standing with a community crosses a
+tier boundary — either up or down.
+
+```json
+{
+  "trigger": "mcareputation:tier_reached",
+  "conditions": {
+    "tier": "friend",
+    "community": "minecraft:overworld/3",
+    "upward_only": true
+  }
+}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `tier` | string | any | The tier id to match. Omit to fire on any tier crossing. |
+| `community` | string | any | The explicit community as `"<dimension>/<villageId>"`. Omit to fire in any village. |
+| `upward_only` | bool | `true` | When true, fire only on upward crossings. When false, fire on both directions. Set to false if you want to notice when standing falls into a tier. |
+
+**Note:** the condition's field parsing and the trigger's matching rules are covered by unit tests
+(`StandingConditionTest.java` and `TierReachedTriggerTest.java`); the full predicate and advancement
+documents above are not parsed by any test and are not shipped in the jar, so pack authors should
+validate them in a development world.
 
 ---
 

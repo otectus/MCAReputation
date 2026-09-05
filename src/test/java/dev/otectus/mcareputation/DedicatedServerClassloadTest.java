@@ -56,14 +56,23 @@ class DedicatedServerClassloadTest {
             "dev.otectus.mcareputation.network.ReputationNetwork$OpenScreenS2C",
             "dev.otectus.mcareputation.network.ReputationNetwork$ChangeS2C",
             "dev.otectus.mcareputation.network.ReputationNetwork$TierToastS2C",
+            "dev.otectus.mcareputation.network.ReputationNetwork$OpinionSummary",
             "dev.otectus.mcareputation.network.ClientPacketHandler",
             "dev.otectus.mcareputation.network.ReputationFeedback",
             "dev.otectus.mcareputation.event.ReputationGameplayEvents",
             "dev.otectus.mcareputation.event.CoreIncidentAuthorities",
+            "dev.otectus.mcareputation.event.ReputationDeedEvents",
+            "dev.otectus.mcareputation.event.DeedKeys",
+            "dev.otectus.mcareputation.event.StandingDisplay",
+            "dev.otectus.mcareputation.event.ReputationAdvancementEvents",
             "dev.otectus.mcareputation.api.McaReputationApi",
+            "dev.otectus.mcareputation.api.VillagerOpinion",
             "dev.otectus.mcareputation.compat.McaReflect",
             "dev.otectus.mcareputation.compat.McaCompat",
             "dev.otectus.mcareputation.reputation.ReputationService",
+            "dev.otectus.mcareputation.reputation.OpinionResolver",
+            "dev.otectus.mcareputation.data.StandingCondition",
+            "dev.otectus.mcareputation.data.TierReachedTrigger",
             "dev.otectus.mcareputation.state.ReputationSavedData");
 
     /**

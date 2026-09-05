@@ -1,0 +1,27 @@
+{
+  "display": { "translate": "mcareputation.incident.player_killed_in_village" },
+  "default_delta": -12,
+  "visibility": "witnessed",
+  "severity": "major",
+  "tags": ["crime", "violence", "killing"],
+  "retention_ticks": 336000,
+  "decay": {
+    "type": "linear_to_zero",
+    "delay_ticks": 48000,
+    "amount_per_day": 2
+  },
+  "resolution": {
+    "apologized": 0.75,
+    "atoned": 0.25,
+    "forgiven": 0.0,
+    "disproven": 0.0
+  },
+  "gossip": {
+    "tone": "condemnation",
+    "phrase": "mcareputation.gossip.player_killed_in_village",
+    "with": ["player", "subject"]
+  },
+  "pinned": false,
+  "retain_unwitnessed": false,
+  "max_override_abs": 24
+}

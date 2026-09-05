@@ -47,6 +47,10 @@ class ContentValidationTest {
     private static final List<ResourceLocation> REQUIRED = List.of(
             BuiltinIncidents.VILLAGER_ASSAULTED,
             BuiltinIncidents.VILLAGER_KILLED,
+            BuiltinIncidents.VILLAGER_RESCUED,
+            BuiltinIncidents.VILLAGER_CURED,
+            BuiltinIncidents.RAID_REPELLED,
+            BuiltinIncidents.PLAYER_KILLED_IN_VILLAGE,
             BuiltinIncidents.QUEST_COMPLETED,
             BuiltinIncidents.QUEST_FAILED,
             BuiltinIncidents.QUEST_ABANDONED,
@@ -149,6 +153,26 @@ class ContentValidationTest {
         assertEquals(1, incidents.get(BuiltinIncidents.PUBLIC_APOLOGY).defaultDelta());
         assertEquals(4, incidents.get(BuiltinIncidents.RESTITUTION_COMPLETED).defaultDelta());
         assertEquals(0, incidents.get(BuiltinIncidents.PROMISE_MADE).defaultDelta());
+        assertEquals(6, incidents.get(BuiltinIncidents.VILLAGER_RESCUED).defaultDelta());
+        assertEquals(15, incidents.get(BuiltinIncidents.VILLAGER_CURED).defaultDelta());
+        assertEquals(20, incidents.get(BuiltinIncidents.RAID_REPELLED).defaultDelta());
+        assertEquals(-12, incidents.get(BuiltinIncidents.PLAYER_KILLED_IN_VILLAGE).defaultDelta());
+    }
+
+    /**
+     * Repelling a raid is village business, not a private favour: everyone who lives there knows who
+     * held the gate, whether or not they were watching at the moment it happened.
+     */
+    @Test
+    void theRaidDefinitionIsVillageWideRatherThanWitnessed() throws IOException {
+        assertEquals(IncidentVisibility.VILLAGE,
+                shippedIncidents().get(BuiltinIncidents.RAID_REPELLED).visibility());
+    }
+
+    /** A cure is remembered for good; nobody forgets who brought a neighbour back. */
+    @Test
+    void theCureDefinitionDoesNotDecay() throws IOException {
+        assertFalse(shippedIncidents().get(BuiltinIncidents.VILLAGER_CURED).decay().decays());
     }
 
     /** §19.1: an unwitnessed killing is retained as hidden history rather than being dropped. */

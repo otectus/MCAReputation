@@ -1,0 +1,19 @@
+{
+  "display": { "translate": "mcareputation.incident.raid_repelled" },
+  "default_delta": 20,
+  "visibility": "village",
+  "severity": "major",
+  "tags": ["service", "protection", "raid"],
+  "decay": {
+    "type": "linear_to_zero",
+    "delay_ticks": 336000,
+    "amount_per_day": 1
+  },
+  "gossip": {
+    "tone": "praise",
+    "phrase": "mcareputation.gossip.raid_repelled",
+    "with": ["player", "subject"]
+  },
+  "pinned": false,
+  "max_override_abs": 40
+}

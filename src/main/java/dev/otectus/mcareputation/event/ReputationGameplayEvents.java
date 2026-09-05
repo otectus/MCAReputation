@@ -330,7 +330,7 @@ public final class ReputationGameplayEvents {
      * empty. §20.1 is explicit that unprovable attribution must fall through to "nobody", never to a
      * guess: blaming the wrong player is worse than missing a deed.
      */
-    private static Optional<ServerPlayer> attribute(DamageSource source) {
+    static Optional<ServerPlayer> attribute(DamageSource source) {
         if (source == null) {
             return Optional.empty();
         }
@@ -420,7 +420,7 @@ public final class ReputationGameplayEvents {
     // ------------------------------------------------------------------
 
     /** Refreshes the cached village name and centre so history stays readable if the village goes. */
-    private static void cacheMetadata(ServerLevel level, UUID playerId, CommunityKey community, long gameTime) {
+    static void cacheMetadata(ServerLevel level, UUID playerId, CommunityKey community, long gameTime) {
         CommunityMetadata fresh = CommunityResolver.readMetadata(level, community, gameTime);
         if (fresh != CommunityMetadata.EMPTY) {
             ReputationService.cacheCommunityMetadata(level.getServer(), playerId, community, fresh);

@@ -31,7 +31,8 @@ something different: what a **village** thinks of you, and *why*.
 
 ## What it deliberately does not do
 
-No hearts replacement. No per-villager reputation meter. No guards, fines, exile, or bounties. No
+No hearts replacement. No per-villager *stored* reputation (villagers have personal opinions derived
+from what they witnessed or heard, never a separate score). No guards, fines, exile, or bounties. No
 trade-price rewriting. No global fame. No AI text generation, no telemetry, no network calls. Routine
 trading, gifts, and repeated conversation clicks earn nothing at all — those are farmable, and they
 belong to systems that already own them.
@@ -63,6 +64,9 @@ time, and removing any one of the three leaves the others working.
 - An **Open Standing** keybind is registered, **unbound by default** — bind it in Controls if you want it.
 - With MCA: Quests installed, the Journal links to the same screen.
 - With MCA: Conversations installed, you can simply ask a villager what people think of you.
+- **Optional:** A scoreboard objective showing your standing with the current village, and a tab-list
+  suffix showing your tier. Both are off by default; enable them in the server config and set the
+  scoreboard display slot with vanilla's `/scoreboard objectives setdisplay` if you want them visible.
 
 ## Commands
 
@@ -79,6 +83,9 @@ needs permission level 2, and every change is written to the server log with who
 /mcareputation tiers [ladder]                the loaded tier ladder
 /mcareputation validate                      check every loaded datapack definition
 /mcareputation migrate status|run …          legacy MCA: Quests standing import
+/mcareputation export [player]               export standing data as JSON
+/mcareputation top <community> [limit]       the top players in a village
+/mcareputation community <community> decay   enable, disable, or check decay immunity
 /mcareputation debug community|witnesses
 ```
 
@@ -104,8 +111,10 @@ data/<namespace>/mcareputation/reputation_tiers/**/*.json
 data/<namespace>/mcareputation/titles/**/*.json
 ```
 
-Existing `mcaquests/reputation_tiers` and `mcaquests/titles` paths keep working. Full schemas and
-worked examples are in **[DATAPACK.md](DATAPACK.md)**.
+Existing `mcaquests/reputation_tiers` and `mcaquests/titles` paths keep working. You can also gate
+loot and advancement criteria on standing using the `mcareputation:standing` loot condition and the
+`mcareputation:tier_reached` advancement trigger. Full schemas and worked examples are in
+**[DATAPACK.md](DATAPACK.md)**.
 
 ## For mod authors
 

@@ -39,6 +39,12 @@ class ConfigParityTest {
             "scoring.enableTierTitles",
             "core_events.enableCoreAssaultIncidents",
             "core_events.enableCoreKillingIncidents",
+            "core_events.enableCoreRescueIncidents",
+            "core_events.enableCoreCureIncidents",
+            "core_events.enableCoreRaidIncidents",
+            "core_events.enableCorePvpIncidents",
+            "core_events.rescueThreatWindowTicks",
+            "core_events.rescueCoalesceTicks",
             "core_events.minimumIncidentDamage",
             "core_events.attributeTamedDamage",
             "core_events.selfDefenseWindowTicks",
@@ -49,10 +55,17 @@ class ConfigParityTest {
             "witnesses.requireWitnessLineOfSight",
             "witnesses.minRumorDelayTicks",
             "witnesses.maxRumorDelayTicks",
+            "witnesses.enableVillagerOpinion",
+            "witnesses.opinionHearsayPercent",
+            "witnesses.opinionInvolvedPercent",
             "limits.maxIncidentsPerCommunity",
             "limits.maxIncidentsPerPlayer",
             "limits.reconcileOnlineIntervalTicks",
             "limits.strictJsonValidation",
+            "visibility.enableScoreboardObjective",
+            "visibility.scoreboardObjectiveName",
+            "visibility.enableTabListTier",
+            "visibility.displayRefreshIntervalTicks",
             "integration.enableQuestsIntegration",
             "integration.enableConversationsIntegration",
             "integration.enableCrimeIntegration",
@@ -67,7 +80,8 @@ class ConfigParityTest {
             "display.showNegativeTierMessages",
             "display.mergeChangeNotifications",
             "display.showExactScore",
-            "display.showIncidentDeltas");
+            "display.showIncidentDeltas",
+            "display.showVillagerOpinion");
 
     private static List<String> pathsOf(ModConfigSpec spec) {
         List<String> paths = new ArrayList<>();

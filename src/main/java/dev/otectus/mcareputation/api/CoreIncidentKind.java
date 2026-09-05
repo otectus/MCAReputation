@@ -34,7 +34,39 @@ public enum CoreIncidentKind {
      * Killing an MCA villager — the {@code LivingDeathEvent} hook behind
      * {@link BuiltinIncidents#VILLAGER_KILLED}, including the precursor-assault upgrade.
      */
-    MCA_VILLAGER_KILL(BuiltinIncidents.VILLAGER_KILLED);
+    MCA_VILLAGER_KILL(BuiltinIncidents.VILLAGER_KILLED),
+
+    /**
+     * Saving an MCA villager from the mob attacking them — the {@code LivingDeathEvent} hook behind
+     * {@link BuiltinIncidents#VILLAGER_RESCUED}.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    MCA_VILLAGER_RESCUE(BuiltinIncidents.VILLAGER_RESCUED),
+
+    /**
+     * Curing a zombie villager back into an MCA villager — the {@code LivingConversionEvent.Post}
+     * hook behind {@link BuiltinIncidents#VILLAGER_CURED}.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    MCA_VILLAGER_CURE(BuiltinIncidents.VILLAGER_CURED),
+
+    /**
+     * Being present for a village's victory over a raid — the hero-of-the-village hook behind
+     * {@link BuiltinIncidents#RAID_REPELLED}.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    MCA_RAID_REPELLED(BuiltinIncidents.RAID_REPELLED),
+
+    /**
+     * Killing another player where a village can see it — the {@code LivingDeathEvent} hook behind
+     * {@link BuiltinIncidents#PLAYER_KILLED_IN_VILLAGE}. Off by default.
+     *
+     * @since MCA: Reputation 0.4.0
+     */
+    PLAYER_KILL_IN_VILLAGE(BuiltinIncidents.PLAYER_KILLED_IN_VILLAGE);
 
     private final ResourceLocation incidentType;
 

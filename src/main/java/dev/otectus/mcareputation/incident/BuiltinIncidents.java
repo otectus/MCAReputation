@@ -28,6 +28,19 @@ public final class BuiltinIncidents {
     /** Killing a villager. Upgrades a recent assault rather than stacking with it (§20.2). */
     public static final ResourceLocation VILLAGER_KILLED = McaReputation.id("villager_killed");
 
+    /** Saving a villager from the mob that was attacking them. */
+    public static final ResourceLocation VILLAGER_RESCUED = McaReputation.id("villager_rescued");
+
+    /** Curing a zombie villager back into an MCA villager. */
+    public static final ResourceLocation VILLAGER_CURED = McaReputation.id("villager_cured");
+
+    /** Seeing a raid on a village through to its end. Village business, not a private favour. */
+    public static final ResourceLocation RAID_REPELLED = McaReputation.id("raid_repelled");
+
+    /** Killing another player where a village can see it. Off by default. */
+    public static final ResourceLocation PLAYER_KILLED_IN_VILLAGE =
+            McaReputation.id("player_killed_in_village");
+
     // --- structured work, created by MCA: Quests (§16) ----------------------
 
     public static final ResourceLocation QUEST_COMPLETED = McaReputation.id("quest_completed");
@@ -84,4 +97,13 @@ public final class BuiltinIncidents {
 
     /** Written by {@code IncidentRecord.foldInto} onto an incident absorbed by a later one. */
     public static final String CONTEXT_SUPERSEDED_BY = "superseded_by";
+
+    /** The mob a rescue was a rescue <em>from</em>, as its registry id. */
+    public static final String CONTEXT_THREAT = "threat";
+
+    /** The id of the raid a village credits a player with surviving. */
+    public static final String CONTEXT_RAID_ID = "raid_id";
+
+    /** The player killed in a village, as a name; the subject carries their UUID. */
+    public static final String CONTEXT_VICTIM_PLAYER = "victim_player";
 }

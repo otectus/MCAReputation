@@ -69,6 +69,12 @@ public final class McaReputationConfig {
         public final ModConfigSpec.IntValue defaultVillageSearchRadius;
         public final ModConfigSpec.BooleanValue enableCoreAssaultIncidents;
         public final ModConfigSpec.BooleanValue enableCoreKillingIncidents;
+        public final ModConfigSpec.BooleanValue enableCoreRescueIncidents;
+        public final ModConfigSpec.BooleanValue enableCoreCureIncidents;
+        public final ModConfigSpec.BooleanValue enableCoreRaidIncidents;
+        public final ModConfigSpec.BooleanValue enableCorePvpIncidents;
+        public final ModConfigSpec.IntValue rescueThreatWindowTicks;
+        public final ModConfigSpec.IntValue rescueCoalesceTicks;
         public final ModConfigSpec.DoubleValue minimumIncidentDamage;
         public final ModConfigSpec.IntValue witnessRadius;
         public final ModConfigSpec.IntValue maxWitnesses;
@@ -79,9 +85,16 @@ public final class McaReputationConfig {
         public final ModConfigSpec.IntValue assaultCoalesceTicks;
         public final ModConfigSpec.IntValue minRumorDelayTicks;
         public final ModConfigSpec.IntValue maxRumorDelayTicks;
+        public final ModConfigSpec.BooleanValue enableVillagerOpinion;
+        public final ModConfigSpec.IntValue opinionHearsayPercent;
+        public final ModConfigSpec.IntValue opinionInvolvedPercent;
         public final ModConfigSpec.IntValue maxIncidentsPerCommunity;
         public final ModConfigSpec.IntValue maxIncidentsPerPlayer;
         public final ModConfigSpec.IntValue reconcileOnlineIntervalTicks;
+        public final ModConfigSpec.BooleanValue enableScoreboardObjective;
+        public final ModConfigSpec.ConfigValue<String> scoreboardObjectiveName;
+        public final ModConfigSpec.BooleanValue enableTabListTier;
+        public final ModConfigSpec.IntValue displayRefreshIntervalTicks;
         public final ModConfigSpec.BooleanValue enableScoreDecay;
         public final ModConfigSpec.BooleanValue enableTierTitles;
         public final ModConfigSpec.BooleanValue strictJsonValidation;
@@ -136,6 +149,27 @@ public final class McaReputationConfig {
             enableCoreKillingIncidents = builder
                     .comment("Record an incident when a player kills an MCA villager.")
                     .define("enableCoreKillingIncidents", true);
+            enableCoreRescueIncidents = builder
+                    .comment("Record an incident when a player kills the mob attacking an MCA villager.")
+                    .define("enableCoreRescueIncidents", true);
+            enableCoreCureIncidents = builder
+                    .comment("Record an incident when a player cures a zombie MCA villager.")
+                    .define("enableCoreCureIncidents", true);
+            enableCoreRaidIncidents = builder
+                    .comment("Record an incident when a player is credited with a village surviving a raid.")
+                    .define("enableCoreRaidIncidents", true);
+            enableCorePvpIncidents = builder
+                    .comment("Record an incident when a player kills another player where a village can see.",
+                            "Off by default: on most servers duelling is not the village's business.")
+                    .define("enableCorePvpIncidents", false);
+            rescueThreatWindowTicks = builder
+                    .comment("How recently a mob must have struck a villager for killing it to still count",
+                            "as a rescue, when the mob is no longer targeting them.")
+                    .defineInRange("rescueThreatWindowTicks", 100, 1, 1200);
+            rescueCoalesceTicks = builder
+                    .comment("Rescues of the same villager by the same player within one bucket of this",
+                            "length count once, so a kited mob farm earns nothing. 0 disables bucketing.")
+                    .defineInRange("rescueCoalesceTicks", 6000, 0, 72000);
             minimumIncidentDamage = builder
                     .comment("Damage below this is ignored, so chip damage and thorns do not create incidents.")
                     .defineInRange("minimumIncidentDamage", 1.0D, 0.0D, 1024.0D);
@@ -171,6 +205,19 @@ public final class McaReputationConfig {
             maxRumorDelayTicks = builder
                     .comment("Longest such delay. Clamped up to minRumorDelayTicks if set lower.")
                     .defineInRange("maxRumorDelayTicks", 48000, 0, 10_000_000);
+            enableVillagerOpinion = builder
+                    .comment("Derive what one villager personally makes of a player from the deeds that",
+                            "villager knows about. Nothing extra is saved; turning this off only stops",
+                            "the question being answered.")
+                    .define("enableVillagerOpinion", true);
+            opinionHearsayPercent = builder
+                    .comment("Weight, in percent, of a deed a villager only heard about — and of the",
+                            "community baseline, which reaches them the same way.")
+                    .defineInRange("opinionHearsayPercent", 50, 0, 100);
+            opinionInvolvedPercent = builder
+                    .comment("Weight, in percent, of a deed the villager was a subject of. Above 100",
+                            "because what was done to you counts for more than what you watched.")
+                    .defineInRange("opinionInvolvedPercent", 150, 100, 300);
             builder.pop();
 
             builder.comment("Storage bounds. These may only tighten the hard caps in the source.").push("limits");
@@ -190,6 +237,30 @@ public final class McaReputationConfig {
                     .comment("Treat any datapack validation error as a failed reload. The previously loaded",
                             "registries stay live either way; strict mode simply refuses to swap them.")
                     .define("strictJsonValidation", false);
+            builder.pop();
+
+            builder.comment("Showing standing outside the standing screen. Both displays are off by",
+                    "default: they are always-on surfaces, and a server that wants one will say so.")
+                    .push("visibility");
+            enableScoreboardObjective = builder
+                    .comment("Keep a dummy scoreboard objective holding each online player's standing with",
+                            "the village the standing screen would open on. The objective is created and",
+                            "written; which slot it is displayed in, if any, is left to the server.")
+                    .define("enableScoreboardObjective", false);
+            scoreboardObjectiveName = builder
+                    .comment("Name of that objective. An existing objective with this name is used as it is,",
+                            "never recreated.")
+                    .define("scoreboardObjectiveName", "mcareputation",
+                            value -> value instanceof String name && !name.isBlank());
+            enableTabListTier = builder
+                    .comment("Append the tier name to each player's tab-list entry. Appended to whatever",
+                            "name other mods produced, so it stacks rather than overwrites.")
+                    .define("enableTabListTier", false);
+            displayRefreshIntervalTicks = builder
+                    .comment("How often the displays are swept for online players. Standing changes and",
+                            "dimension changes update immediately; this sweep exists because walking into",
+                            "another village raises no event.")
+                    .defineInRange("displayRefreshIntervalTicks", 100, 20, 1200);
             builder.pop();
 
             builder.comment("Optional companion mods. Each is a no-op when that mod is absent.").push("integration");
@@ -224,6 +295,7 @@ public final class McaReputationConfig {
     public static final class Client {
 
         public final ModConfigSpec.BooleanValue showReputationButton;
+        public final ModConfigSpec.BooleanValue showVillagerOpinion;
         public final ModConfigSpec.BooleanValue showChangeActionBar;
         public final ModConfigSpec.BooleanValue showTierToasts;
         public final ModConfigSpec.BooleanValue showNegativeTierMessages;
@@ -257,6 +329,10 @@ public final class McaReputationConfig {
             showIncidentDeltas = builder
                     .comment("Show each deed's numeric contribution in the standing screen.")
                     .define("showIncidentDeltas", true);
+            showVillagerOpinion = builder
+                    .comment("When the screen was opened from a villager, show what that villager",
+                            "personally makes of you beneath the village's own view.")
+                    .define("showVillagerOpinion", true);
             builder.pop();
         }
     }
@@ -338,6 +414,32 @@ public final class McaReputationConfig {
         return read(COMMON.enableCoreKillingIncidents::get, true);
     }
 
+    public static boolean coreRescueEnabled() {
+        return read(COMMON.enableCoreRescueIncidents::get, true);
+    }
+
+    public static boolean coreCureEnabled() {
+        return read(COMMON.enableCoreCureIncidents::get, true);
+    }
+
+    public static boolean coreRaidEnabled() {
+        return read(COMMON.enableCoreRaidIncidents::get, true);
+    }
+
+    /** Off by default; a duel is not the village's business unless an operator says it is. */
+    public static boolean corePvpEnabled() {
+        return read(COMMON.enableCorePvpIncidents::get, false);
+    }
+
+    public static int rescueThreatWindowTicks() {
+        return Math.max(1, Math.min(1200, read(COMMON.rescueThreatWindowTicks::get, 100)));
+    }
+
+    /** Bucket length for rescue dedupe. {@code 0} means every rescue is its own deed. */
+    public static int rescueCoalesceTicks() {
+        return Math.max(0, Math.min(72000, read(COMMON.rescueCoalesceTicks::get, 6000)));
+    }
+
     public static double minimumIncidentDamage() {
         double value = read(COMMON.minimumIncidentDamage::get, 1.0D);
         return Double.isFinite(value) ? Math.max(0.0D, value) : 1.0D;
@@ -390,6 +492,21 @@ public final class McaReputationConfig {
         return read(COMMON.maxRumorDelayTicks::get, 48000);
     }
 
+    /** Whether per-villager opinion is answered at all. Nothing is stored either way. */
+    public static boolean villagerOpinionEnabled() {
+        return read(COMMON.enableVillagerOpinion::get, true);
+    }
+
+    /** Weight of hearsay, and of the baseline, in percent. */
+    public static int opinionHearsayPercent() {
+        return Math.max(0, Math.min(100, read(COMMON.opinionHearsayPercent::get, 50)));
+    }
+
+    /** Weight of a deed the villager was a subject of, in percent. Never below full weight. */
+    public static int opinionInvolvedPercent() {
+        return Math.max(100, Math.min(300, read(COMMON.opinionInvolvedPercent::get, 150)));
+    }
+
     public static int maxIncidentsPerCommunity() {
         return Math.max(1, Math.min(ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY,
                 read(COMMON.maxIncidentsPerCommunity::get, ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY)));
@@ -402,6 +519,26 @@ public final class McaReputationConfig {
 
     public static int reconcileOnlineIntervalTicks() {
         return Math.max(20, read(COMMON.reconcileOnlineIntervalTicks::get, 1200));
+    }
+
+    /** Whether the scoreboard objective is maintained at all. */
+    public static boolean scoreboardObjectiveEnabled() {
+        return read(COMMON.enableScoreboardObjective::get, false);
+    }
+
+    /** Objective name; never blank, since a blank one cannot be created. */
+    public static String scoreboardObjectiveName() {
+        String name = read(COMMON.scoreboardObjectiveName::get, "mcareputation");
+        return name.isBlank() ? "mcareputation" : name;
+    }
+
+    /** Whether the tier name is appended to tab-list entries. */
+    public static boolean tabListTierEnabled() {
+        return read(COMMON.enableTabListTier::get, false);
+    }
+
+    public static int displayRefreshIntervalTicks() {
+        return Math.max(20, Math.min(1200, read(COMMON.displayRefreshIntervalTicks::get, 100)));
     }
 
     public static boolean scoreDecayEnabled() {
@@ -482,5 +619,9 @@ public final class McaReputationConfig {
 
     public static boolean showIncidentDeltas() {
         return read(CLIENT.showIncidentDeltas::get, true);
+    }
+
+    public static boolean showVillagerOpinion() {
+        return read(CLIENT.showVillagerOpinion::get, true);
     }
 }
