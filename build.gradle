@@ -159,6 +159,90 @@ tasks.register('checkJarContents') {
     }
 }
 
+/**
+ * Compile-only API contract for sibling add-ons (MCA: Conversations).
+ *
+ * This jar carries classes only - never resources - so a consumer can compile against the public
+ * surface without pulling in mods.toml, data, or anything else that would make it a second mod.
+ * The classes outside `api/` listed in apiExports are a READ MODEL: keys and enums the API's own
+ * signatures mention. They are here so those signatures resolve, not as a stability promise.
+ * Consumers must never ship (shade, jar-in-jar, or otherwise bundle) any of these classes; they are
+ * provided at runtime by this mod.
+ *
+ * Deliberately NOT reobfuscated: no reobf registration and no finalizedBy reobfJar, so the api jar
+ * keeps official (Mojang) names and matches the dev-time classpath of the mods that compile on it.
+ */
+def apiExports = [
+        'dev/otectus/mcareputation/api/**',
+        'dev/otectus/mcareputation/community/CommunityKey.class',
+        'dev/otectus/mcareputation/community/CommunityKey$*.class',
+        'dev/otectus/mcareputation/incident/IncidentStatus.class',
+        'dev/otectus/mcareputation/incident/IncidentStatus$*.class',
+        'dev/otectus/mcareputation/incident/IncidentVisibility.class',
+        'dev/otectus/mcareputation/incident/IncidentVisibility$*.class',
+        'dev/otectus/mcareputation/incident/IncidentSubject.class',
+        'dev/otectus/mcareputation/incident/IncidentSubject$*.class',
+        'dev/otectus/mcareputation/incident/SubjectKind.class',
+        'dev/otectus/mcareputation/incident/SubjectKind$*.class',
+]
+
+tasks.register('apiJar', Jar) {
+    dependsOn tasks.named('compileJava')
+    archiveClassifier = 'api'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from(sourceSets.main.output.classesDirs) {
+        include apiExports
+    }
+
+    manifest {
+        attributes([
+                'Specification-Title'  : "${mod_id}-api",
+                'Specification-Version': mod_version,
+                'Implementation-Title' : "${mod_id}-api"
+        ])
+    }
+}
+
+tasks.named('assemble').configure {
+    dependsOn 'apiJar'
+}
+
+/**
+ * The api jar is easy to break silently: a renamed package empties it, and a stray `from` line
+ * turns it into a second copy of the mod. Assert the shape rather than trusting the include list.
+ */
+tasks.register('verifyApiJar') {
+    dependsOn tasks.named('apiJar')
+    doLast {
+        // Every export that must be present as a concrete class entry (the `api/**` wildcard is
+        // checked separately, by requiring at least one entry under that root).
+        def requiredClasses = apiExports.findAll { it.endsWith('.class') && !it.contains('$') }
+        def jarFile = tasks.named('apiJar').get().archiveFile.get().asFile
+        def names = []
+        new java.util.zip.ZipFile(jarFile).withCloseable { zip ->
+            zip.entries().each { entry -> names << entry.name }
+        }
+
+        if (!names.any { it.startsWith('dev/otectus/mcareputation/api/') }) {
+            throw new GradleException("${jarFile.name} contains no dev/otectus/mcareputation/api/ entries; the API surface is missing.")
+        }
+
+        def missing = requiredClasses.findAll { !names.contains(it) }
+        if (!missing.isEmpty()) {
+            throw new GradleException("${jarFile.name} is missing declared API exports: ${missing}")
+        }
+
+        def resources = names.findAll { it.endsWith('.json') || it.endsWith('.toml') || it.endsWith('.mcmeta') }
+        if (!resources.isEmpty()) {
+            throw new GradleException("${jarFile.name} must be classes only, but carries resources: ${resources.take(20)}")
+        }
+
+        logger.lifecycle("verifyApiJar: ${jarFile.name} is a clean compile-only API artifact (${names.count { it.endsWith('.class') }} classes).")
+    }
+}
+
 tasks.named('build').configure {
     dependsOn 'checkJarContents'
+    dependsOn 'verifyApiJar'
 }

@@ -5,6 +5,23 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — unreleased
+
+A build-only change: a versioned API artifact, so that sibling add-ons such as MCA:
+Conversations can compile against a versioned artifact instead of a class directory in a
+neighbouring checkout.
+
+### Added
+
+- **`apiJar` Gradle task** produces `build/libs/mcareputation-<version>-api.jar`, a compile-only
+  artifact containing the `api` package plus a named read-model slice of classes (the `community`
+  and `incident` key/enum types) intended for sibling add-ons such as MCA: Conversations. It is for
+  sibling add-ons to compile against and must never be shipped inside another mod — MCA:
+  Reputation is the only thing that supplies these classes at runtime, and a bundled copy is a
+  duplicate-class error, not a fallback. Classes outside `api/` are a read model of the current
+  shape of these types, not a stability promise. The new `verifyApiJar` check, wired into `build`,
+  fails if an exported class goes missing or a resource leaks into the jar.
+
 ## [0.4.0] — unreleased
 
 Four new automatic deeds (villagers rescued from threats, villagers cured from zombification, raid

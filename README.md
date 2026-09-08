@@ -149,6 +149,8 @@ Needs a JDK 17 on `JAVA_HOME` (ForgeGradle 6 does not tolerate a newer JVM as th
 `build/libs/mcareputation-<version>.jar` is the reobfuscated artifact. The build also runs
 `checkJarContents`, which fails if a companion mod's classes ever end up shaded into it.
 
+`./gradlew build` also produces `build/libs/mcareputation-<version>-api.jar`, a compile-only API artifact for sibling add-ons (such as MCA: Conversations) to compile against. It is not a runtime dependency and must never be bundled inside another mod.
+
 To build the whole suite, build this repository **first** — the two companions compile against its
 class output:
 

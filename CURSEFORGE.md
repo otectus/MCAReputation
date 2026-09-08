@@ -204,6 +204,7 @@ systems report it. A mod that does its own villager-harm detection can claim it 
 
 ## Status & license
 
+**0.4.1** — adds the compile-only API artifact for add-ons.
 **0.4.0** — unreleased, in active development.
 **0.3.0** — alpha, first public release.
 Licensed **GPL-3.0-only**, matching MCA Reborn.
