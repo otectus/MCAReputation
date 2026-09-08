@@ -351,6 +351,8 @@ def apiExports = [
         'dev/otectus/mcareputation/api/**',
         'dev/otectus/mcareputation/community/CommunityKey.class',
         'dev/otectus/mcareputation/community/CommunityKey$*.class',
+        'dev/otectus/mcareputation/incident/IncidentSeverity.class',
+        'dev/otectus/mcareputation/incident/IncidentSeverity$*.class',
         'dev/otectus/mcareputation/incident/IncidentStatus.class',
         'dev/otectus/mcareputation/incident/IncidentStatus$*.class',
         'dev/otectus/mcareputation/incident/IncidentVisibility.class',
@@ -405,6 +407,7 @@ tasks.register('verifyApiJar') {
     doLast {
         def requiredExports = [
                 'dev/otectus/mcareputation/community/CommunityKey.class',
+                'dev/otectus/mcareputation/incident/IncidentSeverity.class',
                 'dev/otectus/mcareputation/incident/IncidentStatus.class',
                 'dev/otectus/mcareputation/incident/IncidentVisibility.class',
                 'dev/otectus/mcareputation/incident/IncidentSubject.class',
