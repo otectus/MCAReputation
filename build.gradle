@@ -330,3 +330,116 @@ tasks.register('checkJarContents') {
 tasks.named('build').configure {
     dependsOn 'checkJarContents'
 }
+
+/**
+ * The compile-only API artifact, for sibling add-ons (MCA: Conversations) to compile against.
+ *
+ * This is a contract, not a shippable jar. It carries classes only - no resources, no metadata -
+ * so a consumer that puts it on its compile classpath sees the types and nothing else. Consumers
+ * must never ship these classes: at runtime the real mod jar provides them, and a duplicate copy
+ * inside another mod would shadow it.
+ *
+ * Everything under api/ is the stable surface. The five named classes outside it (CommunityKey and
+ * the incident enums/records) are exported because the api/ signatures mention them - they are a
+ * read model for callers, not a stability promise, and may change with the internals.
+ *
+ * No reobfuscation step exists on NeoForge, so the classes here are the same mojmap classes the
+ * mod jar ships. This is a plain Jar task and deliberately does not go through the `jar` task's
+ * manifest or checkJarContents, both of which describe the shipped mod artifact instead.
+ */
+def apiExports = [
+        'dev/otectus/mcareputation/api/**',
+        'dev/otectus/mcareputation/community/CommunityKey.class',
+        'dev/otectus/mcareputation/community/CommunityKey$*.class',
+        'dev/otectus/mcareputation/incident/IncidentStatus.class',
+        'dev/otectus/mcareputation/incident/IncidentStatus$*.class',
+        'dev/otectus/mcareputation/incident/IncidentVisibility.class',
+        'dev/otectus/mcareputation/incident/IncidentVisibility$*.class',
+        'dev/otectus/mcareputation/incident/IncidentSubject.class',
+        'dev/otectus/mcareputation/incident/IncidentSubject$*.class',
+        'dev/otectus/mcareputation/incident/SubjectKind.class',
+        'dev/otectus/mcareputation/incident/SubjectKind$*.class',
+]
+
+tasks.register('apiJar', Jar) {
+    group = 'build'
+    description = 'Builds the compile-only API jar for sibling add-ons.'
+    dependsOn tasks.named('compileJava')
+
+    archiveClassifier = 'api'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from(sourceSets.main.output.classesDirs) {
+        include apiExports
+    }
+
+    manifest {
+        attributes([
+                'Specification-Title'   : "${mod_id}-api".toString(),
+                'Specification-Version' : mod_version,
+                'Implementation-Title'  : "${mod_id}-api".toString(),
+        ])
+    }
+}
+
+tasks.named('assemble').configure {
+    dependsOn 'apiJar'
+}
+
+/**
+ * Static check on the API jar: it must carry the surface, all of it, and nothing else.
+ *
+ * (a) something under api/ is present at all - a silently empty filter would otherwise ship an
+ * artifact that compiles against nothing; (b) each named non-api export is really in there, since
+ * a rename in the internals would drop it from the include list without any compile error; and
+ * (c) no resource metadata leaked in, which would make the artifact look like a loadable mod.
+ */
+tasks.register('verifyApiJar') {
+    group = 'verification'
+    description = 'Checks that the API jar carries the exported classes and no resources.'
+    dependsOn tasks.named('apiJar')
+    def apiJarFile = tasks.named('apiJar', Jar).flatMap { it.archiveFile }
+    inputs.file(apiJarFile)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        def requiredExports = [
+                'dev/otectus/mcareputation/community/CommunityKey.class',
+                'dev/otectus/mcareputation/incident/IncidentStatus.class',
+                'dev/otectus/mcareputation/incident/IncidentVisibility.class',
+                'dev/otectus/mcareputation/incident/IncidentSubject.class',
+                'dev/otectus/mcareputation/incident/SubjectKind.class',
+        ]
+        def problems = []
+        def entries = [] as Set
+
+        new java.util.zip.ZipFile(apiJarFile.get().asFile).withCloseable { zip ->
+            zip.entries().each { entry -> entries << entry.name }
+        }
+
+        if (!entries.any { it.startsWith('dev/otectus/mcareputation/api/') }) {
+            problems << 'no entry under dev/otectus/mcareputation/api/; the include filter matched nothing'
+        }
+        requiredExports.each {
+            if (!entries.contains(it)) {
+                problems << "missing exported class ${it}"
+            }
+        }
+        def resources = entries.findAll {
+            it.endsWith('.json') || it.endsWith('.toml') || it.endsWith('.mcmeta')
+        }
+        if (!resources.isEmpty()) {
+            problems << "resource file(s) packaged in a classes-only artifact: ${resources.join(', ')}"
+        }
+
+        if (!problems.isEmpty()) {
+            throw new GradleException("verifyApiJar failed:" + System.lineSeparator()
+                    + "  - " + problems.join(System.lineSeparator() + "  - "))
+        }
+        logger.lifecycle("verifyApiJar: ${entries.size()} entries, every export present, no resources.")
+    }
+}
+
+tasks.named('build').configure {
+    dependsOn 'verifyApiJar'
+}

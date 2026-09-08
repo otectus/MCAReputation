@@ -156,6 +156,8 @@ runs `checkJarContents`, which fails if a companion mod's classes are shaded in,
 names `net.minecraftforge` or MCA's old `forge.net.mca` root, if the Forge-era `mods.toml` or
 `pack.mcmeta` reappears, or if anything was compiled against the wrong Java release.
 
+`./gradlew build` also produces `build/libs/mcareputation-<version>-api.jar`, a compile-only API artifact for sibling add-ons (such as MCA: Conversations) to compile against. It is not a runtime dependency and must never be bundled inside another mod.
+
 To build the whole suite, build this repository **first** — the two companions compile against its
 class output:
 

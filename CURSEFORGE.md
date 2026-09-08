@@ -209,6 +209,7 @@ platform; bridges built against version 1 must re-target and recompile.
 
 ## Status & license
 
+**0.4.1** — adds the compile-only API artifact for add-ons.
 **0.4.0** — unreleased, in active development.
 **0.3.0** — first public release on NeoForge 1.21.1.
 Licensed **GPL-3.0-only**, matching MCA Reborn.
