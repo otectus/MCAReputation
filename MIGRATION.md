@@ -53,7 +53,7 @@ registries are still empty (`state/ReputationSavedData.advanceProfileMigration`)
 
 | Coverage | Meaning |
 |---|---|
-| `COMPLETE` | The save never needed migrating; every payload was created live. |
+| `COMPLETE_SINCE_RECORD_START` | The save never needed migrating; every payload was created live. |
 | `MIGRATING` | A budgeted pass is still owed. Profile answers are provisional. |
 | `PARTIAL_LEGACY` | There is legacy history, or a quarantined payload. Positive evidence is displayable; **absence proves nothing**. |
 

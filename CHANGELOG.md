@@ -124,10 +124,10 @@ working untouched.
   non-dry-run legacy import now all refuse, retryably, before anything is created. A dry-run import
   still answers, because it writes nothing by definition.
 
-- **`ReputationContext`** is the read half of the transaction seam — the operation's own policy
-  snapshot, its evaluation time, and its store — promoted to an internal SPI so the profile and credit
-  calculators evaluate against the transaction rather than re-reading the config and the clock
-  mid-operation. Writing stays package-private and nothing from it enters the API jar.
+- **`ReputationContext`** is the read half of the transaction seam (`policy()`, `now()`, `data()`),
+  made public so one policy snapshot and one evaluation time can be handed down to the profile and
+  credit calculators instead of each of them re-reading the config and the clock. Writing stays
+  package-private and nothing from it enters the API jar.
 
 ### Fixed
 

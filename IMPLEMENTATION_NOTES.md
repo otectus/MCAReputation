@@ -227,8 +227,8 @@ thrown-potion, and tamed-pet cases in §20.1 without any per-source special casi
 >
 > **0.6.0 adds the profile layer**, which this section predates entirely: the new `profile/`,
 > `credit/` and `api/profile/` packages, `reputation/ProfileService` behind the same
-> reconciliation gate, `ReputationContext` as the read half of `ServiceContext` promoted to an
-> internal SPI, protocol `"5"` and save format `3`. Cross-check the package list below against
+> reconciliation gate, `ReputationContext` as the public read half of the transaction seam that
+> `ServiceContext` extends, protocol `"5"` and save format `3`. Cross-check the packages below against
 > `MODMAP.md`.
 
 Follows §11 exactly, with these concrete additions:

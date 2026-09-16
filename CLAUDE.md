@@ -58,9 +58,11 @@ JUnit with no server, level, or registries.
   add one as a shortcut.
 - **Profile aging goes through `ReconciliationService` like the scalar clock.** Both channels are
   advanced only by the gate, from one policy snapshot and one evaluation time, with `INSPECT` moving
-  neither. `reputation/ProfileService` is the only read path to a profile value, and `ReputationContext`
-  (the read half of `ServiceContext`: `policy()`, `now()`, `data()`) is the internal SPI the profile and
-  credit calculators evaluate against instead of re-reading the config and the clock mid-operation.
+  neither. `reputation/ProfileService` is the only read path exposed to the API, commands and network;
+  the fold itself is `reputation/ProfileAggregator`. `ReputationContext` is the read half of the
+  transaction seam (`policy()`, `now()`, `data()`), made public so one policy snapshot and one
+  evaluation time can be handed down to the profile and credit calculators instead of each of them
+  re-reading the config and the clock.
 - **All reconciliation goes through `reputation/ReconciliationService`; never call
   `CommunityReputationRecord.reconcile` directly.** It is the single policy-aware gate (decay
   immunity, freeze semantics, `Intent ∈ {MUTATE, QUERY, INSPECT}`) for every read or write that might

@@ -107,8 +107,8 @@ P9 is documentation; independent runtime verification is still owed — see PROD
   quantities are copied onto the accepted deed rather than looked up again.
 - **Acceptance is staged, then applied inside one mutation.** The profile payload and the credit
   reservation are computed while nothing is written (`reputation/PendingProfilePayload`,
-  `PendingCreditReservation`, `StagedOperation`), applied inside the canonical mutation, then the
-  receipt, then the publication — in that order. A re-entrant delivery from inside the event is a
+  `PendingCreditReservation`, and `ReputationService`'s private `StagedOperation`), applied inside
+  the canonical mutation, then the receipt, then the publication — in that order. A re-entrant delivery from inside the event is a
   duplicate, not a second deed.
 - **Profile aging is the gate's second clock.** `ReconciliationService` advances both channels from
   one policy snapshot and one evaluation time; `INSPECT` moves neither. Global switches are handled

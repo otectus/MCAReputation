@@ -495,7 +495,7 @@ screen; if not, fall back to village-level standing.
 
 ## Network compatibility
 
-The network protocol version is `"4"` for this release. Clients and servers must match exactly at
+The network protocol version is `"5"` for this release. Clients and servers must match exactly at
 handshake, or the connection is rejected before any data travels. The version bumps on any change to
 the registered packet format.
 
@@ -618,9 +618,11 @@ and it is idempotent.
 `canDeliver(kind)` over a bare `owns`; since 0.6.0, registering an authority for a kind another active
 authority also claims logs one DEBUG line per kind naming both authorities — once per kind per JVM, at
 registration rather than from inside the damage path, where a per-event line would be a log flood. An
-authority that declares nothing is compared on the kinds `coreAuthorityUndeclaredKinds` could still
-trust it with, which is the widest set it can end up owning. The line is a diagnostic, not a refusal:
-the first claimant that can deliver the kind wins and this mod stands down either way.
+authority that declares nothing is compared on the two legacy kinds (villager assault and killing) an
+undeclared authority is trusted with by default; the comparison does not follow
+`coreAuthorityUndeclaredKinds`, so a `TRUST_LEGACY` server can still have an unreported overlap. The
+line is a diagnostic, not a refusal: the first claimant that can deliver the kind wins and this mod
+stands down either way.
 
 Registering an authority is **additive to API version 1** — `getApiVersion()` deliberately does not
 move, because a bridge written against the original version is still fully compatible.
