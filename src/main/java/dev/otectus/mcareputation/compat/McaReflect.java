@@ -50,6 +50,13 @@ import java.util.stream.Stream;
  * fields are left null, {@link #isAvailable()} reports false, and every accessor returns its safe
  * default. {@link #selfTest()} runs at common setup so an incompatibility is one ERROR line at
  * startup rather than a surprise mid-tick.
+ *
+ * <p>The audited surface has <b>two tiers</b>. A member resolved through {@link #method} is required:
+ * a miss there switches the whole integration off, because a deed recorded without it would be
+ * wrong. A member resolved through {@code optionalMethod} only enriches an answer that already has a
+ * mandatory neutral fallback; a miss there is listed in {@link #missingOptional()} and warned about
+ * at startup, and nothing else changes. Both tiers are resolved at startup, so neither can surprise
+ * a running server.
  */
 public final class McaReflect {
 
@@ -66,6 +73,7 @@ public final class McaReflect {
 
     private static final String ROOT;
     private static final List<String> MISSING;
+    private static final List<String> MISSING_OPTIONAL;
     private static final boolean AVAILABLE;
 
     /** Hot path: consulted once per damage event and once per death. */
@@ -75,6 +83,7 @@ public final class McaReflect {
     private static final MethodHandle GET_AGE_STATE;
     private static final MethodHandle GET_VILLAGER_BRAIN;
     private static final MethodHandle GET_PERSONALITY;
+    private static final MethodHandle GET_PROFESSION_ID;
     private static final MethodHandle GET_RESIDENCY;
     private static final MethodHandle GET_HOME_VILLAGE;
     private static final MethodHandle VILLAGE_GET_ID;
@@ -104,6 +113,7 @@ public final class McaReflect {
         MethodHandle getAgeState = null;
         MethodHandle getVillagerBrain = null;
         MethodHandle getPersonality = null;
+        MethodHandle getProfessionId = null;
         MethodHandle getResidency = null;
         MethodHandle getHomeVillage = null;
         MethodHandle villageGetId = null;
@@ -120,6 +130,7 @@ public final class McaReflect {
         MethodHandle familyTreeGetOrEmpty = null;
         MethodHandle nodeGetName = null;
         List<String> missing = new ArrayList<>();
+        List<String> missingOptional = new ArrayList<>();
 
         try {
             root = detectRoot();
@@ -136,6 +147,9 @@ public final class McaReflect {
                 getAgeState = method(missing, villagerLike, "getAgeState");
                 getVillagerBrain = method(missing, villager, "getVillagerBrain");
                 getPersonality = method(missing, villagerBrain, "getPersonality");
+                // Optional tier: see the AUDITED-BUT-OPTIONAL note on optionalMethod. A removed
+                // profession getter costs role sensitivity, and must not cost deed recording.
+                getProfessionId = optionalMethod(missingOptional, villager, "getProfessionId");
                 getResidency = method(missing, villager, "getResidency");
                 getHomeVillage = method(missing, residency, "getHomeVillage");
 
@@ -169,6 +183,7 @@ public final class McaReflect {
         GET_AGE_STATE = getAgeState;
         GET_VILLAGER_BRAIN = getVillagerBrain;
         GET_PERSONALITY = getPersonality;
+        GET_PROFESSION_ID = getProfessionId;
         GET_RESIDENCY = getResidency;
         GET_HOME_VILLAGE = getHomeVillage;
         VILLAGE_GET_ID = villageGetId;
@@ -185,6 +200,7 @@ public final class McaReflect {
         FAMILY_TREE_GET_OR_EMPTY = familyTreeGetOrEmpty;
         NODE_GET_NAME = nodeGetName;
         MISSING = List.copyOf(missing);
+        MISSING_OPTIONAL = List.copyOf(missingOptional);
         AVAILABLE = root != null && missing.isEmpty();
     }
 
@@ -249,6 +265,36 @@ public final class McaReflect {
         }
     }
 
+    /**
+     * The same resolution, recorded on the <b>audited-but-optional</b> surface.
+     *
+     * <p>Two tiers rather than one, because the cost of a missing member is not the same for every
+     * member. Everything resolved through {@link #method} is load-bearing: without it no deed can be
+     * recorded correctly, so a miss switches the whole integration off and says which member moved.
+     * The members here only enrich an interpretation that has a mandatory neutral fallback (§13.2),
+     * and taking deed recording down for one of them would be a self-inflicted outage — §13.2 is
+     * explicit that role sensitivity must not hold up the core.
+     *
+     * <p>So a miss here is still audited: it is resolved at startup, listed in
+     * {@link #missingOptional()}, and reported by {@link #selfTest()} as a degraded interpretation.
+     * The accessor returns its safe default, and if the member is present but no longer links, the
+     * {@link LinkageError} discipline in {@code McaCompat} latches the integration off on the first
+     * call exactly as it does for any other member.
+     */
+    private static MethodHandle optionalMethod(List<String> missingOptional, Class<?> owner,
+                                               String name, Class<?>... params) {
+        if (owner == null) {
+            return null;
+        }
+        try {
+            Method resolved = owner.getMethod(name, params);
+            return MethodHandles.lookup().unreflect(resolved);
+        } catch (Throwable t) {
+            missingOptional.add(owner.getName() + '#' + name);
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------
     // Status
     // ------------------------------------------------------------------
@@ -256,6 +302,19 @@ public final class McaReflect {
     /** True when a supported MCA was found and every member this mod consumes resolved. */
     public static boolean isAvailable() {
         return AVAILABLE;
+    }
+
+    /**
+     * True when the optional profile-interpretation members resolved too, i.e. when a villager's
+     * profession can be read. False means neutral role interpretation, never a broken integration.
+     */
+    public static boolean areProfileTraitsAvailable() {
+        return AVAILABLE && GET_PROFESSION_ID != null;
+    }
+
+    /** Audited-but-optional members that did not resolve, for logging and diagnostics. */
+    public static List<String> missingOptional() {
+        return MISSING_OPTIONAL;
     }
 
     /** The detected package root, for logging. Never null in a message. */
@@ -285,6 +344,13 @@ public final class McaReflect {
         if (AVAILABLE) {
             McaReputation.LOGGER.info("[MCA: Reputation] MCA integration active: {} (package root {})",
                     installedMca(), root());
+            if (!MISSING_OPTIONAL.isEmpty()) {
+                // Not an error: every member below has a neutral fallback, and the core is unaffected.
+                McaReputation.LOGGER.warn("[MCA: Reputation] Reduced villager interpretation: these "
+                        + "optional MCA members did not resolve: {}. Profile interpretation falls back "
+                        + "to neutral authored weights; deed recording and standing are unaffected.",
+                        MISSING_OPTIONAL);
+            }
             return;
         }
         if (ROOT == null) {
@@ -345,6 +411,25 @@ public final class McaReflect {
         }
         Object personality = GET_PERSONALITY.invoke(brain);
         return personality == null ? Optional.empty() : Optional.of(personality.toString());
+    }
+
+    /**
+     * The villager's profession as MCA itself reports it: {@code "minecraft:farmer"},
+     * {@code "mca:guard"}.
+     *
+     * <p>MCA's own {@code getProfessionId()} rather than the vanilla villager data, for the reason
+     * the class javadoc gives in reverse: MCA's method name survives obfuscation, while reaching
+     * {@code getVillagerData().getProfession()} through reflection would need a hardcoded SRG name.
+     * The method has the same signature on every MCA root this build supports — verified with
+     * {@code javap} against 7.6.20 and 7.7.1-alpha.2 — and is resolved on the optional tier, so an
+     * MCA that drops it costs role interpretation and nothing else.
+     */
+    public static Optional<String> professionId(Entity villager) throws Throwable {
+        if (!AVAILABLE || GET_PROFESSION_ID == null || !isVillager(villager)) {
+            return Optional.empty();
+        }
+        Object profession = GET_PROFESSION_ID.invoke(villager);
+        return profession == null ? Optional.empty() : Optional.of(profession.toString());
     }
 
     /** The id of the villager's home village. */

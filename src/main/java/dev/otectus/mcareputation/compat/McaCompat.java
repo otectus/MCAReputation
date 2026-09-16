@@ -200,6 +200,37 @@ public final class McaCompat {
         }
     }
 
+    /**
+     * The villager's profession as a lowercase namespaced id ({@code minecraft:farmer},
+     * {@code mca:guard}). Safe default: empty.
+     *
+     * <p>Namespaced rather than bare, unlike {@link #personality(Entity)}: personality ids meet
+     * authored {@code personality_overrides} keys, which §9.2 normalises to the bare form, while a
+     * profession id meets nothing authored yet and two namespaces may ship the same path. Normalising
+     * away the namespace would invent an ambiguity for no authoring benefit.
+     *
+     * <p>Resolved on {@link McaReflect}'s optional tier: an MCA that drops the getter reports no
+     * profession and the observer interprets with neutral role weights (§13.2), rather than taking
+     * deed recording down with it. A member that resolves but no longer links still trips the
+     * one-shot latch below, exactly like every other MCA read.
+     */
+    public static Optional<String> profession(Entity villager) {
+        if (villager == null || !live()) {
+            return Optional.empty();
+        }
+        try {
+            return McaReflect.professionId(villager)
+                    .map(id -> id.strip().toLowerCase(Locale.ROOT))
+                    .filter(id -> !id.isEmpty());
+        } catch (LinkageError e) {
+            linkageFailure("profession", e);
+            return Optional.empty();
+        } catch (Throwable t) {
+            fail("profession", t);
+            return Optional.empty();
+        }
+    }
+
     private static String normalizePersonality(String raw) {
         String value = raw.strip().toLowerCase(Locale.ROOT);
         int colon = value.indexOf(':');

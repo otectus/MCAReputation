@@ -12,11 +12,11 @@ import dev.otectus.mcareputation.api.profile.ProfileSnapshot;
 import dev.otectus.mcareputation.api.profile.RecognitionValue;
 import dev.otectus.mcareputation.api.profile.VillagerProfileSnapshot;
 import dev.otectus.mcareputation.community.CommunityKey;
-import dev.otectus.mcareputation.profile.FacetDefinition;
 import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
 import dev.otectus.mcareputation.profile.ProfileMath;
 import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
 import dev.otectus.mcareputation.profile.RecognitionTierSet;
+import dev.otectus.mcareputation.profile.VillagerProfileResolver;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 import dev.otectus.mcareputation.state.ProfileMigrationState;
 import dev.otectus.mcareputation.state.ReputationSavedData;
@@ -195,6 +195,25 @@ public final class ProfileService {
             @Nullable ReputationPolicy policy, @Nullable ReputationSavedData data,
             @Nullable UUID player, @Nullable CommunityKey community,
             @Nullable SpeakerContext speaker, long gameTime) {
+        return speakerProfile(policy, data, player, community, speaker,
+                VillagerProfileResolver.ObserverTraits.NEUTRAL, gameTime);
+    }
+
+    /**
+     * The same answer, interpreted with this observer's own traits (§13.2).
+     *
+     * <p>The traits arrive as a parameter rather than being resolved here, and that is the whole
+     * point of the shape: {@link VillagerProfileResolver} resolves them once — from an entity in hand
+     * or from the same entity found by UUID — so the two API entry points cannot drift apart, and so
+     * this read model stays testable with no server running. Unresolvable traits are
+     * {@link VillagerProfileResolver.ObserverTraits#NEUTRAL}, which is the mandatory neutral fallback
+     * rather than a guess.
+     */
+    public static ProfileQueryResult<VillagerProfileSnapshot> speakerProfile(
+            @Nullable ReputationPolicy policy, @Nullable ReputationSavedData data,
+            @Nullable UUID player, @Nullable CommunityKey community,
+            @Nullable SpeakerContext speaker,
+            @Nullable VillagerProfileResolver.ObserverTraits traits, long gameTime) {
         if (speaker == null || speaker.speakerId() == null) {
             return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED, "no_speaker_context");
         }
@@ -209,61 +228,25 @@ public final class ProfileService {
         if (maybe.isEmpty()) {
             ProfileSnapshot empty = neutral(player, community, bundle, coverage, gameTime);
             return ProfileQueryResult.available(new VillagerProfileSnapshot(speaker.speakerId(),
-                    community, empty, 0, 0, 0, 0, 0, 0, traitBasis(policy)));
+                    community, empty, 0, 0, 0, 0, 0, 0,
+                    VillagerProfileResolver.traitBasis(traits, policy.facetOpinionEnabled())));
         }
         ReconciliationService.ReconcileOutcome outcome = ReconciliationService.reconcile(policy, data,
                 player, community, gameTime, ChangeCause.DECAY, ReconciliationService.Intent.QUERY);
         CommunityReputationRecord record = maybe.get();
-        ProfileAggregator.Aggregate aggregate = ProfileAggregator.speaker(policy, record, bundle,
-                speaker.speakerId(), speaker.resident(), gameTime);
+        // One fold for both channels: the scalar opinion and the facet vector must describe the same
+        // knowledge, so they are read from the same knowledge-filtered pass rather than two.
+        OpinionResolver.ProfiledOpinion opinion = OpinionResolver.resolveProfiled(policy, record,
+                bundle, speaker.speakerId(), speaker.resident(), gameTime, traits);
+        ProfileAggregator.Aggregate aggregate = opinion.aggregate();
         ProfileSnapshot known = new ProfileSnapshot(player, community, outcome.newScore(),
                 outcome.newTierId(), aggregate.recognition(), aggregate.facets(),
                 aggregate.dominantFacets(), record.revision(), record.profileRevision(),
                 bundle.generation(), gameTime, coverage);
-
-        int baseOpinion = OpinionResolver.resolve(record, speaker.speakerId(), speaker.resident(),
-                gameTime, policy.minRumorDelayTicks(), policy.maxRumorDelayTicks(),
-                policy.opinionHearsayPercent(), policy.opinionInvolvedPercent(),
-                policy.minimumScore(), policy.maximumScore()).score();
-        int adjustment = facetAdjustment(policy, bundle, aggregate.facets());
-        int finalOpinion = ProfileMath.clamp(baseOpinion + adjustment, policy.minimumScore(),
-                policy.maximumScore());
         return ProfileQueryResult.available(new VillagerProfileSnapshot(speaker.speakerId(), community,
-                known, baseOpinion, adjustment, finalOpinion, aggregate.involvedIncidents(),
-                aggregate.witnessedIncidents(), aggregate.hearsayIncidents(), traitBasis(policy)));
-    }
-
-    /**
-     * §13.2's facet term: the known facet values, weighted by their authored interpretation weights
-     * and clamped to the configured cap.
-     *
-     * <p>One capped term, never three independent bonuses (R04). The weights are read at the neutral
-     * default here; P6 resolves the observer's own personality through the compatibility seam and
-     * reports the difference in {@link VillagerProfileSnapshot#traitBasis()}, which is why the basis
-     * is part of the answer rather than an implementation detail.
-     */
-    private static int facetAdjustment(ReputationPolicy policy, ProfileRegistryBundle bundle,
-                                       List<FacetValue> facets) {
-        if (!policy.facetOpinionEnabled()) {
-            return 0;
-        }
-        long weightedBp = 0L;
-        for (FacetValue facet : facets) {
-            if (!facet.observed() || facet.value() == 0) {
-                continue;
-            }
-            FacetDefinition definition = bundle.facetOrUnknown(facet.facet());
-            weightedBp = ProfileMath.add(weightedBp,
-                    (long) facet.value() * definition.opinionWeightFor(null));
-        }
-        int cap = Math.max(0, policy.maxFacetOpinionAdjustment());
-        return ProfileMath.clamp((int) (weightedBp / ProfileMath.FULL_BP), -cap, cap);
-    }
-
-    private static VillagerProfileSnapshot.TraitBasis traitBasis(ReputationPolicy policy) {
-        return policy.facetOpinionEnabled()
-                ? VillagerProfileSnapshot.TraitBasis.NEUTRAL_DEFAULT
-                : VillagerProfileSnapshot.TraitBasis.DISABLED;
+                known, opinion.base().score(), opinion.facetAdjustment(), opinion.score(),
+                aggregate.involvedIncidents(), aggregate.witnessedIncidents(),
+                aggregate.hearsayIncidents(), opinion.traitBasis()));
     }
 
     // ------------------------------------------------------------------
@@ -292,11 +275,32 @@ public final class ProfileService {
                                                              @Nullable SpeakerContext speaker,
                                                              @Nullable ProfileQuery query,
                                                              long gameTime) {
+        return matchesSpeaker(policy, data, player, community, speaker, query,
+                VillagerProfileResolver.ObserverTraits.NEUTRAL, gameTime);
+    }
+
+    /**
+     * The same predicate through the same shared resolver, so an authored gate and the villager's own
+     * view of the player can never be answered from different knowledge.
+     *
+     * <p>The traits do not change any clause's truth: §14.5's predicates read the observer's
+     * knowledge, not their temperament. They are threaded through anyway so that one call site, one
+     * filter and one interpretation back both answers — an authored gate that disagreed with the
+     * snapshot beside it would be indistinguishable from a knowledge-filtering bug.
+     */
+    public static ProfileQueryResult<Boolean> matchesSpeaker(@Nullable ReputationPolicy policy,
+                                                             @Nullable ReputationSavedData data,
+                                                             @Nullable UUID player,
+                                                             @Nullable CommunityKey community,
+                                                             @Nullable SpeakerContext speaker,
+                                                             @Nullable ProfileQuery query,
+                                                             @Nullable VillagerProfileResolver.ObserverTraits traits,
+                                                             long gameTime) {
         if (query == null || !query.valid()) {
             return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED, "invalid_query");
         }
         ProfileQueryResult<VillagerProfileSnapshot> speakerView = speakerProfile(policy, data, player,
-                community, speaker, gameTime);
+                community, speaker, traits, gameTime);
         if (!speakerView.isAvailable()) {
             return new ProfileQueryResult<>(speakerView.availability(), Optional.empty(),
                     speakerView.reason());

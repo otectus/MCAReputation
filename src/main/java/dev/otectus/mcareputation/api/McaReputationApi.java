@@ -14,6 +14,7 @@ import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
 import dev.otectus.mcareputation.community.CommunityResolver;
 import dev.otectus.mcareputation.incident.IncidentStatus;
+import dev.otectus.mcareputation.profile.VillagerProfileResolver;
 import dev.otectus.mcareputation.reputation.ProfileService;
 import dev.otectus.mcareputation.reputation.ReputationService;
 import dev.otectus.mcareputation.reputation.ReputationTierSet;
@@ -539,6 +540,13 @@ public final class McaReputationApi {
      * tier rather than the village's (§30.3). Same ±8 ceiling and the same two axes as
      * {@link #getCheckBias}; {@code 0} whenever opinion is unavailable, so an authored fallback fires.
      *
+     * <p>Since 0.6.0 this is the <b>canonical resolved term</b> (§13.2, §16.2): when a profile answer
+     * is available the rung is picked from the villager's facet-aware final opinion rather than from
+     * their scalar one. Still exactly one term — the facet interpretation is inside that opinion, not
+     * a bonus beside this bias — and still within ±8, because a rung's authored bias is all that ever
+     * leaves this method. With profiles disabled, unpublished or unresolvable the pre-0.6.0 answer is
+     * returned unchanged, and the villager-opinion switch gates both.
+     *
      * @since MCA: Reputation 0.4.0
      */
     public static int getOpinionBias(MinecraftServer server, UUID player, UUID villager,
@@ -547,9 +555,26 @@ public final class McaReputationApi {
             if (!McaReputationConfig.conversationsIntegrationEnabled()) {
                 return 0;
             }
+            if (!isEnabled() || !McaReputationConfig.villagerOpinionEnabled()) {
+                // The switch this term has always obeyed: a facet-aware opinion is still an opinion,
+                // and an operator who turned villager opinion off did not ask for one (§20).
+                return 0;
+            }
             ReputationTierSet ladder = ReputationTiers.getDefault();
+            // §16.2: replace the previous opinion term with the canonical resolved one where it
+            // exists, never add both. The facet interpretation is already inside finalOpinion, so
+            // this stays one term picked from one rung of the ladder — within ±8 under the maximal
+            // facet term as much as under none at all (§13.2).
+            ProfileQueryResult<VillagerProfileSnapshot> profiled =
+                    getVillagerProfileDetailed(server, player, villager, community);
+            if (profiled.isAvailable()) {
+                return dev.otectus.mcareputation.reputation.OpinionResolver.externalCheckBias(ladder,
+                        profiled.value().orElseThrow().finalOpinion(), axis);
+            }
+            // Profiles disabled, unpublished or unresolvable: the pre-0.6.0 term, unchanged.
             return getVillagerOpinion(server, player, villager, community)
-                    .map(opinion -> ladder.tierFor(opinion.opinion()).biasFor(axis))
+                    .map(opinion -> dev.otectus.mcareputation.reputation.OpinionResolver
+                            .externalCheckBias(ladder, opinion.opinion(), axis))
                     .orElse(0);
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] getOpinionBias failed; returning 0", t);
@@ -1022,14 +1047,15 @@ public final class McaReputationApi {
     public static ProfileQueryResult<VillagerProfileSnapshot> getVillagerProfileDetailed(
             MinecraftServer server, UUID player, UUID villager, CommunityKey community) {
         try {
-            if (server == null || villager == null) {
+            if (server == null || villager == null || community == null) {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         villager == null ? "no_speaker_context" : "unresolved_target");
             }
-            boolean resident = CommunityResolver.isResident(server, community, villager);
-            return ProfileService.speakerProfile(McaReputationConfig.snapshot(),
-                    ReputationSavedData.get(server), player, community,
-                    SpeakerContext.of(villager, resident), gameTime(server));
+            // Traits from the loaded villager this UUID names, through the same resolver the entity
+            // overload uses (§13.2). An unloaded villager interprets neutrally rather than being
+            // guessed at, and no chunk is loaded to find one.
+            return villagerProfile(server, player, villager, community,
+                    VillagerProfileResolver.traits(server, community, villager));
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] getVillagerProfileDetailed failed; returning "
                     + "unavailable", t);
@@ -1059,12 +1085,37 @@ public final class McaReputationApi {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         "unresolved_community");
             }
-            return getVillagerProfileDetailed(server, player, villager.getUUID(), community.get());
+            if (server == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_target");
+            }
+            // Read from the entity in hand rather than found again by UUID. The two agree because the
+            // UUID overload's lookup resolves this same loaded entity and both then go through one
+            // resolver; reading it here also answers correctly for a villager whose dimension is not
+            // the community's.
+            return villagerProfile(server, player, villager.getUUID(), community.get(),
+                    VillagerProfileResolver.traits(villager));
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] getVillagerProfileDetailed(entity) failed; "
                     + "returning unavailable", t);
             return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
         }
+    }
+
+    /**
+     * The one body behind both {@code getVillagerProfileDetailed} overloads (§13.2).
+     *
+     * <p>Residency is resolved the same way {@link #villagerKnows} resolves it, and the traits are
+     * already resolved by the caller through {@link VillagerProfileResolver}, so the only difference
+     * between the two entry points is where the entity came from.
+     */
+    private static ProfileQueryResult<VillagerProfileSnapshot> villagerProfile(MinecraftServer server,
+            UUID player, UUID villager, CommunityKey community,
+            VillagerProfileResolver.ObserverTraits traits) {
+        boolean resident = CommunityResolver.isResident(server, community, villager);
+        return ProfileService.speakerProfile(McaReputationConfig.snapshot(),
+                ReputationSavedData.get(server), player, community,
+                SpeakerContext.of(villager, resident), traits, gameTime(server));
     }
 
     /**
@@ -1123,6 +1174,8 @@ public final class McaReputationApi {
             }
             return ProfileService.matchesSpeaker(McaReputationConfig.snapshot(),
                     ReputationSavedData.get(server), player, community, speaker, query,
+                    VillagerProfileResolver.traits(server, community,
+                            speaker == null ? null : speaker.speakerId()),
                     gameTime(server));
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] matchesSpeakerProfile failed; returning "
@@ -1154,7 +1207,9 @@ public final class McaReputationApi {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         "unresolved_community");
             }
-            return matchesSpeakerProfile(server, player, community.get(), speaker.get(), query);
+            return ProfileService.matchesSpeaker(McaReputationConfig.snapshot(),
+                    ReputationSavedData.get(server), player, community.get(), speaker.get(), query,
+                    VillagerProfileResolver.traits(villager), gameTime(server));
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] matchesSpeakerProfile(entity) failed; "
                     + "returning unavailable", t);
