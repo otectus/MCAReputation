@@ -7,8 +7,10 @@ import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,7 +32,12 @@ class CoreIncidentAuthorityTest {
         CoreIncidentAuthorities.clear();
     }
 
-    /** A claimant whose ownership is a mutable switch, exactly as a companion's config would be. */
+    /**
+     * A claimant whose ownership is a mutable switch, exactly as a companion's config would be.
+     *
+     * <p>It declares every kind. Declaring is what an authority written against this version does;
+     * the undeclared case, and the gate that only exists for it, is {@code CoreAuthorityTest}.
+     */
     private static final class TestAuthority implements CoreIncidentAuthority {
         private final ResourceLocation id;
         boolean owning = true;
@@ -43,6 +50,11 @@ class CoreIncidentAuthorityTest {
         @Override
         public ResourceLocation authorityId() {
             return id;
+        }
+
+        @Override
+        public Optional<Set<CoreIncidentKind>> declaredKinds() {
+            return Optional.of(EnumSet.allOf(CoreIncidentKind.class));
         }
 
         @Override

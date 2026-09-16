@@ -1,13 +1,13 @@
 package dev.otectus.mcareputation.compat;
 
-import net.minecraft.client.gui.screens.Screen;
-
 /**
  * The client-side half of the MCA compatibility layer: recognising MCA's own screens (spec §28.1).
  *
- * <p>Client-only by construction; nothing on a dedicated server references it. The probe deliberately
- * lives here rather than in {@link McaReflect}, because {@code McaReflect} is initialised on a
- * dedicated server and must never ask a server's classloader for a client class.
+ * <p>The class deliberately names no client type at all: the screen parameter is {@code Object}, and
+ * the type check uses {@code Class.isInstance()}, so this class loads on either dist. It is nevertheless
+ * called only from {@link ReputationClient} in the client package. The probe lives here rather than in
+ * {@link McaReflect} because {@code McaReflect} is initialised on a dedicated server and must never ask
+ * a server's classloader for a client class.
  *
  * <p>Resolved by name for the same reason as everything else in this package: MCA renamed its base
  * package from {@code net.mca} to {@code net.conczin.mca} in 7.7.1, so an {@code import} would bind
@@ -40,8 +40,8 @@ public final class McaScreenCompat {
         return null;
     }
 
-    /** True when this is MCA's villager interaction screen. */
-    public static boolean isVillagerInteractScreen(Screen screen) {
+    /** True when this is MCA's villager interaction screen. The {@code Object} parameter is intentional: it keeps this class client-type-free. */
+    public static boolean isVillagerInteractScreen(Object screen) {
         return INTERACT_SCREEN != null && INTERACT_SCREEN.isInstance(screen);
     }
 }

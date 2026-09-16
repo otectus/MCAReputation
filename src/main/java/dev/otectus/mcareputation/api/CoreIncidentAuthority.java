@@ -2,6 +2,9 @@ package dev.otectus.mcareputation.api;
 
 import net.minecraft.resources.ResourceLocation;
 
+import java.util.Optional;
+import java.util.Set;
+
 /**
  * A companion mod's claim to be the one that detects a {@link CoreIncidentKind}.
  *
@@ -56,5 +59,19 @@ public interface CoreIncidentAuthority {
     /** A human-readable name for diagnostics. Defaults to the {@link #authorityId()}. */
     default String authorityName() {
         return authorityId().toString();
+    }
+
+    /** Exactly which kinds this authority detects; empty means undeclared, and is gated by config. */
+    default Optional<Set<CoreIncidentKind>> declaredKinds() {
+        return Optional.empty();
+    }
+
+    /** Whether this authority can actually file the kind it claims right now; false hands it back. */
+    default boolean canDeliver(CoreIncidentKind kind) {
+        return true;
+    }
+
+    /** Called once when the server stops. The registration itself survives into the next world. */
+    default void onServerStopped() {
     }
 }

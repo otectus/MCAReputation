@@ -1,12 +1,17 @@
 package dev.otectus.mcareputation.event;
 
 import dev.otectus.mcareputation.McaReputation;
+import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.CoreIncidentAuthority;
 import dev.otectus.mcareputation.api.CoreIncidentAuthorityRegistration;
 import dev.otectus.mcareputation.api.CoreIncidentKind;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
 
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -25,6 +30,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class CoreIncidentAuthorities {
 
     private static final List<Registration> AUTHORITIES = new CopyOnWriteArrayList<>();
+
+    /** The two kinds that existed when an undeclared authority could have been written (0.3.0). */
+    private static final Set<CoreIncidentKind> LEGACY_KINDS =
+            EnumSet.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT, CoreIncidentKind.MCA_VILLAGER_KILL);
 
     private CoreIncidentAuthorities() {
     }
@@ -56,12 +65,17 @@ public final class CoreIncidentAuthorities {
         if (AUTHORITIES.isEmpty() || kind == null) {
             return false;
         }
+        return isClaimed(kind, McaReputationConfig.snapshot());
+    }
+
+    /** The same question against an explicit policy, so a test never depends on a loaded spec. */
+    static boolean isClaimed(CoreIncidentKind kind, ReputationPolicy policy) {
+        if (AUTHORITIES.isEmpty() || kind == null) {
+            return false;
+        }
         for (Registration registration : AUTHORITIES) {
-            if (!registration.isActive()) {
-                continue;
-            }
             try {
-                if (registration.authority().owns(kind)) {
+                if (claims(registration, kind, policy)) {
                     return true;
                 }
             } catch (Throwable t) {
@@ -75,13 +89,14 @@ public final class CoreIncidentAuthorities {
 
     /** Who is claiming this kind right now, for {@code /mcareputation debug authorities}. */
     public static List<String> claimantsOf(CoreIncidentKind kind) {
+        return claimantsOf(kind, McaReputationConfig.snapshot());
+    }
+
+    static List<String> claimantsOf(CoreIncidentKind kind, ReputationPolicy policy) {
         List<String> names = new ArrayList<>();
         for (Registration registration : AUTHORITIES) {
-            if (!registration.isActive()) {
-                continue;
-            }
             try {
-                if (registration.authority().owns(kind)) {
+                if (claims(registration, kind, policy)) {
                     names.add(safeName(registration.authority()));
                 }
             } catch (Throwable t) {
@@ -89,6 +104,116 @@ public final class CoreIncidentAuthorities {
             }
         }
         return names;
+    }
+
+    /**
+     * The effective claim for one registration: live, owning, able to deliver, and either declaring
+     * this kind outright or allowed it by the undeclared-authority policy.
+     *
+     * <p>The last clause is the point. An authority written against 0.3.0 answers {@code true} from
+     * {@code owns} for kinds that did not exist when it was written, so honouring a blanket claim
+     * takes rescue, cure, raid and PvP detection away from this mod and hands them to a companion
+     * that has never heard of them - and nobody records those deeds at all.
+     */
+    private static boolean claims(Registration registration, CoreIncidentKind kind, ReputationPolicy policy) {
+        if (!registration.isActive() || kind == null) {
+            return false;
+        }
+        CoreIncidentAuthority authority = registration.authority();
+        if (!authority.owns(kind) || !authority.canDeliver(kind)) {
+            return false;
+        }
+        Optional<Set<CoreIncidentKind>> declared = authority.declaredKinds();
+        if (declared != null && declared.isPresent()) {
+            Set<CoreIncidentKind> kinds = declared.get();
+            return kinds != null && kinds.contains(kind);
+        }
+        return undeclaredAllows(kind, policy);
+    }
+
+    /** What an authority that declared nothing is still trusted with. */
+    private static boolean undeclaredAllows(CoreIncidentKind kind, ReputationPolicy policy) {
+        ReputationPolicy.UndeclaredAuthorityMode mode = policy == null
+                ? ReputationPolicy.DEFAULT_UNDECLARED_AUTHORITY_MODE
+                : policy.undeclaredAuthorityMode();
+        return switch (mode) {
+            case TRUST_LEGACY -> true;
+            case ASSAULT_KILL_ONLY -> LEGACY_KINDS.contains(kind);
+            case IGNORE -> false;
+        };
+    }
+
+    /** One kind's whole story, for {@code /mcareputation debug authority}. */
+    public record AuthorityStatus(CoreIncidentKind kind,
+                                  boolean claimed,
+                                  Optional<String> claimantId,
+                                  boolean declared,
+                                  boolean canDeliver,
+                                  Optional<String> unavailableReason) {
+    }
+
+    /** Every kind, and what this mod currently believes about who detects it. */
+    public static List<AuthorityStatus> inspect() {
+        return inspect(McaReputationConfig.snapshot());
+    }
+
+    static List<AuthorityStatus> inspect(ReputationPolicy policy) {
+        List<AuthorityStatus> statuses = new ArrayList<>();
+        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
+            statuses.add(inspect(kind, policy));
+        }
+        return statuses;
+    }
+
+    private static AuthorityStatus inspect(CoreIncidentKind kind, ReputationPolicy policy) {
+        for (Registration registration : AUTHORITIES) {
+            if (!registration.isActive() || !safeOwns(registration, kind)) {
+                continue;
+            }
+            // The first owner is the one an operator is asking about; a second is a misconfiguration
+            // that `debug authorities` already lists in full.
+            CoreIncidentAuthority authority = registration.authority();
+            boolean declared;
+            try {
+                Optional<Set<CoreIncidentKind>> kinds = authority.declaredKinds();
+                declared = kinds != null && kinds.isPresent();
+            } catch (Throwable t) {
+                declared = false;
+            }
+            boolean canDeliver;
+            try {
+                canDeliver = authority.canDeliver(kind);
+            } catch (Throwable t) {
+                canDeliver = false;
+            }
+            boolean claimed;
+            try {
+                claimed = claims(registration, kind, policy);
+            } catch (Throwable t) {
+                claimed = false;
+            }
+            return new AuthorityStatus(kind, claimed, Optional.of(safeName(authority)), declared,
+                    canDeliver, safeUnavailableReason(registration));
+        }
+        return new AuthorityStatus(kind, false, Optional.empty(), false, false, Optional.empty());
+    }
+
+    private static boolean safeOwns(Registration registration, CoreIncidentKind kind) {
+        try {
+            return registration.authority().owns(kind);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** The claimant's own diagnostic, contained: it comes from the companion too. */
+    private static Optional<String> safeUnavailableReason(Registration registration) {
+        try {
+            Optional<String> reason = registration.unavailableReason();
+            return reason == null ? Optional.empty() : reason;
+        } catch (Throwable t) {
+            return Optional.empty();
+        }
     }
 
     /** Every live registration's name, claimed or not. */
@@ -102,9 +227,29 @@ public final class CoreIncidentAuthorities {
         return names;
     }
 
-    /** Drops every registration. For tests; a live server has no reason to call this. */
+    /** Drops every registration. Test-only; a live server calls {@link #clearServerScoped()}. */
     public static void clear() {
         AUTHORITIES.clear();
+    }
+
+    /**
+     * Server stop: tell every authority the world went away, and keep the registration.
+     *
+     * <p>Companions register once per JVM from common setup, so dropping the handles here would leave
+     * them silently unregistered in the second world loaded in the same process - a bug that only
+     * appears when somebody returns to the menu and opens another save. There is no memoized claim to
+     * discard; the effective claim is computed per call.
+     */
+    public static void clearServerScoped() {
+        for (Registration registration : AUTHORITIES) {
+            try {
+                registration.authority().onServerStopped();
+            } catch (Throwable t) {
+                McaReputation.LOGGER.error("[MCA: Reputation] core incident authority '{}' threw while being "
+                                + "told the server stopped; its registration is kept",
+                        safeName(registration.authority()), t);
+            }
+        }
     }
 
     /** A name for logs that cannot itself throw, since the name comes from the companion too. */

@@ -1,5 +1,6 @@
 package dev.otectus.mcareputation.api.event;
 
+import dev.otectus.mcareputation.api.ChangeCause;
 import dev.otectus.mcareputation.community.CommunityKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
@@ -29,11 +30,27 @@ public final class ReputationChangedEvent extends ReputationEvent {
     @Nullable
     private final ResourceLocation incidentType;
     private final ResourceLocation source;
+    private final ChangeCause cause;
+    private final boolean quiet;
 
+    /** The original shape: a loud change caused by a deed. */
     public ReputationChangedEvent(UUID playerId, @Nullable ServerPlayer player, CommunityKey community,
                                   int oldScore, int newScore, int delta,
                                   @Nullable UUID incidentId, @Nullable ResourceLocation incidentType,
                                   ResourceLocation source) {
+        this(playerId, player, community, oldScore, newScore, delta, incidentId, incidentType, source,
+                ChangeCause.DEED, false);
+    }
+
+    /**
+     * The full shape, carrying why the standing moved.
+     *
+     * @since MCA: Reputation 0.4.1
+     */
+    public ReputationChangedEvent(UUID playerId, @Nullable ServerPlayer player, CommunityKey community,
+                                  int oldScore, int newScore, int delta,
+                                  @Nullable UUID incidentId, @Nullable ResourceLocation incidentType,
+                                  ResourceLocation source, ChangeCause cause, boolean quiet) {
         super(playerId, player, community);
         this.oldScore = oldScore;
         this.newScore = newScore;
@@ -41,6 +58,8 @@ public final class ReputationChangedEvent extends ReputationEvent {
         this.incidentId = incidentId;
         this.incidentType = incidentType;
         this.source = source;
+        this.cause = cause == null ? ChangeCause.DEED : cause;
+        this.quiet = quiet;
     }
 
     public int oldScore() {
@@ -67,5 +86,24 @@ public final class ReputationChangedEvent extends ReputationEvent {
     /** Who caused this — a core hook, a quest, a command, another mod. */
     public ResourceLocation source() {
         return source;
+    }
+
+    /**
+     * Why the standing moved. {@link ChangeCause#DEED} for a listener that predates this method.
+     *
+     * @since MCA: Reputation 0.4.1
+     */
+    public ChangeCause cause() {
+        return cause;
+    }
+
+    /**
+     * Whether this is a background change: mirrors and displays should follow it, deed toasts and
+     * action-bar lines must not replay for it.
+     *
+     * @since MCA: Reputation 0.4.1
+     */
+    public boolean quiet() {
+        return quiet;
     }
 }

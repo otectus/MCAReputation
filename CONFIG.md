@@ -32,7 +32,7 @@ Two rules hold throughout:
 | `minimumScore` | `-1000` | `-1000000 … 0` | Lower clamp on standing with one community. |
 | `maximumScore` | `1000` | `0 … 1000000` | Upper clamp. Must exceed the minimum; the accessors normalise an inverted pair rather than producing an impossible window. |
 | `defaultVillageSearchRadius` | `128` | `16 … 512` | Blocks searched for a village when an action has no obvious home community. Never used to invent one: if nothing is found, nothing is recorded. |
-| `enableScoreDecay` | `true` | — | Whether contributions fade per their datapack decay policy. **Off freezes them where they are; it does not restore decay that already happened.** |
+| `enableScoreDecay` | `true` | — | Whether contributions fade per their datapack decay policy. **Off freezes every ledger: the clock advances but nothing ages, and turning it back on applies no catch-up decay for the communities that were actually reconciled while it was off.** The same freeze applies while `enableReputation` is off, and to one community via `/mcareputation community <c> decay off`. The one honest limit: a community nobody reconciled during the pause — mainly an offline player's — is not frozen either, since decay runs off the world clock rather than a per-community pause counter, so it simply ages in one jump the next time anyone asks. |
 | `enableTierTitles` | `true` | — | Whether crossing a tier threshold grants that tier's title. |
 
 ## `[core_events]`
@@ -76,15 +76,21 @@ cost. Once a villager knows something they cannot un-know it, not even by windin
 
 | Option | Default | Range | What it does |
 |---|---|---|---|
-| `maxIncidentsPerCommunity` | `64` | `1 … 64` | Incidents retained for one player in one community. |
-| `maxIncidentsPerPlayer` | `512` | `1 … 512` | Incidents retained across all of one player's communities. |
+| `maxIncidentsPerCommunity` | `64` | `1 … 64` | The state budget for one player in one community, not just a retained-count cap. A record that still contributes, is pinned, or is an active (non-superseded) negative deed younger than `receiptRetentionTicks` is never evicted to make room; when the cap is reached and nothing is left that may be evicted, the next deed is refused rather than the ledger silently overflowing. |
+| `maxIncidentsPerPlayer` | `512` | `1 … 512` | Incidents retained across all of one player's communities, under the same eviction rule as above. |
+| `receiptRetentionTicks` | `336000` | `0 … 100000000` | How long a delivery receipt stays answerable, in ticks. A companion that replays an operation older than this gets no memory of it and has to recover explicitly. Receipts are also capped at 512 per player and evicted oldest-first regardless of this setting. Default is 14 in-game days (336000 ticks), about 4.7 hours of continuous play. |
 | `reconcileOnlineIntervalTicks` | `1200` | `20 … 72000` | How often decay is reconciled for **online players only**. This is not a world scan; an idle server with nobody connected does nothing. |
 | `strictJsonValidation` | `false` | — | Treat any datapack validation error as a failed reload. Either way the previously loaded definitions stay live — strict mode simply refuses to swap them. |
 
 When a cap is reached, history is discarded in the order it stops mattering: expired entries, then
-resolved ones, then unremarkable ones, then the oldest. Anything still carrying weight has that weight
-folded into a non-decaying baseline first, so **pruning never changes your score** — only the
-explanation for it. Pinned incidents are never dropped.
+resolved ones, then unremarkable ones, then the oldest. Only records that no longer contribute are
+eligible — a record still carrying weight is never one of them — so **pruning never changes your
+score**, only the explanation for it; a pruned zero-weight record still has its bookkeeping folded
+into a non-decaying baseline first. Pinned incidents, anything still contributing, and a recent open
+negative deed (one a receipt may still be checked against) are never dropped this way. If every record in a full
+ledger falls into one of those three, the *next* deed is refused instead — `/mcareputation debug
+receipts <player> [community]` shows the count against the cap, how many records are currently
+evictable, and whether the next deed would be refused.
 
 ## `[integration]`
 
@@ -93,19 +99,21 @@ Each of these is a no-op when the mod in question is absent.
 | Option | Default | What it does |
 |---|---|---|
 | `enableQuestsIntegration` | `true` | Accept writes from MCA: Quests. With this off, quest- and project-sourced deeds and resolutions are refused as `DISABLED`; Quests' reads (scores, tiers, titles) still answer, so its UI stays truthful. |
-| `enableConversationsIntegration` | `true` | Serve MCA: Conversations. With this off, the check bias reads 0, standing conditions never match (authored fallbacks fire), no gossip candidates are offered, and dialogue-sourced deeds are refused as `DISABLED`. |
+| `enableConversationsIntegration` | `true` | Serve MCA: Conversations. With this off, the check bias and villager opinion bias read `0` and dialogue-sourced deeds are refused as `DISABLED`. It **no longer** gates the generic standing predicate: the `mcareputation:standing` loot condition and Reputation's own condition read the same effective standing whether this is on or off, because a dialogue mod's switch has no business disabling a loot table. |
+| `coreAuthorityUndeclaredKinds` | `ASSAULT_KILL_ONLY` | How much to trust a companion that registers as a core incident authority without declaring which kinds it detects. `TRUST_LEGACY` lets it claim any kind, as an undeclared authority could before this option existed. `ASSAULT_KILL_ONLY` — the default — only honours it for villager assault and villager killing, the two kinds that existed when an authority could be undeclared; rescue, cure, raid, and PvP stay natively detected. `IGNORE` honours an undeclared authority for nothing. A companion that declares its kinds is unaffected either way. |
 | `mirrorQuestsFallbackState` | `true` | After each commit, mirror score/tier/title into Quests' own fallback store, so removing this mod later leaves Quests with sensible standing instead of resetting everyone. |
 | `migrateLegacyQuestsData` | `true` | Import a pre-Reputation world's shared Quests village scores into per-player baselines, exactly once per player. See MIGRATION.md. |
 
 ## `[visibility]`
 
 Display of standing outside the standing screen. Both are off by default: they are always-on surfaces,
-and a server that wants one will say so.
+and a server that wants one will say so. Both react to a live config reload: turning a display off and
+reloading takes down only the adornments this mod put up.
 
 | Option | Default | Range | What it does |
 |---|---|---|---|
-| `enableScoreboardObjective` | `false` | — | Keep a dummy scoreboard objective holding each online player's standing with the village the standing screen would open on. The objective is created and written; which slot it is displayed in, if any, is left to the server. |
-| `scoreboardObjectiveName` | `mcareputation` | non-blank | Name of that objective. An existing objective with this name is used as it is, never recreated. |
+| `enableScoreboardObjective` | `false` | — | Keep a dummy scoreboard objective holding each online player's standing with the village the standing screen would open on. An objective is only ever **adopted** if one already exists under this name with `dummy` criteria *and* this mod's own display-name marker; a foreign objective of the same name is never written to or removed, and the refusal is logged once. Turning the feature off removes only an objective this mod owns. |
+| `scoreboardObjectiveName` | `mcareputation` | non-blank | Name of that objective. |
 | `enableTabListTier` | `false` | — | Append the tier name to each player's tab-list entry. Appended to whatever name other mods produced, so it stacks rather than overwrites. |
 | `displayRefreshIntervalTicks` | `100` | `20 … 1200` | How often the displays are swept for online players. Standing changes and dimension changes update immediately; this sweep exists because walking into another village raises no event. |
 

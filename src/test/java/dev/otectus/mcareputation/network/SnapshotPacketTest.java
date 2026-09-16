@@ -2,6 +2,7 @@ package dev.otectus.mcareputation.network;
 
 import dev.otectus.mcareputation.TestFixtures;
 import dev.otectus.mcareputation.api.VillagerOpinion;
+import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import io.netty.buffer.Unpooled;
 import net.minecraft.network.FriendlyByteBuf;
@@ -25,21 +26,38 @@ class SnapshotPacketTest {
     }
 
     private static ReputationNetwork.IncidentSummary incident(int contribution) {
+        return incident(contribution, contribution, IncidentVisibility.WITNESSED, false, false);
+    }
+
+    private static ReputationNetwork.IncidentSummary incident(int contribution, int baseDelta,
+                                                              IncidentVisibility visibility,
+                                                              boolean decays, boolean superseded) {
         return new ReputationNetwork.IncidentSummary(UUID.randomUUID(), TestFixtures.ASSAULT,
                 Component.translatable("mcareputation.incident.villager_assaulted"), 5000L,
-                contribution, "active", "major", false);
+                contribution, "active", "major", false, visibility, baseDelta, decays, superseded);
     }
 
     @Test
     void requestRoundTrips() {
         FriendlyByteBuf buf = buffer();
         ReputationNetwork.RequestSnapshotC2S.encode(
-                new ReputationNetwork.RequestSnapshotC2S(42, Optional.of(TestFixtures.NETHER_3)), buf);
+                new ReputationNetwork.RequestSnapshotC2S(42, Optional.of(TestFixtures.NETHER_3), 3), buf);
         ReputationNetwork.RequestSnapshotC2S decoded =
                 ReputationNetwork.RequestSnapshotC2S.decode(buf);
         assertEquals(42, decoded.contextEntityId());
         assertEquals(Optional.of(TestFixtures.NETHER_3), decoded.requestedCommunity());
+        assertEquals(3, decoded.page());
         assertEquals(0, buf.readableBytes());
+    }
+
+    /** The page-less form is page 0, and a hostile negative page cannot survive the decode. */
+    @Test
+    void aRequestWithoutAPageIsPageZeroAndANegativePageIsClamped() {
+        assertEquals(0, new ReputationNetwork.RequestSnapshotC2S(0, Optional.empty()).page());
+        FriendlyByteBuf buf = buffer();
+        ReputationNetwork.RequestSnapshotC2S.encode(
+                new ReputationNetwork.RequestSnapshotC2S(0, Optional.empty(), -9), buf);
+        assertEquals(0, ReputationNetwork.RequestSnapshotC2S.decode(buf).page());
     }
 
     @Test
@@ -77,6 +95,28 @@ class SnapshotPacketTest {
         assertEquals(0, buf.readableBytes());
     }
 
+    /**
+     * The four fields the screen needs to stop showing a settled deed as a fresh full penalty: what it
+     * was worth originally, whether ordinary fading applies, whether another deed absorbed it, and who
+     * ever knew about it.
+     */
+    @Test
+    void aSettledIncidentCarriesItsOriginalDeltaVisibilityDecayAndSupersession() {
+        for (IncidentVisibility visibility : IncidentVisibility.values()) {
+            ReputationNetwork.IncidentSummary original =
+                    incident(-6, -40, visibility, true, true);
+            FriendlyByteBuf buf = buffer();
+            ReputationNetwork.IncidentSummary.write(buf, original);
+            ReputationNetwork.IncidentSummary decoded = ReputationNetwork.IncidentSummary.read(buf);
+            assertEquals(-6, decoded.contribution());
+            assertEquals(-40, decoded.baseDelta(), "the original deed survives beside the current one");
+            assertEquals(visibility, decoded.visibility());
+            assertTrue(decoded.decays());
+            assertTrue(decoded.superseded());
+            assertEquals(0, buf.readableBytes());
+        }
+    }
+
     @Test
     void fullSnapshotRoundTrips() {
         List<ReputationNetwork.CommunitySummary> communities = List.of(
@@ -92,10 +132,14 @@ class SnapshotPacketTest {
 
         FriendlyByteBuf buf = buffer();
         ReputationNetwork.SnapshotS2C.encode(new ReputationNetwork.SnapshotS2C(communities,
-                Optional.of(detail), List.of(Component.literal("Wanderer"))), buf);
+                Optional.of(detail), List.of(Component.literal("Wanderer")), 1, 4, 210), buf);
         ReputationNetwork.SnapshotS2C decoded = ReputationNetwork.SnapshotS2C.decode(buf);
 
         assertEquals(2, decoded.communities().size());
+        assertEquals(1, decoded.page());
+        assertEquals(4, decoded.pageCount());
+        assertEquals(210, decoded.totalCommunities(),
+                "the true community count travels beside the page, not the page's own size");
         ReputationNetwork.SelectedDetail decodedDetail = decoded.selected().orElseThrow();
         assertEquals(90, decodedDetail.score());
         assertEquals(Optional.of("honored"), decodedDetail.nextTierId());
@@ -150,6 +194,39 @@ class SnapshotPacketTest {
         assertTrue(decoded.communities().isEmpty());
         assertTrue(decoded.selected().isEmpty());
         assertTrue(decoded.globalTitles().isEmpty());
+    }
+
+    /**
+     * A full page is the largest summary list that can legitimately cross the wire, and it must
+     * survive intact: the per-page cap is where truncation used to hide the rest of the villages.
+     */
+    @Test
+    void aFullPageOfCommunitiesRoundTripsWithTheTrueTotalBesideIt() {
+        List<ReputationNetwork.CommunitySummary> page = new ArrayList<>();
+        for (int i = 0; i < ReputationBounds.MAX_SYNCED_COMMUNITIES; i++) {
+            page.add(new ReputationNetwork.CommunitySummary(
+                    new dev.otectus.mcareputation.community.CommunityKey(
+                            new ResourceLocation("minecraft:overworld"), i),
+                    "A village with a name long enough to wrap on any panel " + i, -i, "stranger"));
+        }
+        FriendlyByteBuf buf = buffer();
+        ReputationNetwork.SnapshotS2C.encode(new ReputationNetwork.SnapshotS2C(page, Optional.empty(),
+                List.of(), 2, 3, ReputationBounds.MAX_SYNCED_COMMUNITIES * 2 + 5), buf);
+        ReputationNetwork.SnapshotS2C decoded = ReputationNetwork.SnapshotS2C.decode(buf);
+        assertEquals(ReputationBounds.MAX_SYNCED_COMMUNITIES, decoded.communities().size());
+        assertEquals(2, decoded.page());
+        assertEquals(3, decoded.pageCount());
+        assertEquals(ReputationBounds.MAX_SYNCED_COMMUNITIES * 2 + 5, decoded.totalCommunities());
+        assertEquals(0, buf.readableBytes());
+    }
+
+    /** A page index past the end of the reply cannot survive the decode. */
+    @Test
+    void aPageBeyondThePageCountIsClampedOnArrival() {
+        FriendlyByteBuf buf = buffer();
+        ReputationNetwork.SnapshotS2C.encode(new ReputationNetwork.SnapshotS2C(List.of(),
+                Optional.empty(), List.of(), 9, 2, 70), buf);
+        assertEquals(1, ReputationNetwork.SnapshotS2C.decode(buf).page());
     }
 
     /** §27.3: an oversized ledger must be truncated before encoding, not sent whole. */

@@ -6,6 +6,74 @@ Nothing to do. Everyone begins as a stranger everywhere, which is the intended s
 
 ---
 
+## Save format 1 → 2
+
+Since this version the on-disk schema is format 2. A world last opened by an older build has a format-1
+`<world>/data/mcareputation.dat`; this build migrates it in place, once, the next time it loads — before
+anything else touches the store.
+
+### What the migration does
+
+- Every retained incident that carries a dedupe key gets a synthesised `APPLIED` receipt pointing at its
+  own incident id, with the namespace taken from the incident's own source. This is what lets a
+  companion that replays a pre-upgrade operation key learn what it already produced instead of recording
+  it a second time.
+- Every record carrying only the legacy `superseded_by` context entry becomes terminal — the same state
+  a supersede sets going forward — with the typed link parsed when it is a valid id. A successor that
+  was already pruned before the upgrade is tolerated, not an error.
+- `appliedGameTime` is added to every incident and defaults to its occurrence time; the two only differ
+  going forward, for a genuinely backdated delivery.
+- Nothing is invented for history that was already pruned before the upgrade.
+
+The migration is idempotent — running it again changes nothing — and it writes no event, toast, mirror
+call, or reward, and never moves a score. The file is saved back as format 2 on the next write.
+
+### Quarantine instead of silent loss
+
+A player or incident entry that cannot be parsed is no longer just logged and discarded: it is held in
+memory (bounded, so a systematically corrupt file cannot become a memory problem) with its reason and
+raw data, and written once per server start to `<world>/mcareputation-quarantine.nbt` (gzip-compressed).
+`/mcareputation debug quarantine` reports the held entries — count, dropped overflow, and each
+entry's path and reason — plus the on-disk format version and whether the store is currently
+latched read-only.
+
+### A file from a newer format
+
+If `mcareputation.dat` was written by a format this build does not understand — you downgraded, or a
+future version wrote it — the store latches **read-only**: nothing from it is loaded into live state,
+nothing you do in that session is saved, and the next save writes the original bytes back unchanged. One
+error names both the file's version and this build's. `/mcareputation debug quarantine` also reports the
+read-only state and the on-disk version. Run the newer build, or restore a backup taken before the
+downgrade — the file itself is never touched destructively.
+
+### Backing up and rolling back
+
+Back up `<world>/data/mcareputation.dat`, and the rest of `<world>/data/` alongside it, before
+upgrading. After a save has been written as format 2, an older build cannot read the new receipts or the
+terminal-supersede flag; its loader keeps only what it recognises and warns rather than crashing. The
+supported rollback is restoring that pre-upgrade backup — not opening a format-2 file with an older
+build and hoping.
+
+### What changes on the ground
+
+- A duplicate delivery returns the same incident id it did the first time, instead of a bare refusal
+  with no way to look the original up.
+- An immune or globally-paused community's standing no longer moves through any screen, query, or
+  resolution; before, opening certain screens could still age a community meant to be protected.
+- A killing that absorbed a preceding assault can no longer regain weight if the killing is later
+  resolved out from under it — the absorbed record is terminal.
+- A companion that claims core incidents without declaring which ones no longer suppresses the newer
+  positive kinds (rescue, cure, raid repelled, PvP) by default; see `coreAuthorityUndeclaredKinds` in
+  CONFIG.md.
+- The `mcareputation:standing` loot condition and this mod's own standing predicate no longer depend on
+  `enableConversationsIntegration`.
+- Asking a villager's opinion of a player who has a valid community record but no incidents there now
+  answers a real zero, not "no data".
+- A ledger that is completely full and has nothing left evictable now refuses the next deed outright
+  instead of silently dropping older history to make room; `/mcareputation debug receipts` explains why.
+
+---
+
 ## If you already play with MCA: Quests
 
 MCA: Quests has had village reputation since 0.7.0. Your existing standing carries over, but it is
@@ -163,3 +231,13 @@ Deleting a village does not delete what happened there.
 **"The Journal and the Standing screen disagree."** They cannot — both read the same snapshot through
 the same bridge. If you are seeing it, the bridge failed to initialise; look for a single ERROR line
 from MCA: Quests at startup.
+
+**"A deed did not record and nothing else looks wrong."** Check `/mcareputation debug receipts
+<player> <community>` — the community's ledger may be full with nothing left evictable, in which case
+the deed was refused with `CAPACITY` rather than silently dropping older history. Raise
+`maxIncidentsPerCommunity`, clear a pin, or wait for open negative deeds to age past
+`receiptRetentionTicks`.
+
+**"Some of my save data went missing after an upgrade."** Check `/mcareputation debug quarantine`. A
+malformed entry is now held and written to `<world>/mcareputation-quarantine.nbt` instead of being
+silently dropped; the report names the path and the reason.

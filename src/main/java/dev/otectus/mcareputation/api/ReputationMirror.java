@@ -3,6 +3,7 @@ package dev.otectus.mcareputation.api;
 import dev.otectus.mcareputation.community.CommunityKey;
 import net.minecraft.resources.ResourceLocation;
 
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -42,11 +43,49 @@ public interface ReputationMirror {
     void mirrorScore(UUID player, CommunityKey community, int score,
                      ResourceLocation ladder, String highWaterTierId);
 
+    /**
+     * A player's standing changed, with the reason it changed (§6 "Standing change").
+     *
+     * <p>Additive: the default body calls {@link #mirrorScore}, so a mirror written against the
+     * original interface keeps receiving every update with no source change at all. Override it only to
+     * act on the cause or the revision.
+     *
+     * @since MCA: Reputation 0.4.1
+     */
+    default void mirrorStanding(StandingChange change) {
+        mirrorScore(change.player(), change.community(), change.newScore(), change.ladder(),
+                change.highWaterTierId());
+    }
+
     /** A community-scoped title was granted. */
     void mirrorVillageTitle(UUID player, CommunityKey community, ResourceLocation title);
 
     /** A global title was granted. */
     void mirrorGlobalTitle(UUID player, ResourceLocation title);
+
+    /**
+     * A title was taken away, globally when {@code community} is empty (§6 "Title synchronization").
+     *
+     * <p>Additive and a no-op by default, so a mirror written against the original interface keeps
+     * compiling. Override it: a grants-only stream cannot repair a revoked title, and a fallback copy
+     * that never hears about a revocation keeps the title forever.
+     *
+     * @since MCA: Reputation 0.4.1
+     */
+    default void mirrorTitleRevoked(UUID player, Optional<CommunityKey> community, ResourceLocation title) {
+    }
+
+    /**
+     * Every title this player currently holds, as of {@code revision}.
+     *
+     * <p>Sent after every grant and revocation and again on login, so a mirror can reconcile rather
+     * than union forever. The revision only ever rises for a given player; a mirror that has already
+     * seen a higher one may ignore the call.
+     *
+     * @since MCA: Reputation 0.4.1
+     */
+    default void mirrorTitleState(UUID player, TitleSnapshot state, long revision) {
+    }
 
     /** A human-readable name for this mirror, used only in the log line when it throws. */
     default String mirrorName() {

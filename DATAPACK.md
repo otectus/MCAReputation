@@ -70,6 +70,11 @@ A `witnessed` deed that nobody saw has no public consequence. Depending on `reta
 either dropped or kept as hidden history with zero contribution — which is how an unwitnessed killing
 stays in the world's memory without changing anyone's opinion.
 
+The Standing screen now shows each deed's visibility as a plain word — private, witnessed, or village —
+next to it, so a record that counts for nothing does not read like something the whole village saw. When
+a deed's current contribution differs from what it was originally worth, both figures are shown together
+with a one-word reason: resolved, faded, or superseded.
+
 ### Decay
 
 ```json
@@ -82,6 +87,23 @@ that never terminates is an authoring error, and `{"type":"none"}` is how you sa
 
 Decay is computed from a monotonic age counter, not from the world clock, so `/time set` into the past
 adds nothing and can never hand back contribution a player already lost.
+
+### Occurrence, application, and decay time
+
+A deed can be delivered late — a producer files a backdated `ReputationRequest` for something that
+happened before the request arrived. Three different times are kept apart so that is handled honestly:
+
+- **Occurrence** — when the deed actually happened, from the producer's own clock. A future value is
+  clamped to now; an honest past value is kept as-is.
+- **Application** — when the record entered the ledger, i.e. now, at delivery time.
+- **Effective decay age** — how much decay clock the record has actually accumulated. For a backdated
+  delivery this is seeded to the gap between occurrence and application *before* the record ever
+  reaches a score, a mirror, a toast, or a tier event, so a late-arriving deed is announced at what it
+  is worth today, not at the fresh full value it would have had on the day it happened.
+
+History lists newest-first **by occurrence**, not by the order records were created, so a backdated
+delivery slots into the chronology where it belongs rather than jumping to the top. `/mcareputation
+debug standing` prints all three times per incident for diagnosis.
 
 ### Resolution
 
@@ -130,7 +152,7 @@ supplies the voice.
 | Id | Delta | Visibility | Decay | Notes |
 |---|---:|---|---|---|
 | `villager_assaulted` | `-8` | witnessed | 2/day after 2 days | Coalesced: a beating is one deed. |
-| `villager_killed` | `-40` | witnessed | none | Absorbs a preceding assault so the pair totals `-40`, not `-48`. Pinned; retained even unwitnessed. |
+| `villager_killed` | `-40` | witnessed | none | Absorbs a preceding assault so the pair totals `-40`, not `-48`. Pinned; retained even unwitnessed. The absorbed assault record is left in the ledger as chronology but marked **superseded**: terminal, it never contributes again, cannot itself be resolved (an apology can no longer discharge it), and is never offered as an amends or gossip candidate — its weight belongs to the killing that absorbed it. |
 | `villager_rescued` | `+6` | witnessed | 2/day after 2 days | Credited once per bucket; a second kill in the same bucket does not double-credit. Raised by `ReputationDeedEvents.onThreatKilled` when a hostile mob that is targeting or has recently hurt an MCA villager is killed. |
 | `villager_cured` | `+15` | witnessed | none | Retained even unwitnessed. Raised by `ReputationDeedEvents.onVillagerCured` when a player cures a zombie villager online; an offline curer earns nothing. |
 | `raid_repelled` | `+20` | village | 1/day after 14 days | Raised by `ReputationDeedEvents.onHeroOfTheVillage` when the player receives Hero of the Village after a raid victory. Dedupe key uses the raid id to prevent double-credit on effect refreshes. |

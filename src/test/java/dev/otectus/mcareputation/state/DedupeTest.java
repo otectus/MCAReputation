@@ -1,14 +1,26 @@
 package dev.otectus.mcareputation.state;
 
 import dev.otectus.mcareputation.TestFixtures;
+import dev.otectus.mcareputation.api.DeliveryOutcome;
+import dev.otectus.mcareputation.api.IncidentDelivery;
+import dev.otectus.mcareputation.api.ReceiptOutcome;
+import dev.otectus.mcareputation.api.ReputationRequest;
+import dev.otectus.mcareputation.incident.DecayPolicy;
 import dev.otectus.mcareputation.incident.IncidentRecord;
+import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentSeverity;
+import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
+import dev.otectus.mcareputation.incident.ResolutionPolicy;
+import dev.otectus.mcareputation.reputation.TestDeliverySeam;
 import net.minecraft.nbt.CompoundTag;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -88,11 +100,55 @@ class DedupeTest {
 
     @Test
     void aStaleIndexEntryDoesNotProduceAPhantomHit() {
-        PlayerReputationRecord player = withIncident(KEY, TestFixtures.OVERWORLD_3);
+        PlayerReputationRecord player = new PlayerReputationRecord(TestFixtures.PLAYER_A);
+        // Spent history: zero contribution, so §5 F09 lets it be evicted at all.
+        IncidentRecord spent = IncidentRecord.create(UUID.randomUUID(), TestFixtures.ASSAULT,
+                TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3, 0L, TestFixtures.SOURCE,
+                Optional.of(KEY), 0, IncidentVisibility.VILLAGE, IncidentSeverity.TRIVIAL, List.of());
+        player.getOrCreate(TestFixtures.OVERWORLD_3).addIncident(spent);
+        player.indexDedupe(spent);
         // Prune the incident away without touching the index.
         CommunityReputationRecord community = player.community(TestFixtures.OVERWORLD_3).orElseThrow();
         community.prune(0, 1000L, MIN, MAX);
         assertTrue(player.findByDedupeKey(TestFixtures.OVERWORLD_3, KEY).isEmpty());
+    }
+
+    /**
+     * T20, inverted (§10). A pruned dedupe key used to vanish from the ledger, and replaying it would
+     * award the deed a second time — the ledger cannot remember what it no longer holds. The receipt
+     * outlives its incident, so the replay is still refused and still names what it originally created.
+     */
+    @Test
+    void aPrunedKeyIsStillRefusedBecauseTheReceiptSurvives() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(-8, IncidentVisibility.VILLAGE, DecayPolicy.NONE)));
+        try {
+            TestDeliverySeam seam = new TestDeliverySeam();
+            seam.gameTime(1000L);
+            IncidentDelivery delivery = IncidentDelivery.of(new ReputationRequest(null,
+                    TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3, TestFixtures.ASSAULT,
+                    TestFixtures.SOURCE, Optional.empty(), OptionalInt.empty(), Optional.empty(),
+                    List.of(), Set.of(TestFixtures.VILLAGER_1), Map.of(), 1000L), "mcaquests", KEY);
+
+            DeliveryOutcome first = seam.deliver(delivery);
+            UUID incidentId = first.result().incidentId().orElseThrow();
+
+            PlayerReputationRecord player = seam.store().player(TestFixtures.PLAYER_A).orElseThrow();
+            CommunityReputationRecord community =
+                    player.community(TestFixtures.OVERWORLD_3).orElseThrow();
+            community.incident(incidentId).orElseThrow()
+                    .resolve(ResolutionPolicy.DEFAULT, null, IncidentStatus.FORGIVEN, 1000L);
+            community.prune(0, 1000L, MIN, MAX);
+            assertTrue(player.findByDedupeKey(TestFixtures.OVERWORLD_3, KEY).isEmpty(),
+                    "the ledger itself has forgotten the key");
+
+            DeliveryOutcome replay = seam.deliver(delivery);
+            assertEquals(ReceiptOutcome.DUPLICATE, replay.outcome());
+            assertEquals(Optional.of(incidentId), replay.result().incidentId());
+            assertEquals(0, community.incidentCount(), "and the deed was not recorded a second time");
+        } finally {
+            IncidentRegistry.replaceAll(Map.of());
+        }
     }
 
     @Test

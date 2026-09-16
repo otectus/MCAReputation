@@ -11,7 +11,6 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
 import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
 import net.minecraftforge.client.event.ScreenEvent;
 import net.minecraftforge.client.settings.KeyConflictContext;
 import net.minecraftforge.event.TickEvent;
@@ -31,8 +30,12 @@ import java.util.Optional;
  *
  * <p>The keybind ships <b>unbound</b> on purpose. A default key in a modpack with dozens of mods is a
  * conflict waiting to happen, and this screen is reachable without it.
+ *
+ * <p>This class subscribes to the FORGE bus for gameplay handlers. The keybind's MOD-bus registration
+ * is in {@link ReputationClientRegistration} so each class declares exactly one bus.
  */
-@Mod.EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT)
+@Mod.EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT,
+        bus = Mod.EventBusSubscriber.Bus.FORGE)
 public final class ReputationClient {
 
     /**
@@ -64,19 +67,6 @@ public final class ReputationClient {
             InputConstants.Type.KEYSYM,
             InputConstants.UNKNOWN.getValue(), // unbound by default (§28.1)
             "key.categories.mcareputation");
-
-    @Mod.EventBusSubscriber(modid = McaReputation.MOD_ID, value = Dist.CLIENT,
-            bus = Mod.EventBusSubscriber.Bus.MOD)
-    public static final class ModBus {
-
-        private ModBus() {
-        }
-
-        @SubscribeEvent
-        public static void onRegisterKeyMappings(RegisterKeyMappingsEvent event) {
-            event.register(OPEN_REPUTATION);
-        }
-    }
 
     @SubscribeEvent
     public static void onClientTick(TickEvent.ClientTickEvent event) {

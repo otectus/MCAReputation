@@ -34,6 +34,11 @@ public final class ClientReputationData {
     private static Optional<ReputationNetwork.SelectedDetail> selected = Optional.empty();
     private static List<Component> globalTitles = List.of();
 
+    /** Which page of the community list the cached summaries are, and how many there are in all. */
+    private static int page;
+    private static int pageCount = 1;
+    private static int totalCommunities;
+
     /** Change packets buffered within one client tick, so several communities can merge (§28.3). */
     private static final java.util.List<ReputationNetwork.ChangeS2C> PENDING_CHANGES =
             new java.util.ArrayList<>();
@@ -49,6 +54,11 @@ public final class ClientReputationData {
         communities = packet.communities();
         selected = packet.selected();
         globalTitles = packet.globalTitles();
+        // The server decides which page this is: a clamped request comes back as the page it landed
+        // on, so the controls can never sit on a page that does not exist.
+        page = packet.page();
+        pageCount = Math.max(1, packet.pageCount());
+        totalCommunities = packet.totalCommunities();
         THROTTLE.onReply();
         if (Minecraft.getInstance().screen instanceof ReputationScreen screen) {
             screen.onDataRefreshed();
@@ -123,12 +133,25 @@ public final class ClientReputationData {
      *                        of its own (§27.2).
      */
     public static void request(int contextEntityId, Optional<CommunityKey> community) {
-        THROTTLE.offer(new RequestThrottle.Request(contextEntityId, community), now())
+        request(contextEntityId, community, page);
+    }
+
+    /** As above, for a named page of the community list. */
+    public static void request(int contextEntityId, Optional<CommunityKey> community, int page) {
+        THROTTLE.offer(new RequestThrottle.Request(contextEntityId, community, Math.max(0, page)), now())
                 .ifPresent(ClientReputationData::send);
     }
 
     public static void requestSelected(CommunityKey community) {
-        request(0, Optional.ofNullable(community));
+        request(0, Optional.ofNullable(community), page);
+    }
+
+    /**
+     * Asks for another page while keeping the selection: the currently selected community rides along
+     * as the requested one, so the reply details the same village it detailed before the page turned.
+     */
+    public static void requestPage(int nextPage) {
+        request(0, selected.map(ReputationNetwork.SelectedDetail::key), nextPage);
     }
 
     /** Called each screen tick so a parked request goes out the moment the cooldown allows. */
@@ -137,8 +160,8 @@ public final class ClientReputationData {
     }
 
     private static void send(RequestThrottle.Request request) {
-        ReputationNetwork.CHANNEL.sendToServer(
-                new ReputationNetwork.RequestSnapshotC2S(request.contextEntityId(), request.community()));
+        ReputationNetwork.CHANNEL.sendToServer(new ReputationNetwork.RequestSnapshotC2S(
+                request.contextEntityId(), request.community(), request.page()));
     }
 
     private static long now() {
@@ -162,6 +185,21 @@ public final class ClientReputationData {
         return globalTitles;
     }
 
+    /** The page the cached summaries are, counting from zero. */
+    public static int page() {
+        return page;
+    }
+
+    /** How many pages the player's communities fill; at least one. */
+    public static int pageCount() {
+        return pageCount;
+    }
+
+    /** How many communities the player has in all, not just on this page. */
+    public static int totalCommunities() {
+        return totalCommunities;
+    }
+
     /**
      * True while a request is outstanding: the screen shows "loading", never a guessed number. Times
      * out after {@link RequestThrottle#TIMEOUT_TICKS} so a lost packet degrades to the retryable
@@ -176,6 +214,9 @@ public final class ClientReputationData {
         communities = List.of();
         selected = Optional.empty();
         globalTitles = List.of();
+        page = 0;
+        pageCount = 1;
+        totalCommunities = 0;
         PENDING_CHANGES.clear();
         THROTTLE.reset();
     }

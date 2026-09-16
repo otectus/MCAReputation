@@ -2,15 +2,25 @@ package dev.otectus.mcareputation.reputation;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.ChangeCause;
+import dev.otectus.mcareputation.api.DeliveryOutcome;
+import dev.otectus.mcareputation.api.ExternalGossipCandidate;
+import dev.otectus.mcareputation.api.GossipStory;
 import dev.otectus.mcareputation.api.ImportResult;
+import dev.otectus.mcareputation.api.IncidentDelivery;
 import dev.otectus.mcareputation.api.IncidentQuery;
 import dev.otectus.mcareputation.api.LegacyImportRequest;
+import dev.otectus.mcareputation.api.ReceiptOutcome;
+import dev.otectus.mcareputation.api.ReceiptView;
 import dev.otectus.mcareputation.api.ReputationIncidentView;
 import dev.otectus.mcareputation.api.ReputationMirror;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
 import dev.otectus.mcareputation.api.ReputationSnapshot;
 import dev.otectus.mcareputation.api.ResolutionResult;
+import dev.otectus.mcareputation.api.SpeakerContext;
+import dev.otectus.mcareputation.api.StandingChange;
+import dev.otectus.mcareputation.api.SupersedeSpec;
 import dev.otectus.mcareputation.api.event.ReputationChangedEvent;
 import dev.otectus.mcareputation.api.event.ReputationIncidentCreatedEvent;
 import dev.otectus.mcareputation.api.event.ReputationIncidentResolvedEvent;
@@ -20,12 +30,14 @@ import dev.otectus.mcareputation.community.CommunityMetadata;
 import dev.otectus.mcareputation.incident.AwarenessResolver;
 import dev.otectus.mcareputation.incident.BuiltinIncidents;
 import dev.otectus.mcareputation.incident.IncidentDefinition;
+import dev.otectus.mcareputation.incident.IncidentDisplay;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.network.SnapshotSelection;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
+import dev.otectus.mcareputation.state.OperationReceipt;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.resources.ResourceLocation;
@@ -37,6 +49,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -132,28 +145,275 @@ public final class ReputationService {
 
     /** Seam entry point: {@code ctx} may replace the server for tests; null derives it from the request. */
     static ReputationResult recordWith(@Nullable ServiceContext ctx, ReputationRequest request) {
+        if (request == null) {
+            McaReputation.LOGGER.error("[MCA: Reputation] record() was given no request; nothing was written");
+            return ReputationResult.rejected(ReputationResult.Reason.ERROR, null);
+        }
+        // One implementation, two doors: a plain request is a delivery whose operation identity comes
+        // from its own source and dedupe key. Without a dedupe key there is no identity and no receipt,
+        // which is exactly what record() has always done.
+        return deliverWith(ctx, IncidentDelivery.of(request)).result();
+    }
+
+    // ------------------------------------------------------------------
+    // Delivery
+    // ------------------------------------------------------------------
+
+    /**
+     * Records one deed under a producer-owned operation identity, and answers with a receipt (§5 F03).
+     *
+     * <p>The difference from {@link #record} is what happens on a replay. A keyed delivery is answered
+     * from the receipt store first, so an operation that produced <em>no</em> incident — an unwitnessed
+     * deed, an invalid request — is still remembered and still answers the same way, which a ledger
+     * lookup cannot do.
+     */
+    public static DeliveryOutcome deliver(IncidentDelivery delivery) {
+        return deliverWith(null, delivery);
+    }
+
+    /** Seam entry point: {@code ctx} may replace the server for tests. */
+    static DeliveryOutcome deliverWith(@Nullable ServiceContext ctx, IncidentDelivery delivery) {
+        if (delivery == null) {
+            return DeliveryOutcome.of(ReceiptOutcome.REFUSED_INVALID,
+                    ReputationResult.rejected(ReputationResult.Reason.INVALID, null));
+        }
+        ReputationRequest request = delivery.request();
         try {
             ServiceContext context = ctx != null ? ctx : ServiceContext.of(request.server());
-            return recordInternal(context, request);
+            return deliverInternal(context, delivery);
         } catch (Throwable t) {
             McaReputation.LOGGER.error("[MCA: Reputation] transaction failed for player {} incident {}; "
-                    + "nothing was written", request == null ? "?" : request.playerId(),
-                    request == null ? "?" : request.incidentType(), t);
-            return ReputationResult.rejected(ReputationResult.Reason.ERROR,
-                    request == null ? null : request.community());
+                    + "nothing was written", request.playerId(), request.incidentType(), t);
+            // Deliberately no receipt: a contained internal failure is the one refusal a producer
+            // should be able to retry, and a stored terminal answer would make it permanent.
+            return DeliveryOutcome.of(ReceiptOutcome.REFUSED_INVALID,
+                    ReputationResult.rejected(ReputationResult.Reason.ERROR, request.community()));
         }
     }
 
+    private static DeliveryOutcome deliverInternal(ServiceContext ctx, IncidentDelivery delivery) {
+        ReputationRequest request = delivery.request();
+        if (!delivery.keyed()) {
+            ReputationResult result = recordInternal(ctx, request);
+            return DeliveryOutcome.of(outcomeFor(ctx, request, result), result);
+        }
+
+        ReputationSavedData data = ctx.data();
+        UUID playerId = request.playerId();
+        CommunityKey community = request.community();
+        String namespace = delivery.producerNamespace();
+        String operationKey = delivery.operationKey();
+        long now = ctx.now();
+
+        // 1. the receipt index, consulted before the ledger: it is the only index that remembers a
+        //    delivery which produced nothing. Never creates a player record.
+        Optional<PlayerReputationRecord> maybePlayer = data.player(playerId);
+        if (maybePlayer.isPresent()) {
+            PlayerReputationRecord playerRecord = maybePlayer.get();
+            Optional<OperationReceipt> stored = playerRecord.findReceipt(namespace, community, operationKey);
+            if (stored.isEmpty()) {
+                // Pre-receipt keys carry no namespace of their own.
+                stored = playerRecord.findLegacyReceipt(community, operationKey);
+            }
+            if (stored.isPresent()) {
+                return replay(ctx, data, playerRecord, stored.get(), request, now);
+            }
+
+            // 2. the legacy path: a retained incident under this key that predates receipts. It gets
+            //    one synthesised now, so the next replay is answered by the index rather than a scan.
+            Optional<IncidentRecord> existing = playerRecord.findByDedupeKey(community, operationKey);
+            if (existing.isPresent()) {
+                OperationReceipt synthesised = new OperationReceipt(namespace, playerId, community,
+                        operationKey, ReceiptOutcome.APPLIED, Optional.of(existing.get().id()),
+                        existing.get().createdGameTime(), existing.get().appliedGameTime());
+                playerRecord.recordReceipt(synthesised);
+                data.setDirty();
+                return replay(ctx, data, playerRecord, synthesised, request, now);
+            }
+        }
+
+        // 3. a genuinely new operation: the ordinary transaction, then the receipt in the same
+        //    mutation as the ledger write.
+        ReputationResult result = recordInternal(ctx, request);
+        ReceiptOutcome outcome = outcomeFor(ctx, request, result);
+        if (!outcome.isTerminal() || result.reason() == ReputationResult.Reason.ERROR) {
+            return DeliveryOutcome.of(outcome, result);
+        }
+        PlayerReputationRecord owner = data.getOrCreatePlayer(playerId);
+        OperationReceipt receipt = new OperationReceipt(namespace, playerId, community, operationKey,
+                outcome, result.incidentId(), request.gameTime(), now);
+        owner.recordReceipt(receipt);
+        data.setDirty();
+        return DeliveryOutcome.of(outcome, result, receipt.toView());
+    }
+
+    /** Answers a replayed operation from its stored receipt, without touching the ledger. */
+    private static DeliveryOutcome replay(ServiceContext ctx, ReputationSavedData data,
+                                          PlayerReputationRecord playerRecord, OperationReceipt receipt,
+                                          ReputationRequest request, long now) {
+        CommunityKey community = request.community();
+        // The reported standing must be the current one, or the replay disagrees with the very next
+        // query. Through the gate, so answering a replay cannot age a protected village.
+        publishReconcile(ctx, request.playerId(), community,
+                ReconciliationService.reconcile(ctx, data, request.playerId(), community, now,
+                        ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
+        int score = playerRecord.community(community)
+                .map(CommunityReputationRecord::score).orElse(0);
+        if (McaReputationConfig.debugLogging()) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] replayed receipt {} for {} (key '{}')",
+                    receipt.outcome(), request.source(), receipt.operationKey());
+        }
+        if (receipt.outcome() == ReceiptOutcome.REFUSED_INVALID) {
+            // A terminal refusal stays refused: replaying it can only ever produce the same answer.
+            return DeliveryOutcome.of(ReceiptOutcome.REFUSED_INVALID,
+                    ReputationResult.rejected(ReputationResult.Reason.INVALID, community),
+                    receipt.toView());
+        }
+        return DeliveryOutcome.of(ReceiptOutcome.DUPLICATE,
+                ReputationResult.duplicate(receipt.incidentId().orElse(null), community, score,
+                        currentTierId(score)),
+                receipt.toView());
+    }
+
+    /**
+     * The delivery-contract row one ordinary result corresponds to (§5 F03).
+     *
+     * <p>An applied deed that produced only a private, zero-contribution record is reported as
+     * {@code ACCEPTED_NO_PUBLIC_INCIDENT} rather than {@code APPLIED}: the producer's operation was
+     * accepted, nothing public came of it, and the receipt still names the record that was retained.
+     */
+    private static ReceiptOutcome outcomeFor(ServiceContext ctx, ReputationRequest request,
+                                             ReputationResult result) {
+        if (result.applied()) {
+            boolean publicRecord = result.incidentId()
+                    .flatMap(id -> incidentWith(ctx, request.playerId(), request.community(), id))
+                    .map(incident -> incident.visibility().effective() != IncidentVisibility.PRIVATE)
+                    .orElse(true);
+            return publicRecord ? ReceiptOutcome.APPLIED : ReceiptOutcome.ACCEPTED_NO_PUBLIC_INCIDENT;
+        }
+        return switch (result.reason()) {
+            case DUPLICATE -> ReceiptOutcome.DUPLICATE;
+            case DISABLED -> ReceiptOutcome.REFUSED_DISABLED;
+            case CAPACITY -> ReceiptOutcome.REFUSED_CAPACITY;
+            case UNWITNESSED -> ReceiptOutcome.ACCEPTED_NO_PUBLIC_INCIDENT;
+            default -> ReceiptOutcome.REFUSED_INVALID;
+        };
+    }
+
+    // ------------------------------------------------------------------
+    // Read-only lookups (DD7)
+    // ------------------------------------------------------------------
+
+    /** The receipt for one operation, exactly then legacy. Creates nothing and ages nothing. */
+    public static Optional<ReceiptView> findReceipt(MinecraftServer server, String namespace,
+                                                    UUID playerId, CommunityKey community,
+                                                    String operationKey) {
+        return findReceiptWith(ServiceContext.of(server), namespace, playerId, community, operationKey);
+    }
+
+    static Optional<ReceiptView> findReceiptWith(ServiceContext ctx, String namespace, UUID playerId,
+                                                 CommunityKey community, String operationKey) {
+        Optional<PlayerReputationRecord> player = ctx.data().player(playerId);
+        if (player.isEmpty()) {
+            return Optional.empty();
+        }
+        Optional<OperationReceipt> hit = player.get().findReceipt(namespace, community, operationKey);
+        if (hit.isEmpty()) {
+            hit = player.get().findLegacyReceipt(community, operationKey);
+        }
+        return hit.map(OperationReceipt::toView);
+    }
+
+    /**
+     * One incident as the API sees it, read strictly as stored (DD7). This is the replacement for the
+     * write-capable probe a companion used to reach for: {@link ReconciliationService.Intent#INSPECT}
+     * means no record is created, nothing is aged, and no event is posted.
+     */
+    public static Optional<ReputationIncidentView> findIncidentView(MinecraftServer server, UUID playerId,
+                                                                    CommunityKey community, UUID incidentId) {
+        return findIncidentViewWith(ServiceContext.of(server), playerId, community, incidentId);
+    }
+
+    static Optional<ReputationIncidentView> findIncidentViewWith(ServiceContext ctx, UUID playerId,
+                                                                 CommunityKey community, UUID incidentId) {
+        long now = ctx.now();
+        ReconciliationService.reconcile(ctx, ctx.data(), playerId, community, now, ChangeCause.DECAY,
+                ReconciliationService.Intent.INSPECT);
+        return incidentWith(ctx, playerId, community, incidentId)
+                .map(incident -> ReputationIncidentView.of(incident, now));
+    }
+
+    /** The oldest occurrence this player's receipts can still answer for; empty while none were lost. */
+    public static OptionalLong receiptFloor(MinecraftServer server, UUID playerId) {
+        return receiptFloorWith(ServiceContext.of(server), playerId);
+    }
+
+    static OptionalLong receiptFloorWith(ServiceContext ctx, UUID playerId) {
+        return ctx.data().player(playerId)
+                .map(PlayerReputationRecord::receiptFloor)
+                .orElseGet(OptionalLong::empty);
+    }
+
     private static ReputationResult recordInternal(ServiceContext ctx, ReputationRequest request) {
+        Commit commit = commit(ctx, request);
+        if (!commit.created()) {
+            return commit.refusal();
+        }
+        // 9-10. tier, high-water, title
+        @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
+        TierOutcome tier = applyTierTransition(ctx, commit.playerRecord(), commit.community(), player,
+                commit.oldScore(), commit.newScore(), commit.now());
+
+        // 12-13. mirrors, then events — both outside the canonical commit, through the one envelope
+        IncidentRecord incident = commit.incident();
+        ReputationIncidentView view = ReputationIncidentView.of(incident, commit.now());
+        publishStandingChange(ctx,
+                standingChange(request.playerId(), commit.community(), commit.oldScore(),
+                        commit.newScore(), tier, ChangeCause.DEED, false),
+                commit.community(), player, tier,
+                new ReputationIncidentCreatedEvent(request.playerId(), player, view),
+                incident.id(), incident.type(), request.source());
+
+        int appliedDelta = commit.newScore() - commit.oldScore();
+        if (McaReputationConfig.debugLogging()) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] {} recorded {} for {} in {}: {} -> {} ({}{}), tier {}",
+                    request.source(), request.incidentType(), request.playerId(),
+                    request.community().asString(), commit.oldScore(), commit.newScore(),
+                    appliedDelta >= 0 ? "+" : "", appliedDelta, tier.newTierId);
+        }
+        return ReputationResult.applied(incident.id(), request.community(), commit.oldScore(),
+                commit.newScore(), appliedDelta, currentTierId(commit.oldScore()), tier.newTierId,
+                tier.firstTime);
+    }
+
+    /**
+     * What the canonical half of a record transaction produced: either a refusal, or the committed
+     * incident and the scores around it, with the tier transition and the publication still to come.
+     *
+     * <p>Split out so {@link #recordSuperseding} can run the same creation path with its publication
+     * deferred, and then announce one net change instead of two (§5 F05, DD8).
+     */
+    private record Commit(@Nullable ReputationResult refusal, @Nullable IncidentRecord incident,
+                          @Nullable PlayerReputationRecord playerRecord,
+                          @Nullable CommunityReputationRecord community,
+                          int oldScore, int newScore, long now) {
+
+        boolean created() {
+            return incident != null;
+        }
+    }
+
+    /** Steps 1-11 of the §18 transaction: everything up to and including the canonical commit. */
+    private static Commit commit(ServiceContext ctx, ReputationRequest request) {
         // 1. server thread
         if (!ctx.isServerThread()) {
             McaReputation.LOGGER.error("[MCA: Reputation] record() called off the server thread from {}; "
                             + "refusing. Writes are server-thread only (spec 25).",
                     request.source());
-            return ReputationResult.rejected(ReputationResult.Reason.INVALID, request.community());
+            return refused(ReputationResult.rejected(ReputationResult.Reason.INVALID, request.community()));
         }
         if (!McaReputationConfig.enabled()) {
-            return ReputationResult.rejected(ReputationResult.Reason.DISABLED, request.community());
+            return refused(ReputationResult.rejected(ReputationResult.Reason.DISABLED, request.community()));
         }
 
         // 3. definition
@@ -161,13 +421,24 @@ public final class ReputationService {
         if (maybeDefinition.isEmpty()) {
             McaReputation.LOGGER.warn("[MCA: Reputation] {} asked to record unknown incident type {}; ignoring",
                     request.source(), request.incidentType());
-            return ReputationResult.rejected(ReputationResult.Reason.UNKNOWN_INCIDENT, request.community());
+            return refused(ReputationResult.rejected(ReputationResult.Reason.UNKNOWN_INCIDENT,
+                    request.community()));
         }
         IncidentDefinition definition = maybeDefinition.get();
 
         ReputationSavedData data = ctx.data();
         PlayerReputationRecord playerRecord = data.getOrCreatePlayer(request.playerId());
         CommunityKey community = request.community();
+        // "Now" is the world clock; the request carries when the deed happened (§5 F10, DD4). A
+        // future occurrence time is a producer clock error and clamps to now rather than banking
+        // negative age; an older one is honest history and is aged below before it reaches the score.
+        long now = ctx.now();
+        long occurredAt = Math.min(request.gameTime(), now);
+        if (request.gameTime() > now && McaReputationConfig.debugLogging()) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] {} filed {} with occurrence time {} ahead of the "
+                    + "world clock {}; clamped", request.source(), request.incidentType(),
+                    request.gameTime(), now);
+        }
         int minScore = McaReputationConfig.minimumScore();
         int maxScore = McaReputationConfig.maximumScore();
 
@@ -179,26 +450,50 @@ public final class ReputationService {
                 CommunityReputationRecord existingCommunity = playerRecord.getOrCreate(community);
                 // The refusal still reports the community's *current* standing, so bring decay up to
                 // date first — a DUPLICATE answer with a stale score would disagree with the very next
-                // query.
-                if (McaReputationConfig.scoreDecayEnabled()
-                        && existingCommunity.reconcile(request.gameTime(), minScore, maxScore)) {
-                    data.setDirty();
-                }
+                // query. Through the gate, so replaying a deed cannot age a protected village.
+                publishReconcile(ctx, request.playerId(), community,
+                        ReconciliationService.reconcile(ctx, data, request.playerId(), community,
+                                now, ChangeCause.DECAY,
+                                ReconciliationService.Intent.QUERY));
                 if (McaReputationConfig.debugLogging()) {
                     McaReputation.LOGGER.debug("[MCA: Reputation] dedupe refused {} from {} (key '{}')",
                             request.incidentType(), request.source(), request.dedupeKey().get());
                 }
-                return ReputationResult.notApplied(ReputationResult.Reason.DUPLICATE, community,
-                        existingCommunity.score(), currentTierId(existingCommunity.score()));
+                // Hand back the id the first attempt produced. A companion that crashed between our
+                // commit and its own link write can only repair itself if the replay tells it what
+                // already exists.
+                return refused(ReputationResult.duplicate(existing.get().id(), community,
+                        existingCommunity.score(), currentTierId(existingCommunity.score())));
             }
+        }
+
+        // 4b. capacity, before anything is created (§5 F09, D5). Silently losing live contribution to
+        // satisfy a display cap is the defect; refusing the deed outright is honest, and because
+        // nothing has been written yet the refusal costs no partial commit, no receipt and no event.
+        long receiptHorizon = ctx.policy().receiptRetentionTicks();
+        Optional<CommunityReputationRecord> knownCommunity = playerRecord.community(community);
+        boolean noRoom = !playerRecord.canAdmitCommunity(community)
+                || knownCommunity.map(record -> !record.canAdmit(
+                        McaReputationConfig.maxIncidentsPerCommunity(), now, receiptHorizon))
+                        .orElse(false)
+                || (playerRecord.totalIncidentCount() >= McaReputationConfig.maxIncidentsPerPlayer()
+                        && !playerRecord.hasEvictableIncident(now, receiptHorizon));
+        if (noRoom) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] refused {} from {} for player {} in {}: the "
+                            + "ledger is full and nothing in it may be evicted. Clear a pin or raise "
+                            + "maxIncidentsPerCommunity.", request.incidentType(), request.source(),
+                    request.playerId(), community.asString());
+            return refused(ReputationResult.notApplied(ReputationResult.Reason.CAPACITY, community,
+                    knownCommunity.map(CommunityReputationRecord::score).orElse(0),
+                    currentTierId(knownCommunity.map(CommunityReputationRecord::score).orElse(0))));
         }
 
         CommunityReputationRecord communityRecord = playerRecord.getOrCreate(community);
 
         // 5. reconcile outstanding decay so oldScore is honest
-        if (McaReputationConfig.scoreDecayEnabled()) {
-            communityRecord.reconcile(request.gameTime(), minScore, maxScore);
-        }
+        publishReconcile(ctx, request.playerId(), community,
+                ReconciliationService.reconcile(ctx, data, request.playerId(), community,
+                        now, ChangeCause.DECAY, ReconciliationService.Intent.MUTATE));
         int oldScore = communityRecord.score();
         String oldTierId = currentTierId(oldScore);
 
@@ -227,8 +522,8 @@ public final class ReputationService {
                     McaReputation.LOGGER.debug("[MCA: Reputation] {} went unwitnessed and is not retained; "
                             + "no public change", request.incidentType());
                 }
-                return ReputationResult.notApplied(ReputationResult.Reason.UNWITNESSED, community,
-                        oldScore, oldTierId);
+                return refused(ReputationResult.notApplied(ReputationResult.Reason.UNWITNESSED, community,
+                        oldScore, oldTierId));
             }
             delta = 0;
             visibility = IncidentVisibility.PRIVATE;
@@ -236,51 +531,204 @@ public final class ReputationService {
 
         // 7. create and store
         IncidentRecord incident = IncidentRecord.create(UUID.randomUUID(), request.incidentType(),
-                request.playerId(), community, request.gameTime(), request.source(), request.dedupeKey(),
+                request.playerId(), community, occurredAt, now, request.source(), request.dedupeKey(),
                 delta, visibility, definition.severity(), request.subjects());
         incident.addWitnesses(request.witnesses());
         incident.putContext(request.context());
         incident.setPinned(definition.pinned());
+        // Age the arriving contribution to the present before it ever reaches the score: a deed
+        // delivered late is worth what it is worth now, not what it was worth when it happened, or the
+        // mirrors, the toast and the tier event all announce a value it no longer earns.
+        incident.reconcile(definition.decay(), now);
         communityRecord.addIncident(incident);
         playerRecord.indexDedupe(incident);
 
         // 8. score and bounds
         communityRecord.recomputeScore(minScore, maxScore);
-        communityRecord.prune(McaReputationConfig.maxIncidentsPerCommunity(), request.gameTime(),
-                minScore, maxScore);
+        communityRecord.prune(McaReputationConfig.maxIncidentsPerCommunity(), now, minScore, maxScore,
+                receiptHorizon);
         playerRecord.enforcePlayerIncidentCap(McaReputationConfig.maxIncidentsPerPlayer(),
-                request.gameTime(), minScore, maxScore);
+                now, minScore, maxScore);
         int newScore = communityRecord.score();
-        int appliedDelta = newScore - oldScore;
 
-        // 9-10. tier, high-water, title
-        @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
-        if (player != null) {
-            playerRecord.setLastKnownName(player.getGameProfile().getName());
+        @Nullable ServerPlayer namedPlayer = ctx.onlinePlayer(request.playerId());
+        if (namedPlayer != null) {
+            playerRecord.setLastKnownName(namedPlayer.getGameProfile().getName());
         }
-        TierOutcome tier = applyTierTransition(ctx, playerRecord, communityRecord, player,
-                oldScore, newScore, request.gameTime());
 
         // 11. persist
         data.setDirty();
+        return new Commit(null, incident, playerRecord, communityRecord, oldScore, newScore, now);
+    }
 
-        // 12-13. mirrors, then events — both outside the canonical commit
-        notifyMirrors(request.playerId(), community, communityRecord);
-        ReputationIncidentView view = ReputationIncidentView.of(incident, request.gameTime());
-        postSafely(ctx, new ReputationIncidentCreatedEvent(request.playerId(), player, view));
-        if (appliedDelta != 0) {
-            postSafely(ctx, new ReputationChangedEvent(request.playerId(), player, community, oldScore,
-                    newScore, appliedDelta, incident.id(), incident.type(), request.source()));
-        }
-        tier.post(ctx, request.playerId(), player, community);
+    /** A transaction that never created anything: the refusal is the whole outcome. */
+    private static Commit refused(ReputationResult result) {
+        return new Commit(result, null, null, null, 0, 0, 0L);
+    }
 
-        if (McaReputationConfig.debugLogging()) {
-            McaReputation.LOGGER.debug("[MCA: Reputation] {} recorded {} for {} in {}: {} -> {} ({}{}), tier {}",
-                    request.source(), request.incidentType(), request.playerId(), community.asString(),
-                    oldScore, newScore, appliedDelta >= 0 ? "+" : "", appliedDelta, tier.newTierId);
+    // ------------------------------------------------------------------
+    // Superseding a precursor
+    // ------------------------------------------------------------------
+
+    /**
+     * Records a deed that absorbs an earlier one, as one encounter rather than two (§5 F05, DD8).
+     *
+     * <p>The native assault → killing upgrade and any future producer-owned crime pipeline share this
+     * one seam, which is what stops the two implementations from disagreeing. A beating worth
+     * {@code -8} followed by a killing worth {@code -40} totals {@code -40}: the precursor is folded,
+     * the successor carries the whole figure, and exactly one {@link ChangeCause#SUPERSEDE} change is
+     * published — never a refund promotion followed by a charge.
+     *
+     * <p>A spec that does not validate is not an error and never costs the player's deed: the successor
+     * is recorded plainly, the precursor keeps its weight, and the reason is logged at debug.
+     */
+    public static ReputationResult recordSuperseding(ReputationRequest successor, SupersedeSpec spec) {
+        return recordSupersedingWith(null, successor, spec);
+    }
+
+    /** Seam entry point: {@code ctx} may replace the server for tests; null derives it from the request. */
+    static ReputationResult recordSupersedingWith(@Nullable ServiceContext ctx, ReputationRequest successor,
+                                                  SupersedeSpec spec) {
+        try {
+            ServiceContext context = ctx != null ? ctx : ServiceContext.of(successor.server());
+            return supersedeInternal(context, successor, spec);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.error("[MCA: Reputation] superseding transaction failed for player {} "
+                            + "incident {}; nothing was written",
+                    successor == null ? "?" : successor.playerId(),
+                    successor == null ? "?" : successor.incidentType(), t);
+            return ReputationResult.rejected(ReputationResult.Reason.ERROR,
+                    successor == null ? null : successor.community());
         }
-        return ReputationResult.applied(incident.id(), community, oldScore, newScore, appliedDelta,
-                oldTierId, tier.newTierId, tier.firstTime);
+    }
+
+    private static ReputationResult supersedeInternal(ServiceContext ctx, ReputationRequest successor,
+                                                      SupersedeSpec spec) {
+        ReputationSavedData data = ctx.data();
+        CommunityKey community = successor.community();
+        long now = ctx.now();
+        Optional<IncidentRecord> maybePrecursor = spec == null || spec.precursorIncidentId() == null
+                ? Optional.empty()
+                : data.player(successor.playerId())
+                        .flatMap(record -> record.community(community))
+                        .flatMap(record -> record.incident(spec.precursorIncidentId()));
+        Optional<String> refusal = supersedeRefusal(maybePrecursor, successor, spec, now);
+        if (refusal.isPresent()) {
+            // A real deed is never dropped because its supersede terms did not hold.
+            if (McaReputationConfig.debugLogging()) {
+                McaReputation.LOGGER.debug("[MCA: Reputation] {} asked to supersede {} with {} but {}; "
+                                + "recording the successor on its own", successor.source(),
+                        spec == null ? "?" : spec.precursorIncidentId(), successor.incidentType(),
+                        refusal.get());
+            }
+            return recordInternal(ctx, successor);
+        }
+        IncidentRecord precursor = maybePrecursor.orElseThrow();
+
+        int minScore = McaReputationConfig.minimumScore();
+        int maxScore = McaReputationConfig.maximumScore();
+        CommunityReputationRecord communityRecord = data.player(successor.playerId())
+                .flatMap(record -> record.community(community))
+                .orElseThrow();
+        // The "before" score of the whole encounter, taken before the fold: what the one published
+        // change reports moving from.
+        publishReconcile(ctx, successor.playerId(), community,
+                ReconciliationService.reconcile(ctx, data, successor.playerId(), community, now,
+                        ChangeCause.DECAY, ReconciliationService.Intent.MUTATE));
+        int oldScore = communityRecord.score();
+
+        // Fold first, so the successor's own delta lands on a ledger that no longer double-counts the
+        // lead-up. The pre-fold weight is snapshotted: an unseen killing must not refund the beating
+        // the village did see.
+        int foldedSettled = precursor.settledDelta();
+        int foldedCurrent = precursor.currentContribution();
+        precursor.foldInto(null, now);
+        communityRecord.recomputeScore(minScore, maxScore);
+
+        Commit commit = commit(ctx, successor);
+        if (!commit.created()) {
+            precursor.restoreContribution(foldedSettled, foldedCurrent, now);
+            communityRecord.recomputeScore(minScore, maxScore);
+            data.setDirty();
+            int score = communityRecord.score();
+            String tierId = currentTierId(score);
+            return new ReputationResult(false, commit.refusal().incidentId(), community, score, score, 0,
+                    tierId, tierId, false, false, commit.refusal().reason());
+        }
+        IncidentRecord incident = commit.incident();
+        if (incident.contributes()) {
+            precursor.linkSuccessor(incident.id());
+        } else {
+            precursor.restoreContribution(foldedSettled, foldedCurrent, now);
+        }
+        communityRecord.recomputeScore(minScore, maxScore);
+        int newScore = communityRecord.score();
+
+        @Nullable ServerPlayer player = ctx.onlinePlayer(successor.playerId());
+        TierOutcome tier = applyTierTransition(ctx, commit.playerRecord(), communityRecord, player,
+                oldScore, newScore, now);
+        data.setDirty();
+
+        // One publication for one encounter: the net old → new transition, cause SUPERSEDE.
+        ReputationIncidentView view = ReputationIncidentView.of(incident, now);
+        publishStandingChange(ctx,
+                standingChange(successor.playerId(), communityRecord, oldScore, newScore, tier,
+                        ChangeCause.SUPERSEDE, false),
+                communityRecord, player, tier,
+                new ReputationIncidentCreatedEvent(successor.playerId(), player, view),
+                incident.id(), incident.type(), successor.source());
+
+        McaReputation.LOGGER.debug("[MCA: Reputation] {} superseded {} with {} for {} in {}: {} -> {}",
+                successor.source(), precursor.id(), incident.id(), successor.playerId(),
+                community.asString(), oldScore, newScore);
+        return ReputationResult.applied(incident.id(), community, oldScore, newScore,
+                newScore - oldScore, currentTierId(oldScore), tier.newTierId, tier.firstTime);
+    }
+
+    /**
+     * Why these two deeds may not be treated as one encounter, or empty when they may. Validation runs
+     * before anything is folded or created, so a refusal costs nothing.
+     */
+    private static Optional<String> supersedeRefusal(Optional<IncidentRecord> maybePrecursor,
+                                                     ReputationRequest successor, SupersedeSpec spec,
+                                                     long now) {
+        if (spec == null || spec.precursorIncidentId() == null) {
+            return Optional.of("no precursor was named");
+        }
+        if (maybePrecursor.isEmpty()) {
+            return Optional.of("the precursor is not in this player's ledger for this community");
+        }
+        IncidentRecord precursor = maybePrecursor.get();
+        if (precursor.isSuperseded()) {
+            return Optional.of("the precursor was already superseded");
+        }
+        if (precursor.status() == IncidentStatus.DISPROVEN) {
+            return Optional.of("the precursor was disproven");
+        }
+        long occurredAt = Math.min(successor.gameTime(), now);
+        if (Math.abs(occurredAt - precursor.createdGameTime()) > Math.max(0L, spec.maxWindowTicks())) {
+            return Optional.of("the precursor is outside the " + spec.maxWindowTicks() + "-tick window");
+        }
+        if (spec.requireSharedSubject() && !sharesSubject(precursor, successor)) {
+            return Optional.of("the two deeds name no subject in common");
+        }
+        return Optional.empty();
+    }
+
+    /** Whether the successor and the precursor are about at least one of the same subjects. */
+    private static boolean sharesSubject(IncidentRecord precursor, ReputationRequest successor) {
+        for (var subject : successor.subjects()) {
+            Optional<UUID> uuid = subject.uuid();
+            if (uuid.isEmpty()) {
+                continue;
+            }
+            for (var candidate : precursor.subjects()) {
+                if (candidate.uuid().map(uuid.get()::equals).orElse(false)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -330,9 +778,12 @@ public final class ReputationService {
 
             int minScore = McaReputationConfig.minimumScore();
             int maxScore = McaReputationConfig.maximumScore();
-            if (McaReputationConfig.scoreDecayEnabled()) {
-                communityRecord.reconcile(gameTime, minScore, maxScore);
-            }
+            // Freeze-respecting: while frozen this only skips the clock forward, so a permitted
+            // explicit resolution still softens the incident but never runs hidden decay first
+            // (§5 F07).
+            publishReconcile(ctx, playerId, community,
+                    ReconciliationService.reconcile(ctx, data, playerId, community, gameTime,
+                            ChangeCause.DECAY, ReconciliationService.Intent.MUTATE));
 
             int oldScore = communityRecord.score();
             IncidentStatus oldStatus = incident.status();
@@ -353,15 +804,14 @@ public final class ReputationService {
                     oldScore, newScore, gameTime);
             data.setDirty();
 
-            notifyMirrors(playerId, community, communityRecord);
             ReputationIncidentView view = ReputationIncidentView.of(incident, gameTime);
-            postSafely(ctx, new ReputationIncidentResolvedEvent(playerId, player, view, oldStatus,
-                    oldContribution, source));
-            if (newScore != oldScore) {
-                postSafely(ctx, new ReputationChangedEvent(playerId, player, community, oldScore, newScore,
-                        newScore - oldScore, incident.id(), incident.type(), source));
-            }
-            tier.post(ctx, playerId, player, community);
+            publishStandingChange(ctx,
+                    standingChange(playerId, communityRecord, oldScore, newScore, tier,
+                            ChangeCause.RESOLUTION, false),
+                    communityRecord, player, tier,
+                    new ReputationIncidentResolvedEvent(playerId, player, view, oldStatus,
+                            oldContribution, source),
+                    incident.id(), incident.type(), source);
 
             McaReputation.LOGGER.debug("[MCA: Reputation] {} resolved {} to {} for {} in {}: {} -> {}",
                     source, incident.type(), status.jsonName(), playerId, community.asString(),
@@ -388,6 +838,16 @@ public final class ReputationService {
                 source, gameTime);
     }
 
+    /** As above, with a speaker so a {@code known_to_speaker} selector can be evaluated. */
+    public static ResolutionResult resolveBySelector(MinecraftServer server, UUID playerId,
+                                                     CommunityKey community, IncidentQuery selector,
+                                                     @Nullable SpeakerContext speaker,
+                                                     IncidentStatus status, ResourceLocation source,
+                                                     long gameTime) {
+        return resolveBySelectorWith(ServiceContext.of(server), playerId, community, selector, speaker,
+                status, source, gameTime);
+    }
+
     static ResolutionResult resolveBySelectorWith(ServiceContext ctx, UUID playerId,
                                                   CommunityKey community, IncidentQuery selector,
                                                   IncidentStatus status, ResourceLocation source,
@@ -411,6 +871,244 @@ public final class ReputationService {
             return ResolutionResult.notApplied(ResolutionResult.Reason.NOT_FOUND);
         }
         return resolveWith(ctx, playerId, community, candidates.get(0).id(), status, source, gameTime);
+    }
+
+    // ------------------------------------------------------------------
+    // Speaker-aware queries and bound resolution (F12)
+    // ------------------------------------------------------------------
+
+    /**
+     * The incidents a selector picks out, evaluated on behalf of one villager.
+     *
+     * <p>{@link IncidentQuery#knownToSpeaker()} is a real constraint and this is the only path that can
+     * honour it: awareness belongs to a villager, not to an incident. Without a speaker the query is
+     * answered with nothing rather than with everything (Sec. 6 "Speaker-aware query") - an over-broad
+     * answer is the failure mode a knowledge filter exists to prevent.
+     */
+    public static List<ReputationIncidentView> selectIncidents(MinecraftServer server, UUID playerId,
+                                                               CommunityKey community, IncidentQuery query,
+                                                               @Nullable SpeakerContext speaker,
+                                                               long gameTime) {
+        return selectIncidentsWith(ServiceContext.of(server), playerId, community, query, speaker, gameTime);
+    }
+
+    static List<ReputationIncidentView> selectIncidentsWith(ServiceContext ctx, UUID playerId,
+                                                            CommunityKey community, IncidentQuery query,
+                                                            @Nullable SpeakerContext speaker,
+                                                            long gameTime) {
+        if (query == null || playerId == null || community == null) {
+            return List.of();
+        }
+        if (query.knownToSpeaker() && (speaker == null || speaker.speakerId() == null)) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] a known_to_speaker selector arrived with no "
+                    + "speaker; answering with nothing rather than with everything");
+            return List.of();
+        }
+        // The ordinary ledger read, which reconciles and already drops superseded records.
+        List<ReputationIncidentView> candidates =
+                recentIncidentsWith(ctx, playerId, community, Integer.MAX_VALUE, gameTime);
+        if (query.knownToSpeaker()) {
+            int min = McaReputationConfig.minRumorDelayTicks();
+            int max = McaReputationConfig.maxRumorDelayTicks();
+            candidates = candidates.stream()
+                    .filter(view -> incidentWith(ctx, playerId, community, view.id())
+                            .map(record -> AwarenessResolver.knows(record, speaker.speakerId(),
+                                    speaker.resident(), gameTime, min, max))
+                            .orElse(false))
+                    .toList();
+        }
+        return query.select(candidates);
+    }
+
+    /** As {@link #resolveBySelector}, with a speaker so {@code known_to_speaker} can be evaluated. */
+    static ResolutionResult resolveBySelectorWith(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                                  IncidentQuery selector, @Nullable SpeakerContext speaker,
+                                                  IncidentStatus status, ResourceLocation source,
+                                                  long gameTime) {
+        if (selector == null || selector.isEmpty()) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] {} tried to resolve an incident with an empty "
+                    + "selector; refusing to pick arbitrarily", source);
+            return ResolutionResult.notApplied(ResolutionResult.Reason.INVALID);
+        }
+        if (selector.knownToSpeaker() && (speaker == null || speaker.speakerId() == null)) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] {} used known_to_speaker in a resolve selector "
+                    + "with no speaker; refusing", source);
+            return ResolutionResult.notApplied(ResolutionResult.Reason.INVALID);
+        }
+        List<ReputationIncidentView> candidates =
+                selectIncidentsWith(ctx, playerId, community, selector, speaker, gameTime);
+        if (candidates.isEmpty()) {
+            return ResolutionResult.notApplied(ResolutionResult.Reason.NOT_FOUND);
+        }
+        return resolveWith(ctx, playerId, community, candidates.get(0).id(), status, source, gameTime);
+    }
+
+    /**
+     * Resolves one exact incident, exactly once (Sec. 6 "Bound resolution").
+     *
+     * <p>The difference from {@link #resolve} is the operation key. A committed reward binds to an
+     * incident id it already holds and to an identity it owns, so a producer that crashed between the
+     * transition and storing our answer replays the same key and is told what happened rather than
+     * moving the incident a second time. A superseded record is refused outright: its weight belongs to
+     * the incident that absorbed it, and resolving it would hand some of that weight back.
+     */
+    public static ResolutionResult resolveBound(MinecraftServer server, UUID playerId, CommunityKey community,
+                                                UUID incidentId, IncidentStatus status,
+                                                ResourceLocation source, String operationKey, long gameTime) {
+        return resolveBoundWith(ServiceContext.of(server), playerId, community, incidentId, status, source,
+                operationKey, gameTime);
+    }
+
+    static ResolutionResult resolveBoundWith(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                             UUID incidentId, IncidentStatus status, ResourceLocation source,
+                                             String operationKey, long gameTime) {
+        try {
+            if (playerId == null || community == null || incidentId == null || status == null
+                    || source == null) {
+                return ResolutionResult.notApplied(ResolutionResult.Reason.INVALID);
+            }
+            if (operationKey == null || operationKey.isBlank()) {
+                // No identity to be idempotent under; the plain resolution is already idempotent by
+                // status strength, and there is nothing to file a receipt against.
+                return resolveWith(ctx, playerId, community, incidentId, status, source, gameTime);
+            }
+            ReputationSavedData data = ctx.data();
+            String namespace = source.getNamespace();
+            Optional<PlayerReputationRecord> maybePlayer = data.player(playerId);
+            if (maybePlayer.isPresent()) {
+                Optional<OperationReceipt> stored =
+                        maybePlayer.get().findReceipt(namespace, community, operationKey);
+                if (stored.isEmpty()) {
+                    stored = maybePlayer.get().findLegacyReceipt(community, operationKey);
+                }
+                if (stored.isPresent()) {
+                    return replayBound(ctx, playerId, community, stored.get());
+                }
+            }
+
+            Optional<IncidentRecord> target = incidentWith(ctx, playerId, community, incidentId);
+            if (target.isEmpty()) {
+                // Deliberately no receipt: an id we have never seen may still arrive, and a stored
+                // terminal refusal would make a recoverable miss permanent.
+                return ResolutionResult.notApplied(ResolutionResult.Reason.NOT_FOUND);
+            }
+            if (target.get().isSuperseded()) {
+                recordBoundReceipt(ctx, playerId, community, namespace, operationKey,
+                        ReceiptOutcome.REFUSED_INVALID, Optional.of(incidentId), gameTime);
+                McaReputation.LOGGER.debug("[MCA: Reputation] {} tried to resolve superseded incident {}; "
+                        + "refused", source, incidentId);
+                return ResolutionResult.notApplied(ResolutionResult.Reason.INVALID);
+            }
+
+            ResolutionResult result = resolveWith(ctx, playerId, community, incidentId, status, source,
+                    gameTime);
+            ReceiptOutcome outcome = switch (result.reason()) {
+                case APPLIED -> ReceiptOutcome.APPLIED;
+                // Settled, not refused: the incident is already at an equal or stronger state, so the
+                // operation is complete and must never be attempted again.
+                case NOT_STRONGER -> ReceiptOutcome.ACCEPTED_NO_PUBLIC_INCIDENT;
+                case INVALID -> ReceiptOutcome.REFUSED_INVALID;
+                // NOT_FOUND, DISABLED and ERROR are retryable and store nothing.
+                default -> null;
+            };
+            if (outcome != null) {
+                recordBoundReceipt(ctx, playerId, community, namespace, operationKey, outcome,
+                        Optional.of(incidentId), gameTime);
+            }
+            return result;
+        } catch (Throwable t) {
+            McaReputation.LOGGER.error("[MCA: Reputation] resolveBound() failed for player {} incident {}; "
+                    + "nothing was written", playerId, incidentId, t);
+            return ResolutionResult.notApplied(ResolutionResult.Reason.ERROR);
+        }
+    }
+
+    /** Answers a replayed bound resolution from its receipt: the current state, and nothing moved. */
+    private static ResolutionResult replayBound(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                                OperationReceipt receipt) {
+        if (receipt.outcome() == ReceiptOutcome.REFUSED_INVALID) {
+            return ResolutionResult.notApplied(ResolutionResult.Reason.INVALID);
+        }
+        int score = ctx.data().score(playerId, community);
+        return receipt.incidentId()
+                .flatMap(id -> incidentWith(ctx, playerId, community, id))
+                .map(record -> new ResolutionResult(false, Optional.of(record.id()), record.status(),
+                        record.status(), record.currentContribution(), record.currentContribution(),
+                        score, score, ResolutionResult.Reason.NOT_STRONGER))
+                .orElseGet(() -> ResolutionResult.notApplied(ResolutionResult.Reason.NOT_STRONGER));
+    }
+
+    private static void recordBoundReceipt(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                           String namespace, String operationKey, ReceiptOutcome outcome,
+                                           Optional<UUID> incidentId, long gameTime) {
+        ReputationSavedData data = ctx.data();
+        data.getOrCreatePlayer(playerId).recordReceipt(new OperationReceipt(namespace, playerId, community,
+                operationKey, outcome, incidentId, gameTime, ctx.now()));
+        data.setDirty();
+    }
+
+    // ------------------------------------------------------------------
+    // Gossip story (F15 seam)
+    // ------------------------------------------------------------------
+
+    /**
+     * The newest thing this villager could tell about this player, including a correction they should
+     * acknowledge rather than repeat (Sec. 6 "Gossip story").
+     *
+     * <p>Ordinary deeds carry a {@link ExternalGossipCandidate} for the line itself. A disproven deed,
+     * or one a later incident absorbed, carries none: there is a change of belief to speak to and no
+     * baseline fact to state.
+     */
+    public static Optional<GossipStory> gossipStory(MinecraftServer server, UUID playerId,
+                                                    CommunityKey community, UUID villagerId,
+                                                    boolean resident, long gameTime) {
+        return gossipStoryWith(ServiceContext.of(server), playerId, community, villagerId, resident,
+                gameTime);
+    }
+
+    static Optional<GossipStory> gossipStoryWith(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                                 UUID villagerId, boolean resident, long gameTime) {
+        if (playerId == null || community == null || villagerId == null) {
+            return Optional.empty();
+        }
+        Optional<PlayerReputationRecord> maybePlayer = ctx.data().player(playerId);
+        if (maybePlayer.isEmpty()) {
+            return Optional.empty();
+        }
+        PlayerReputationRecord playerRecord = maybePlayer.get();
+        Optional<CommunityReputationRecord> maybeCommunity = playerRecord.community(community);
+        if (maybeCommunity.isEmpty()) {
+            return Optional.empty();
+        }
+        CommunityReputationRecord communityRecord = maybeCommunity.get();
+        CommunityMetadata metadata = communityRecord.metadata();
+        int minDelay = McaReputationConfig.minRumorDelayTicks();
+        int maxDelay = McaReputationConfig.maxRumorDelayTicks();
+
+        for (IncidentRecord incident : communityRecord.incidentsNewestFirst()) {
+            IncidentDefinition definition = IncidentRegistry.getOrUnknown(incident.type());
+            boolean correction = incident.isSuperseded() || incident.status() == IncidentStatus.DISPROVEN;
+            boolean tellable = !incident.isSuperseded() && AwarenessResolver.canTell(incident, definition,
+                    villagerId, resident, gameTime, 0L, minDelay, maxDelay);
+            if (!tellable && !(correction && AwarenessResolver.knows(incident, villagerId, resident,
+                    gameTime, minDelay, maxDelay))) {
+                continue;
+            }
+            Optional<ExternalGossipCandidate> candidate = tellable
+                    ? Optional.of(new ExternalGossipCandidate(incident.id(), incident.type(),
+                            incident.createdGameTime(), incident.ageTicks(gameTime), community.asString(),
+                            metadata.name(), definition.gossip().tone().orElse(""),
+                            definition.gossip().phrase().orElse(""),
+                            IncidentDisplay.gossipArguments(definition, incident,
+                                    playerRecord.lastKnownName()),
+                            incident.currentContribution()))
+                    : Optional.empty();
+            return Optional.of(new GossipStory(incident.id(), incident.type(), community,
+                    incident.status(), incident.storyRevision(), incident.currentContribution(),
+                    incident.baseDelta(), incident.createdGameTime(), incident.isSuperseded(),
+                    incident.supersededBy(), incident.status() == IncidentStatus.DISPROVEN, candidate));
+        }
+        return Optional.empty();
     }
 
     // ------------------------------------------------------------------
@@ -461,10 +1159,10 @@ public final class ReputationService {
             return Optional.empty();
         }
         CommunityReputationRecord communityRecord = maybeCommunity.get();
-        if (ctx.isServerThread() && McaReputationConfig.scoreDecayEnabled()
-                && communityRecord.reconcile(gameTime, McaReputationConfig.minimumScore(),
-                        McaReputationConfig.maximumScore())) {
-            data.setDirty();
+        if (ctx.isServerThread()) {
+            publishReconcile(ctx, playerId, community,
+                    ReconciliationService.reconcile(ctx, data, playerId, community, gameTime,
+                            ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
         }
         return Optional.of(buildSnapshot(playerRecord, communityRecord, gameTime));
     }
@@ -473,7 +1171,7 @@ public final class ReputationService {
                                                     CommunityReputationRecord communityRecord, long gameTime) {
         ReputationTierSet ladder = ReputationTiers.getDefault();
         int score = communityRecord.score();
-        List<ReputationIncidentView> views = communityRecord.incidentsNewestFirst().stream()
+        List<ReputationIncidentView> views = ledger(communityRecord).stream()
                 .map(incident -> ReputationIncidentView.of(incident, gameTime))
                 .toList();
         return new ReputationSnapshot(
@@ -505,16 +1203,14 @@ public final class ReputationService {
         }
         PlayerReputationRecord playerRecord = maybePlayer.get();
         // Same reconcile discipline as snapshot(): the community list feeds the screen's selector and
-        // the Journal, and §15.1 promises no read path shows a stale, un-decayed number.
-        if (ctx.isServerThread() && McaReputationConfig.scoreDecayEnabled()) {
-            boolean changed = false;
-            int minScore = McaReputationConfig.minimumScore();
-            int maxScore = McaReputationConfig.maximumScore();
-            for (CommunityReputationRecord community : playerRecord.communities()) {
-                changed |= community.reconcile(gameTime, minScore, maxScore);
-            }
-            if (changed) {
-                data.setDirty();
+        // the Journal, and §15.1 promises no read path shows a stale, un-decayed number. Every
+        // community here is one the caller is asking about — no other player's, and no community this
+        // list does not return.
+        if (ctx.isServerThread()) {
+            for (CommunityKey key : List.copyOf(playerRecord.communityKeys())) {
+                publishReconcile(ctx, playerId, key,
+                        ReconciliationService.reconcile(ctx, data, playerId, key, gameTime,
+                                ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
             }
         }
         List<ReputationSnapshot> out = new ArrayList<>();
@@ -557,17 +1253,17 @@ public final class ReputationService {
                                                             CommunityKey community, int limit,
                                                             long gameTime) {
         ReputationSavedData data = ctx.data();
+        if (ctx.isServerThread()) {
+            // Reconcile first, like snapshot(): a deed list showing pre-decay contributions would
+            // disagree with the score printed beside it. Only this community, and only through the gate.
+            publishReconcile(ctx, playerId, community,
+                    ReconciliationService.reconcile(ctx, data, playerId, community, gameTime,
+                            ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
+        }
         return data.player(playerId)
                 .flatMap(record -> record.community(community))
                 .map(record -> {
-                    // Reconcile first, like snapshot(): a deed list showing pre-decay contributions
-                    // would disagree with the score printed beside it.
-                    if (ctx.isServerThread() && McaReputationConfig.scoreDecayEnabled()
-                            && record.reconcile(gameTime, McaReputationConfig.minimumScore(),
-                                    McaReputationConfig.maximumScore())) {
-                        data.setDirty();
-                    }
-                    return record.incidentsNewestFirst().stream()
+                    return ledger(record).stream()
                             .limit(Math.max(0, limit))
                             .map(incident -> ReputationIncidentView.of(incident, gameTime))
                             .toList();
@@ -658,9 +1354,9 @@ public final class ReputationService {
             ReputationSavedData data = ctx.data();
             PlayerReputationRecord playerRecord = data.getOrCreatePlayer(playerId);
             CommunityReputationRecord communityRecord = playerRecord.getOrCreate(community);
-            if (McaReputationConfig.scoreDecayEnabled()) {
-                communityRecord.reconcile(gameTime, minScore, maxScore);
-            }
+            publishReconcile(ctx, playerId, community,
+                    ReconciliationService.reconcile(ctx, data, playerId, community, gameTime,
+                            ChangeCause.DECAY, ReconciliationService.Intent.MUTATE));
 
             int oldScore = communityRecord.score();
             String oldTierId = currentTierId(oldScore);
@@ -681,12 +1377,10 @@ public final class ReputationService {
                     oldScore, newScore, gameTime);
             data.setDirty();
 
-            notifyMirrors(playerId, community, communityRecord);
-            if (newScore != oldScore) {
-                postSafely(ctx, new ReputationChangedEvent(playerId, player, community, oldScore, newScore,
-                        newScore - oldScore, null, null, source));
-            }
-            tier.post(ctx, playerId, player, community);
+            publishStandingChange(ctx,
+                    standingChange(playerId, communityRecord, oldScore, newScore, tier,
+                            ChangeCause.ADMIN, false),
+                    communityRecord, player, tier, null, null, null, source);
 
             McaReputation.LOGGER.info("[MCA: Reputation] AUDIT {} {} baseline for {} in {}: {} -> {}",
                     source, absolute ? "set" : "adjusted", playerId, community.asString(), oldScore, newScore);
@@ -725,7 +1419,34 @@ public final class ReputationService {
 
     /** Brings one player's decay up to date across every community they know (§15.1). */
     public static boolean reconcile(MinecraftServer server, UUID playerId, long gameTime) {
-        return ReputationSavedData.get(server).reconcilePlayer(playerId, gameTime);
+        return reconcileWith(ServiceContext.of(server), playerId, gameTime);
+    }
+
+    /**
+     * Brings one community's decay up to date, and nothing else (§5 F07).
+     *
+     * <p>What an opinion query wants: reconciling every community a player knows so that one villager
+     * can have a view about one village is work nobody asked for.
+     */
+    public static void reconcileCommunity(MinecraftServer server, UUID playerId, CommunityKey community,
+                                          long gameTime) {
+        ServiceContext ctx = ServiceContext.of(server);
+        publishReconcile(ctx, playerId, community, ReconciliationService.reconcile(ctx, ctx.data(),
+                playerId, community, gameTime, ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
+    }
+
+    /**
+     * The sweep, through the gate and the standing-change envelope.
+     *
+     * <p>Periodic reconciliation used to move scores without telling anybody, so a mirror or a
+     * scoreboard could sit on a number the ledger had already left behind (§5 F07). Each community
+     * whose score actually moved now publishes one quiet {@link ChangeCause#DECAY} change: mirrors and
+     * displays follow, deed feedback does not.
+     */
+    static boolean reconcileWith(ServiceContext ctx, UUID playerId, long gameTime) {
+        ReputationSavedData data = ctx.data();
+        return ReconciliationService.reconcilePlayer(ctx.policy(), data, playerId, gameTime,
+                (community, outcome) -> publishReconcile(ctx, playerId, community, outcome));
     }
 
     // ------------------------------------------------------------------
@@ -866,17 +1587,15 @@ public final class ReputationService {
             // ReputationChangedEvent documents that it fires for a legacy import, and tier
             // transitions must announce themselves the same way they would for a deed.
             for (CommunityOutcome outcome : outcomes) {
-                playerRecord.community(outcome.community())
-                        .ifPresent(record -> notifyMirrors(request.playerId(), outcome.community(), record));
-            }
-            for (CommunityOutcome outcome : outcomes) {
-                if (outcome.newScore() != outcome.oldScore()) {
-                    postSafely(context, new ReputationChangedEvent(request.playerId(), player,
-                            outcome.community(), outcome.oldScore(), outcome.newScore(),
-                            outcome.newScore() - outcome.oldScore(), null, null,
-                            BuiltinIncidents.SOURCE_MIGRATION));
+                Optional<CommunityReputationRecord> record = playerRecord.community(outcome.community());
+                if (record.isEmpty()) {
+                    continue;
                 }
-                outcome.tier().post(context, request.playerId(), player, outcome.community());
+                publishStandingChange(context,
+                        standingChange(request.playerId(), record.get(), outcome.oldScore(),
+                                outcome.newScore(), outcome.tier(), ChangeCause.IMPORT, false),
+                        record.get(), player, outcome.tier(), null, null, null,
+                        BuiltinIncidents.SOURCE_MIGRATION);
             }
 
             McaReputation.LOGGER.info("[MCA: Reputation] migrated {} for player {}: {}",
@@ -896,6 +1615,20 @@ public final class ReputationService {
     // Shared internals
     // ------------------------------------------------------------------
 
+    /**
+     * The incidents any caller is allowed to be shown or to select against: newest first by occurrence,
+     * minus anything a successor absorbed.
+     *
+     * <p>One collection point, so a superseded record is never an amends candidate, a resolution
+     * selector target, a gossip candidate, or a line on the standing screen (§5 F08). It stays in
+     * the store as chronology, and the admin tooling can still see it.
+     */
+    private static List<IncidentRecord> ledger(CommunityReputationRecord record) {
+        return record.incidentsNewestFirst().stream()
+                .filter(incident -> !incident.isSuperseded())
+                .toList();
+    }
+
     /** The tier id for a score on the default ladder. */
     public static String currentTierId(int score) {
         return ReputationTiers.getDefault().tierFor(score).id();
@@ -912,6 +1645,49 @@ public final class ReputationService {
                                                    CommunityReputationRecord communityRecord,
                                                    @Nullable ServerPlayer player,
                                                    int oldScore, int newScore, long gameTime) {
+        return applyTierTransition(ctx, playerRecord, communityRecord, player, oldScore, newScore,
+                gameTime, false);
+    }
+
+    /**
+     * The ladder this transition runs on. One place, so the high-water map's key and the ladder the
+     * thresholds came from can never disagree - the persisted map has always been keyed by ladder, and
+     * only the reader hard-coded the default.
+     */
+    private static ResourceLocation ladderId() {
+        return ReputationTiers.DEFAULT_ID;
+    }
+
+    /** A player's high-water tier on one ladder, read-only: it creates nothing and reconciles nothing. */
+    public static Optional<String> tierHighWater(MinecraftServer server, UUID playerId,
+                                                 CommunityKey community, ResourceLocation ladder) {
+        if (server == null) {
+            return Optional.empty();
+        }
+        return tierHighWaterWith(ServiceContext.of(server), playerId, community, ladder);
+    }
+
+    static Optional<String> tierHighWaterWith(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                              ResourceLocation ladder) {
+        if (playerId == null || community == null) {
+            return Optional.empty();
+        }
+        return ctx.data().player(playerId)
+                .flatMap(record -> record.community(community))
+                .flatMap(record -> record.tierHighWater(ladder == null ? ladderId() : ladder));
+    }
+
+    /**
+     * @param quiet a background cause: the high-water mark does not advance, no title is granted, and
+     *              the transition is never reported as a first time. Ageing into a tier is not the same
+     *              as earning it.
+     */
+    private static TierOutcome applyTierTransition(ServiceContext ctx, PlayerReputationRecord playerRecord,
+                                                   CommunityReputationRecord communityRecord,
+                                                   @Nullable ServerPlayer player,
+                                                   int oldScore, int newScore, long gameTime,
+                                                   boolean quiet) {
+        ResourceLocation ladderId = ladderId();
         ReputationTierSet ladder = ReputationTiers.getDefault();
         ReputationTierSet.Transition transition = ladder.transition(oldScore, newScore);
         String newTierId = transition.to().id();
@@ -919,24 +1695,44 @@ public final class ReputationService {
             return new TierOutcome(false, transition.from().id(), newTierId, 0, 0, false);
         }
 
-        String highWater = communityRecord.tierHighWater(ReputationTiers.DEFAULT_ID).orElse(null);
+        String highWater = communityRecord.tierHighWater(ladderId).orElse(null);
         if (highWater == null) {
             // Seed from the tier the player already stood in: the tier you started with is not a new
             // personal best when you return to it after a dip, and without the seed the first upward
             // crossing back into it would fire a first-time toast and grant its title.
             highWater = transition.from().id();
-            communityRecord.setTierHighWater(ReputationTiers.DEFAULT_ID, highWater);
+            communityRecord.setTierHighWater(ladderId, highWater);
         }
-        boolean firstTime = transition.upward() && ladder.isNewHighWater(newTierId, highWater);
+        boolean firstTime = !quiet && transition.upward() && ladder.isNewHighWater(newTierId, highWater);
         if (firstTime) {
-            communityRecord.setTierHighWater(ReputationTiers.DEFAULT_ID, newTierId);
+            int firstUnearned = ladder.indexOf(highWater) + 1;
+            communityRecord.setTierHighWater(ladderId, newTierId);
             if (McaReputationConfig.tierTitlesEnabled()) {
-                transition.to().grantsTitle().ifPresent(title -> TitleService.grant(ctx,
-                        playerRecord.playerId(), player, communityRecord.key(), title));
+                // Every milestone the jump passed through, not only the one it landed on (F13). A
+                // single admin set from 0 to 300 crosses Honored on its way to Revered, and the badge
+                // for a tier you have stood in is not owed to how you got there. One change, one tier
+                // notification, several badges.
+                grantCrossedMilestones(ctx, playerRecord, communityRecord, player, ladder,
+                        firstUnearned, ladder.indexOf(newTierId));
             }
         }
         return new TierOutcome(true, transition.from().id(), newTierId,
                 ladder.indexOf(transition.from().id()), ladder.indexOf(newTierId), firstTime);
+    }
+
+    /**
+     * Grants the title of every ladder rung from {@code fromIndex} to {@code toIndex} inclusive that
+     * declares one. Grants are idempotent, so a milestone the player already holds costs a lookup and
+     * nothing else.
+     */
+    private static void grantCrossedMilestones(ServiceContext ctx, PlayerReputationRecord playerRecord,
+                                               CommunityReputationRecord communityRecord,
+                                               @Nullable ServerPlayer player, ReputationTierSet ladder,
+                                               int fromIndex, int toIndex) {
+        for (int i = Math.max(0, fromIndex); i <= toIndex && i < ladder.size(); i++) {
+            ladder.tiers().get(i).grantsTitle().ifPresent(title -> TitleService.grant(ctx,
+                    playerRecord.playerId(), player, communityRecord.key(), title));
+        }
     }
 
     /** A pending tier transition, posted after the score change it followed from. */
@@ -952,21 +1748,88 @@ public final class ReputationService {
     }
 
     /**
+     * The standing-change envelope every canonical mutation publishes through (§6 "Standing change").
+     *
+     * <p>One semantic event, one publication, in the §18 order: mirrors first, then the incident event
+     * that explains the change, then the change itself, then the tier transition that followed from it.
+     * A quiet cause still reaches mirrors and still updates the displayed tier — what it never does is
+     * replay deed feedback or claim a milestone.
+     */
+    private static void publishStandingChange(ServiceContext ctx, StandingChange change,
+                                              CommunityReputationRecord record,
+                                              @Nullable ServerPlayer player,
+                                              @Nullable TierOutcome tier,
+                                              @Nullable net.minecraftforge.eventbus.api.Event incidentEvent,
+                                              @Nullable UUID incidentId,
+                                              @Nullable ResourceLocation incidentType,
+                                              ResourceLocation source) {
+        notifyMirrors(change, record);
+        if (incidentEvent != null) {
+            postSafely(ctx, incidentEvent);
+        }
+        if (change.scoreChanged()) {
+            postSafely(ctx, new ReputationChangedEvent(change.player(), player, change.community(),
+                    change.oldScore(), change.newScore(), change.delta(), incidentId, incidentType,
+                    source, change.cause(), change.quiet()));
+        }
+        if (tier != null) {
+            tier.post(ctx, change.player(), player, change.community());
+        }
+    }
+
+    /** The envelope for a change the reconciliation gate made: always decay, always quiet. */
+    private static void publishReconcile(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                         ReconciliationService.ReconcileOutcome outcome) {
+        if (!outcome.scoreChanged()) {
+            return;
+        }
+        ReputationSavedData data = ctx.data();
+        Optional<PlayerReputationRecord> maybePlayer = data.player(playerId);
+        if (maybePlayer.isEmpty()) {
+            return;
+        }
+        PlayerReputationRecord playerRecord = maybePlayer.get();
+        Optional<CommunityReputationRecord> maybeCommunity = playerRecord.community(community);
+        if (maybeCommunity.isEmpty()) {
+            return;
+        }
+        CommunityReputationRecord record = maybeCommunity.get();
+        @Nullable ServerPlayer player = ctx.onlinePlayer(playerId);
+        TierOutcome tier = applyTierTransition(ctx, playerRecord, record, player, outcome.oldScore(),
+                outcome.newScore(), 0L, true);
+        publishStandingChange(ctx, new StandingChange(playerId, community, outcome.oldScore(),
+                        outcome.newScore(), tier.oldTierId(), tier.newTierId(), ReputationTiers.DEFAULT_ID,
+                        record.tierHighWater(ReputationTiers.DEFAULT_ID).orElse(null),
+                        outcome.revision(), ChangeCause.DECAY, true),
+                record, player, tier, null, null, null, BuiltinIncidents.SOURCE_CORE);
+    }
+
+    /** Builds the envelope for a change the service itself made, bumping the revision when it moved. */
+    private static StandingChange standingChange(UUID playerId, CommunityReputationRecord record,
+                                                 int oldScore, int newScore, TierOutcome tier,
+                                                 ChangeCause cause, boolean quiet) {
+        return new StandingChange(playerId, record.key(), oldScore, newScore, tier.oldTierId(),
+                tier.newTierId(), ReputationTiers.DEFAULT_ID,
+                record.tierHighWater(ReputationTiers.DEFAULT_ID).orElse(null),
+                newScore == oldScore ? record.revision() : record.bumpRevision(), cause, quiet);
+    }
+
+    /**
      * Notifies every registered mirror. Failures are contained: §18 requires the canonical commit to
      * remain valid when integration code throws, so a broken add-on costs a log line and a stale
      * fallback copy, never the player's actual standing.
      */
-    private static void notifyMirrors(UUID playerId, CommunityKey community,
-                                      CommunityReputationRecord record) {
+    private static void notifyMirrors(StandingChange change, CommunityReputationRecord record) {
         if (MIRRORS.isEmpty() || !McaReputationConfig.mirrorQuestsFallbackState()) {
             return;
         }
-        String highWater = record.tierHighWater(ReputationTiers.DEFAULT_ID).orElse(null);
         for (ReputationMirror mirror : MIRRORS) {
             try {
-                mirror.mirrorScore(playerId, community, record.score(), ReputationTiers.DEFAULT_ID, highWater);
+                // mirrorStanding, not mirrorScore: the default body calls the old method, so a mirror
+                // written against 0.4.0 keeps working unchanged.
+                mirror.mirrorStanding(change);
                 for (ResourceLocation title : record.titles()) {
-                    mirror.mirrorVillageTitle(playerId, community, title);
+                    mirror.mirrorVillageTitle(change.player(), change.community(), title);
                 }
             } catch (Throwable t) {
                 McaReputation.LOGGER.error("[MCA: Reputation] mirror '{}' threw; the canonical commit stands",

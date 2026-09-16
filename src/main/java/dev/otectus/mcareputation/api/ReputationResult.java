@@ -45,6 +45,11 @@ public record ReputationResult(
         UNWITNESSED,
         /** The request failed validation; nothing was written. */
         INVALID,
+        /**
+         * The ledger is full of history that may not be evicted, so the deed was refused rather than
+         * recorded over the cap (spec 5 F09, D5). Nothing was written; clearing a pin makes room.
+         */
+        CAPACITY,
         /** An unexpected failure was contained; nothing was written. */
         ERROR
     }
@@ -61,6 +66,24 @@ public record ReputationResult(
     public static ReputationResult notApplied(Reason reason, CommunityKey community, int score, String tierId) {
         return new ReputationResult(false, Optional.empty(), community, score, score, 0,
                 tierId, tierId, false, false, reason);
+    }
+
+    /**
+     * A {@link Reason#DUPLICATE} outcome that names the incident the dedupe key already produced.
+     *
+     * <p>This is what makes a cross-mod write recoverable. A companion commits its own record, then
+     * crashes before it can store the incident id we returned; on restart it replays the same dedupe
+     * key. Without the id here it has no way to learn what the first attempt created, so it either
+     * loses the link forever or records a second incident to get one. Neither is acceptable, and the
+     * service already has the record in hand at the dedupe branch — it simply used to discard it.
+     *
+     * <p>Nothing was written, so {@code applied} is false and the delta is zero, exactly as with any
+     * other refusal. Only the identity is recovered.
+     */
+    public static ReputationResult duplicate(UUID existingIncidentId, CommunityKey community,
+                                             int score, String tierId) {
+        return new ReputationResult(false, Optional.ofNullable(existingIncidentId), community, score, score, 0,
+                tierId, tierId, false, false, Reason.DUPLICATE);
     }
 
     /** A no-op outcome for a request that never got far enough to resolve a score. */

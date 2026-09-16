@@ -252,13 +252,25 @@ best-known community — the correct answer.
 
 - **Server authority.** No client-supplied value gained trust; `resolveSelection` still validates a
   requested community against the store and a context entity against dimension, type and distance.
-- **Compat-layer isolation.** `OptionalClassloadTest` (4 checks: no MCA imports, no companion-mod
-  references in compiled classes, both companions optional in `mods.toml`, no client references from
-  server classes) still passes. The new `SnapshotSelection` and `SelectorMath` name no MCA type.
+- **Compat-layer isolation.** `OptionalClassloadTest` (5 checks: no MCA imports, no companion-mod
+  references in compiled classes, `McaReflect` still probes both known MCA package roots, no client
+  references from server classes, both companions optional in `mods.toml`) still passes. The new
+  `SnapshotSelection` and `SelectorMath` name no MCA type.
 - **Fail-closed defaults.** Nothing was loosened. `SnapshotSelection.unprompted` still answers "you
   are a stranger here" when that is genuinely true; it just no longer answers it when it is not.
-- **No protocol change.** `PROTOCOL_VERSION` stays `"2"`; no packet shape moved. The diagnosis did
-  not require it.
+- **No protocol change required by this diagnosis.** `PROTOCOL_VERSION` was `"2"` at the time of this
+  report; it has since moved to `"4"` for unrelated reasons (`network/ReputationNetwork.java:57`). The
+  diagnosis itself did not require a protocol bump.
+
+  **2026-09-08 addendum.** `buildSnapshot` and `RequestSnapshotC2S.resolveSelection` gained community
+  pagination: `RequestSnapshotC2S` carries a `page` index, `SnapshotS2C` carries `page`, `pageCount`,
+  and `totalCommunities`, and `ReputationBounds.MAX_SYNCED_COMMUNITIES`
+  (`reputation/ReputationBounds.java:65`) is now a **per-page** cap rather than a hard ceiling on the
+  community list (`network/ReputationNetwork.java:516-519`). The selection guarantees
+  this section and §2 hop 7b describe are preserved by construction: the selected community's detail
+  is built and sent for whichever page was requested, even when that community is not on it, so paging
+  can never become a fourth way to lose the read-key/write-key selection (`network/SnapshotPaging.java`,
+  `network/SnapshotSelection.java`).
 
 ---
 

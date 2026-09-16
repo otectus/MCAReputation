@@ -14,6 +14,8 @@ package dev.otectus.mcareputation.api;
  *
  * @since MCA: Reputation 0.3.0
  */
+import java.util.Optional;
+
 public interface CoreIncidentAuthorityRegistration extends AutoCloseable {
 
     /** The authority this handle registered. */
@@ -36,4 +38,9 @@ public interface CoreIncidentAuthorityRegistration extends AutoCloseable {
      */
     @Override
     void close();
+
+    /** Why the claim is not being honoured, when the claimant knows. Diagnostic only. */
+    default Optional<String> unavailableReason() {
+        return Optional.empty();
+    }
 }

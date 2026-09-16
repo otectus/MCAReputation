@@ -22,18 +22,18 @@ Machine-generated map of this mod. Read this first when picking the project up.
 
 ```
 dev.otectus.mcareputation                            3 files
-dev.otectus.mcareputation.api                        17 files
+dev.otectus.mcareputation.api                        29 files
 dev.otectus.mcareputation.api.event                  6 files
-dev.otectus.mcareputation.client                     11 files
+dev.otectus.mcareputation.client                     12 files
 dev.otectus.mcareputation.command                    2 files
 dev.otectus.mcareputation.community                  3 files
 dev.otectus.mcareputation.compat                     3 files
 dev.otectus.mcareputation.data                       4 files
-dev.otectus.mcareputation.event                      8 files
+dev.otectus.mcareputation.event                      10 files
 dev.otectus.mcareputation.incident                   15 files
-dev.otectus.mcareputation.network                    4 files
-dev.otectus.mcareputation.reputation                 12 files
-dev.otectus.mcareputation.state                      3 files
+dev.otectus.mcareputation.network                    5 files
+dev.otectus.mcareputation.reputation                 15 files
+dev.otectus.mcareputation.state                      6 files
 dev.otectus.mcareputation.util                       2 files
 ```
 
@@ -74,6 +74,7 @@ _No datagen providers detected — assets and data JSON are hand-written._
 Run `check_mod.py` for a full consistency check (missing models, lang keys, textures).
 
 <!-- MODMAP:AUTO:END — everything below is hand-maintained and preserved -->
+
 
 
 ## Current focus

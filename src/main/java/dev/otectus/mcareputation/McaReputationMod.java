@@ -7,12 +7,15 @@ import dev.otectus.mcareputation.data.ReputationReloadListener;
 import dev.otectus.mcareputation.data.StandingCondition;
 import dev.otectus.mcareputation.data.TierReachedTrigger;
 import dev.otectus.mcareputation.event.AssaultTracker;
+import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
+import dev.otectus.mcareputation.event.ReputationConfigLifecycle;
 import dev.otectus.mcareputation.event.ReputationGameplayEvents;
 import dev.otectus.mcareputation.event.StandingDisplay;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.network.ReputationFeedback;
 import dev.otectus.mcareputation.network.ReputationNetwork;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
+import dev.otectus.mcareputation.state.SaveQuarantine;
 import dev.otectus.mcareputation.reputation.Titles;
 import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.commands.synchronization.ArgumentTypeInfo;
@@ -23,6 +26,7 @@ import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.AddReloadListenerEvent;
 import net.minecraftforge.event.RegisterCommandsEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppedEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.ModLoadingContext;
@@ -75,6 +79,9 @@ public final class McaReputationMod {
 
         net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus()
                 .addListener(this::onCommonSetup);
+        // Config events are MOD-bus events; a listener on the Forge bus would simply never fire.
+        ReputationConfigLifecycle.register(
+                net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
         COMMAND_ARGUMENT_TYPES.register(
                 net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext.get().getModEventBus());
         LOOT_CONDITION_TYPES.register(
@@ -109,6 +116,17 @@ public final class McaReputationMod {
     }
 
     /**
+     * Writes anything the saved-data load had to reject to a file beside the level, once (§5 F09).
+     *
+     * <p>On start rather than during load: the level directory is only resolvable from a running
+     * server, and a diagnostic that costs a world its load would be worse than the problem it reports.
+     */
+    @SubscribeEvent
+    public void onServerStarted(ServerStartedEvent event) {
+        SaveQuarantine.writeOnce(event.getServer());
+    }
+
+    /**
      * Drops every piece of in-memory per-world state so a second world in the same JVM — a
      * singleplayer player returning to the menu and loading another save — starts clean rather than
      * inheriting the previous world's recent scuffles, pending feedback, or rate-limit stamps.
@@ -116,10 +134,14 @@ public final class McaReputationMod {
     @SubscribeEvent
     public void onServerStopped(ServerStoppedEvent event) {
         AssaultTracker.clear();
+        // Server-scoped only: the registrations themselves outlive the world, because companions
+        // register once per JVM from common setup.
+        CoreIncidentAuthorities.clearServerScoped();
         ReputationNetwork.clearAll();
         ReputationFeedback.clearAll();
         StandingDisplay.clearAll();
         ReputationGameplayEvents.resetTickCounter();
+        SaveQuarantine.clear();
         McaReputation.LOGGER.debug("[MCA: Reputation] server stopped; {} incident type(s), {} ladder(s), "
                         + "{} title(s) were live", IncidentRegistry.size(), ReputationTiers.ids().size(),
                 Titles.ids().size());

@@ -58,8 +58,20 @@ public final class ReputationBounds {
     /** Maximum incident summaries sent in one snapshot packet (§27.3). */
     public static final int MAX_SYNCED_INCIDENTS = 50;
 
-    /** Maximum communities listed in one snapshot packet (§27.3). */
+    /**
+     * Maximum communities listed on one <b>page</b> of a snapshot packet (§27.3). The true count of
+     * the player's communities travels beside the page, so nothing is silently omitted.
+     */
     public static final int MAX_SYNCED_COMMUNITIES = 64;
+
+    /**
+     * Delivery receipts kept per player (§5 F03, DD6). Matched to the dedupe index: a producer that
+     * can fill one can fill the other, and the two are answered from the same record.
+     */
+    public static final int MAX_RECEIPTS_PER_PLAYER = 512;
+
+    /** Maximum length of the producer namespace on a receipt. */
+    public static final int MAX_RECEIPT_NAMESPACE_LENGTH = 64;
 
     /**
      * Recent dedupe keys indexed per player for fast rejection. The index is rebuilt from the records

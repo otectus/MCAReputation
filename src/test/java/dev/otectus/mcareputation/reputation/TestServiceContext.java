@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * A {@link ServiceContext} for the transaction tests: an in-memory store, no online players, and an
@@ -26,6 +27,40 @@ final class TestServiceContext implements ServiceContext {
     /** Invoked after each post is recorded; throw from here to simulate a broken listener. */
     @Nullable
     Consumer<Event> listener;
+
+    // Null means "whatever the config says right now", which is what a test that flips a
+    // McaReputationConfig.TestOverrides flag after construction expects.
+    @Nullable
+    private ReputationPolicy policy;
+
+    // The game time the clock below reports unless a test installs a supplier of its own.
+    long gameTime;
+
+    // Explicit clock: a test that needs ordering sets it rather than reading a real level.
+    LongSupplier clock = () -> gameTime;
+
+    TestServiceContext() {
+        this.policy = null;
+    }
+
+    TestServiceContext(ReputationPolicy policy) {
+        this.policy = policy;
+    }
+
+    @Override
+    public ReputationPolicy policy() {
+        return policy != null ? policy : ServiceContext.super.policy();
+    }
+
+    /** Swaps the injected policy mid-test: what an operator flipping a config option looks like. */
+    void policy(@Nullable ReputationPolicy replacement) {
+        this.policy = replacement;
+    }
+
+    @Override
+    public long now() {
+        return clock.getAsLong();
+    }
 
     @Override
     public boolean isServerThread() {

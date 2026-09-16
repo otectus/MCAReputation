@@ -1,7 +1,7 @@
 # MCA: Reputation — production verification matrix
 
-> **Status: NOT YET RUN.** This file is the checklist that must pass before 0.2.0 is tagged as
-> released, not a record of it having passed.
+> **Status: NOT YET RUN.** This file is the checklist that must pass before a release is tagged,
+> not a record of it having passed.
 
 ## Why this file exists
 
@@ -70,8 +70,8 @@ Every row must reach the main menu, load a world, and produce no ERROR attributa
 
 | # | Combination | Client | Dedicated server | Notes |
 |---:|---|:---:|:---:|---|
-| 1 | MCA 7.6.20 + Reputation | ⬜ | ⬜ | |
-| 2 | MCA 7.7.0-beta.2 + Reputation | ⬜ | ⬜ | |
+| 1 | MCA 7.6.20 + Reputation | ⬜ | ⬜ | low end of `mca_version_range` |
+| 2 | MCA 7.7.1-alpha.2+1.20.1 + Reputation | ⬜ | ⬜ | current `mca_version` dev pin (`gradle.properties`) |
 | 3 | MCA + Quests only | ⬜ | ⬜ | must behave exactly as 1.0.0 did |
 | 4 | MCA + Conversations only | ⬜ | ⬜ | must behave exactly as 1.0.0 did |
 | 5 | MCA + Reputation + Quests | ⬜ | ⬜ | |
@@ -217,6 +217,51 @@ After each combination, confirm:
 - ERROR only where a bridge genuinely failed — and the game kept running
 - No player NBT, chat content, or server paths in any log line
 - No line emitted per tick
+
+## 6. 0.5.0 reliability track — runtime-only verification
+
+The 0.5.0 reliability work (`docs/MCA-Reputation-0.4.1-Work-Packages.md` §5) is covered by loader-independent
+unit tests everywhere it can be. The items below cannot be settled by `./gradlew check`, for the reasons
+given, and gate the release the same way the rest of this document does.
+
+| Item | Why it needs a real run | ⬜ |
+|---|---|:---:|
+| T01/T02 against the **real** MCA: Crime adapter | The unit suite uses a fake legacy authority; only the packaged Crime jar proves the per-kind claim and the `coreAuthorityUndeclaredKinds` default against Crime's actual `declaredKinds()` (or lack of one) | ⬜ |
+| T05/T06/T11 crash semantics | Two independently saved mod files (this mod's world save and a companion's own store) are not one transaction; only killing a real server between the two saves proves recovery | ⬜ |
+| T12–T15 in-game | Damage events, witness line of sight, and NPC-vs-player actor kind all need a running world | ⬜ |
+| T24–T26, T32, T33 | MCA: Quests and MCA: Conversations turn-in and dialogue flows | ⬜ |
+| T34/T35 rendering | GUI scale, long village/player names, translated text, and a foreign (operator-created) scoreboard objective all need a real client | ⬜ |
+| T36 datapack reload | Needs a real `/reload` listener and live registries | ⬜ |
+| T38 — world A stop, world B start, same JVM | Two servers in one process is how a dev environment or a proxy-restarted server behaves; this is where an authority registration that was released on stop (rather than kept, per DD10) would silently leave a companion unclaimed in the second world | ⬜ |
+| Protocol mismatch | An old client against a new server (or vice versa) needs a real handshake; `PROTOCOL_VERSION` moved `"3"` → `"4"` this release | ⬜ |
+| Sleeping witnesses | This mod's basic visual witness resolver does not explicitly exclude sleeping villagers. Verify event wake ordering; a directly harmed victim who wakes should still know the act even if third-party sleeping observers should not | ⬜ |
+| Cure identity | Verify curer/converted-entity identity survives the actual MCA conversion chain, chunk unload, re-infection/re-cure, and an offline curer | ⬜ |
+| Raid victory timing | Verify hero-effect/raid-victory timing, raid state, player position, multiple defenders, and that a duplicate effect application does not double-credit | ⬜ |
+| Rescue attribution | Verify real rescue vs. incidental mob kill vs. repeated staged combat, projectile/pet attribution, and two players present; credit once, with the bounded cooldown holding | ⬜ |
+| MCA reflection binding, per supported MCA line | `McaReflect` resolves MCA by name at runtime; verify against production names/remapping for every MCA build the release actually claims to support, not just the one used in development | ⬜ |
+
+### Addon combination matrix
+
+Eight combinations with this mod present, from the implementation plan's verification section (§10). "Present"
+means the packaged adapter loads and reports the expected capabilities from `McaReputationApi.capabilities(...)`
+— not simply that the jar is in `mods/`.
+
+| # | Quests | Conversations | Crime | Main check | ⬜ |
+|---:|:---:|:---:|:---:|---|:---:|
+| 1 | Absent | Absent | Absent | Native deeds, private/witnessed behavior, decay, commands, Standing screen | ⬜ |
+| 2 | Present | Absent | Absent | Quest awards, exact-target restitution, title mirrors, legacy import | ⬜ |
+| 3 | Absent | Present | Absent | Standing/opinion checks, amends fallback, narrative acknowledgment | ⬜ |
+| 4 | Absent | Absent | Present | Authority split (F01), public/legal separation, delivery and resolution recovery | ⬜ |
+| 5 | Present | Present | Absent | Conversation-to-quest handoff with a bound public incident | ⬜ |
+| 6 | Present | Absent | Present | Crime restitution and quest completion without a dialogue dependency | ⬜ |
+| 7 | Absent | Present | Present | Legal settlement, public correction, personal response without a quest dependency | ⬜ |
+| 8 | Present | Present | Present | Full amends loop, deed parity, title consistency, multiplayer and reload | ⬜ |
+
+Also run the corresponding eight combinations **without** this mod installed (including the empty-addon
+baseline), to confirm optional classloading and each companion's own fallback behaviour still holds. Most
+of those controls can be automated startup/contract smoke tests; reserve full gameplay sessions for the
+combinations above that exercise a changed path. Test **disabling** an installed integration separately
+from **uninstalling** it — those are different states with different retained work.
 
 ## Sign-off
 

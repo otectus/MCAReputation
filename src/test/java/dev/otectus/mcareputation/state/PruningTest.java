@@ -42,7 +42,8 @@ class PruningTest {
 
     /**
      * The invariant that makes pruning acceptable at all: a player's score is bit-for-bit unchanged by
-     * losing the explanation for it (§13.5).
+     * pruning (§13.5). Since §5 F09 it holds for a stronger reason than folding — a record that still
+     * carries weight is not evictable at all, so the cap is exceeded rather than live history absorbed.
      */
     @Test
     void scoreIsPreservedExactlyAcrossPruning() {
@@ -55,19 +56,24 @@ class PruningTest {
         assertEquals(10, before);
 
         List<IncidentRecord> removed = record.prune(2, 1000L, MIN, MAX);
-        assertEquals(2, removed.size());
-        assertEquals(2, record.incidentCount());
+        assertTrue(removed.isEmpty(), "everything here still counts, so nothing may be evicted");
+        assertEquals(4, record.incidentCount());
         assertEquals(before, record.score(), "the number the player sees must not move");
     }
 
+    /**
+     * §5 F09: folding live weight into the baseline preserves today's number and changes tomorrow's —
+     * the baseline does not decay — so a contributing record is retained over the cap instead.
+     */
     @Test
-    void contributingIncidentsAreFoldedIntoBaselineBeforeRemoval() {
+    void contributingIncidentsAreNotEvictedAtAll() {
         CommunityReputationRecord record = communityWith(
                 incident(10, IncidentSeverity.MINOR, 0),
                 incident(5, IncidentSeverity.MINOR, 1));
         assertEquals(0, record.baseline());
         record.prune(1, 1000L, MIN, MAX);
-        assertEquals(10, record.baseline(), "the pruned incident's weight moved to the baseline");
+        assertEquals(0, record.baseline(), "nothing was absorbed, because nothing was dropped");
+        assertEquals(2, record.incidentCount());
         assertEquals(15, record.score());
     }
 
@@ -158,9 +164,9 @@ class PruningTest {
     }
 
     /**
-     * The invariant must hold at the clamp too. Folding one pruned incident at a time with a
-     * window-clamped baseline saturates the baseline and silently discards weight, so the surviving
-     * negative incident would then move the visible score — the exact bug this guards against.
+     * The invariant must hold at the clamp too, where folding used to be able to lose weight silently.
+     * It now holds the short way: a ledger of contributing records has nothing evictable in it, so the
+     * cap is exceeded and not one point moves.
      */
     @Test
     void pruningNearTheClampStillPreservesTheScoreExactly() {
@@ -178,26 +184,23 @@ class PruningTest {
         assertEquals(MAX, record.score(), "1400 - 300 saturates the +1000 ceiling");
 
         record.prune(2, 1000L, MIN, MAX);
-        assertEquals(2, record.incidentCount());
+        assertEquals(15, record.incidentCount(), "every one of them still counts");
         assertTrue(record.incident(surviving.id()).isPresent());
-        assertEquals(MAX, record.score(),
-                "the visible score is bit-for-bit unchanged even though the ledger folded past the clamp");
-        assertTrue(record.baseline() > MAX,
-                "the baseline holds the fold overflow; only the visible score is window-clamped");
+        assertEquals(MAX, record.score(), "the visible score is bit-for-bit unchanged");
+        assertEquals(0, record.baseline(), "and nothing was folded, so the baseline never moved");
     }
 
     /** The wide baseline must survive a save/load cycle, or the reload re-clamps and moves the score. */
     @Test
     void aBaselineHoldingFoldOverflowSurvivesTheRoundTrip() {
         CommunityReputationRecord record = new CommunityReputationRecord(TestFixtures.OVERWORLD_3);
-        for (int i = 0; i < 14; i++) {
-            record.addIncident(incident(100, IncidentSeverity.MINOR, i));
-        }
         IncidentRecord surviving = incident(-300, IncidentSeverity.MAJOR, 99);
         record.addIncident(surviving);
-        record.recomputeScore(MIN, MAX);
-        record.prune(2, 1000L, MIN, MAX);
+        // The wide baseline a fold leaves behind, written directly: pruning can no longer produce one,
+        // because live weight is never evicted, but an administrative write or an import still can.
+        record.addBaseline(1400, MIN, MAX);
         int scoreBefore = record.score();
+        assertEquals(MAX, scoreBefore);
         int baselineBefore = record.baseline();
 
         CommunityReputationRecord loaded =
