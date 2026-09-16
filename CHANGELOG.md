@@ -66,7 +66,7 @@ the `api.event` types here extend `net.neoforged.bus.api.Event`.
   100% / 100% / 50% / 25% / 0%, with a second ceiling per beneficiary so rotating who you help lowers
   the ceiling rather than resetting the allowance. Only a profile authored `commendable` may carry a
   policy at all: adverse and mixed deeds get full accountability. The counters are bounded (64 groups
-  and 128 subjects per community) and at capacity they refuse conservatively and evict nothing —
+  and 128 subjects per player per community) and at capacity they refuse conservatively and evict nothing —
   dropping anti-farm state and then granting full credit is the exploit itself.
 
 - **A villager's opinion now reads what it knows you for.** The facets a specific villager has
@@ -109,8 +109,8 @@ the `api.event` types here extend `net.neoforged.bus.api.Event`.
   resolves to `80` without a word in ordinary Gson, and for a quantity that is frozen onto player
   records forever there is nothing left to recover after the fact.
 
-- **The public profile API** — `api.profile`, twelve immutable types and eight operations on
-  `McaReputationApi`, plus `ReputationProfileChangedEvent` on the game bus. An unavailable answer is a
+- **The public profile API** — `api.profile`, twelve immutable types and nine profile methods on
+  `McaReputationApi` (seven operations plus a capability probe, two of them overloaded), plus `ReputationProfileChangedEvent` on the game bus. An unavailable answer is a
   real answer and says which kind it is: disabled, unpublished content, unresolvable target, migrating
   store, read-only store, or incomplete legacy history. An authored predicate fails **closed** on an
   unknown facet or tier id, treats unobserved as *not* negative evidence by default, and answers

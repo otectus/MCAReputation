@@ -95,7 +95,7 @@ Run `check_mod.py` for a full consistency check (missing models, lang keys, text
 > items, entities, or recipes — which is why every resource row above is zero. The five network
 > payloads are registered through `PayloadRegistrar`, not a `DeferredRegister`, so the generator does
 > not list them; they are `RequestSnapshotC2S`, `SnapshotS2C`, `OpenScreenS2C`, `ChangeS2C` and
-> `TierToastS2C` in `network/ReputationNetwork`. The other two files in `network/` are not payloads:
+> `TierToastS2C` in `network/ReputationNetwork`. The two files new in 0.6.0 are not payloads either:
 > `SnapshotCodec` holds the byte-budget measurement and `ProfileProjection` turns an API answer into
 > the wire records.
 >

@@ -364,7 +364,7 @@ Credit only ever *reduces*. A non-positive contribution is returned unchanged wh
 says, structurally rather than by a caller remembering to check, so no policy and no authoring mistake
 can make wrongdoing cheaper through repetition.
 
-The counters are bounded — 64 groups and 128 subjects per community — and at capacity they record a
+The counters are bounded — 64 groups and 128 subjects per player per community — and at capacity they record a
 conservative refusal and evict nothing. Dropping anti-farm state and then granting full credit is the
 exploit itself, whether a cap sweep or a save file does it.
 

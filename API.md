@@ -223,10 +223,6 @@ boolean                           hasExternalAuthority(CoreIncidentKind);
 boolean      isDecayImmune(MinecraftServer, CommunityKey);
 boolean      setDecayImmune(MinecraftServer, CommunityKey, boolean immune);
 
-// Core incident detection
-CoreIncidentAuthorityRegistration registerCoreIncidentAuthority(CoreIncidentAuthority);
-boolean                           hasExternalAuthority(CoreIncidentKind);
-
 // Public profiles (0.6.0)
 ProfileCapabilities                     profileCapabilities(MinecraftServer);   // null server allowed
 ProfileQueryResult<ProfileSnapshot>     getProfileDetailed(MinecraftServer, UUID player, CommunityKey);
@@ -431,8 +427,10 @@ answered from the community profile. A villager who genuinely knows nothing is `
 empty profile and a zero opinion, and that valid zero must not be replaced by the village's view.
 The facet opinion term is one capped contribution (`maxFacetOpinionAdjustment`, default 25), never a
 third independent bonus, and the final external Trust/Respect check contribution still obeys ±8.
-In 0.6.0 the observer's interpretation weights are the authored neutral defaults, reported as
-`TraitBasis.NEUTRAL_DEFAULT`.
+In 0.6.0 no shipped facet authors a `personality_overrides` weight, so every observer is interpreted
+at the authored default weights; the reported basis is still `TraitBasis.RESOLVED` whenever MCA's
+personality resolves, and `NEUTRAL_DEFAULT` only when it does not (a resolved profession alone is not
+enough).
 
 **`deliverProfiled`.** The same canonical commit as `deliver`/`recordSuperseding`: one dedupe rule, one
 receipt index, one admission decision, one publication order. `profileSelection` picks an *authored*
@@ -551,9 +549,10 @@ screen; if not, fall back to village-level standing.
 
 ## Network compatibility
 
-The network protocol version is `"5"` for this release. Clients and servers must match exactly at
-handshake, or the connection is rejected before any data travels. The version bumps on any change to
-the registered packet format.
+The network protocol version is `"6"` for this release (the Forge line is one behind at `"5"`; the
+two channels are separate lineages and are not wire-compatible in either case). Clients and servers
+must match exactly at handshake, or the connection is rejected before any data travels. The version
+bumps on any change to the registered packet format.
 
 ---
 

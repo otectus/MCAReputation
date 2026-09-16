@@ -8,8 +8,8 @@
 > touching `ReputationNetwork.buildSnapshot` or `resolveSelection`.
 >
 > Four things are named differently here, and are corrected in place below rather than left to trip a
-> reader: the public API version is `2` on this branch (`1` on Forge), the protocol version is `"5"`
-> (`"4"` on Forge), event-bus registration is NeoForge's, and MCA 1.21.1 ships un-relocated at
+> reader: the public API version is `2` on this branch (`1` on Forge), the protocol version is `"6"`
+> (`"5"` on Forge), event-bus registration is NeoForge's, and MCA 1.21.1 ships un-relocated at
 > `net.conczin.mca` rather than under Forgix's `forge.` prefix. S2 is entirely inside MCA: Quests and
 > is unaffected by the loader.
 
