@@ -192,6 +192,62 @@ public record IncidentProfileEvidence(
                     : resolution;
         }
 
+        /**
+         * This channel's credited units aged to {@code profileAgeTicks} under its own frozen lifetime
+         * and decay step (§9.3).
+         *
+         * <p>From the <em>credited</em> quantity, never from the stored {@code current}: aging is a
+         * function of age, so recomputing it from a value that has already aged would compound the
+         * decay and make the answer depend on how often the record happened to be read.
+         */
+        public long agedAt(long profileAgeTicks) {
+            return ProfileMath.remainingAt(credited, profileAgeTicks, lifetime, decayStep);
+        }
+
+        /**
+         * As {@link #agedAt}, after the frozen settlement multiplier a resolution left behind
+         * (§12.1).
+         *
+         * <p>Settle first, age second, both in subunits: a settlement is a statement about the deed
+         * ("this wrong has been atoned for"), not about the passage of time, so it scales the credited
+         * original exactly as {@code IncidentRecord.resolve} scales {@code baseDelta} rather than
+         * whatever decay had already left.
+         */
+        public long settledAt(long profileAgeTicks, int settlementBp) {
+            if (settlementBp <= 0) {
+                return 0L;
+            }
+            long settled = settlementBp >= ProfileMath.FULL_BP
+                    ? credited
+                    : ProfileMath.scaleByBasisPoints(credited, settlementBp);
+            return ProfileMath.remainingAt(settled, profileAgeTicks, lifetime, decayStep);
+        }
+
+        /**
+         * The same frozen channel with a new current contribution, clamped to the credited magnitude
+         * it can never exceed — the same relation {@link #load} refuses to read.
+         */
+        public Channel withCurrent(long value) {
+            long bounded = clampToCredited(value);
+            return bounded == current
+                    ? this
+                    : new Channel(facet, authored, credited, bounded, lifetime, decayStep, mode,
+                            resolution);
+        }
+
+        /**
+         * Keeps a derived contribution inside the two relations the load path also enforces: the sign
+         * of the credited quantity, and a magnitude no larger than it. Clamping rather than trusting
+         * means an arithmetic edge can only ever cost magnitude, never invent it.
+         */
+        private long clampToCredited(long value) {
+            if (credited == 0L) {
+                return 0L;
+            }
+            long magnitude = Math.min(Math.abs(value), Math.abs(credited));
+            return credited < 0L ? -magnitude : magnitude;
+        }
+
         /** Whether this is the recognition channel rather than a facet. */
         public boolean isRecognition() {
             return facet.isEmpty();
@@ -389,6 +445,69 @@ public record IncidentProfileEvidence(
     /** Whether the §19.2 pass may still upgrade this payload. */
     public boolean isEnrichmentCandidate() {
         return origin.isEnrichmentCandidate();
+    }
+
+    /** The summed magnitude of every channel's current contribution, in subunits. */
+    public long currentMagnitude() {
+        long total = 0L;
+        for (Channel channel : channels()) {
+            total = ProfileMath.add(total, Math.abs(channel.current()));
+        }
+        return total;
+    }
+
+    /**
+     * This payload recomputed at {@code profileAgeTicks}, with each channel's settlement multiplier
+     * supplied by {@code settlementBp} (§12.1, §12.2).
+     *
+     * <p>Three properties make this safe to call as often as anything asks:
+     *
+     * <ul>
+     *   <li><b>Derived, never destructive.</b> {@code authored} and {@code credited} are copied
+     *       through untouched. §9.4 freezes what the deed was worth, and P3 chose to derive the
+     *       present value from it rather than overwrite it, which is what lets a refused supersession
+     *       put the precursor's evidence back by reference.</li>
+     *   <li><b>Monotonic.</b> A recomputed contribution is taken only when it is closer to zero than
+     *       the stored one. Aging and settlement both reduce magnitude on their own, so this is
+     *       normally a no-op — and when it is not (a rewound clock, a stored value already below the
+     *       formula) the answer is the smaller one. §12.1's "no resurrection after a stronger
+     *       settlement" has to hold for every transition order, not just the ones a test tries.</li>
+     *   <li><b>Identity preserving.</b> Returns {@code this} when nothing moved, so a caller can use
+     *       reference equality to decide whether anything is worth marking dirty.</li>
+     * </ul>
+     */
+    public IncidentProfileEvidence settledAt(long profileAgeTicks,
+                                             java.util.function.ToIntFunction<Channel> settlementBp) {
+        if (recognition.isEmpty() && facets.isEmpty()) {
+            return this;
+        }
+        boolean moved = false;
+        Optional<Channel> settledRecognition = recognition;
+        if (recognition.isPresent()) {
+            Channel updated = settle(recognition.get(), profileAgeTicks, settlementBp);
+            moved = updated != recognition.get();
+            settledRecognition = moved ? Optional.of(updated) : recognition;
+        }
+        List<Channel> settledFacets = new ArrayList<>(facets.size());
+        for (Channel channel : facets) {
+            Channel updated = settle(channel, profileAgeTicks, settlementBp);
+            moved |= updated != channel;
+            settledFacets.add(updated);
+        }
+        if (!moved) {
+            return this;
+        }
+        return new IncidentProfileEvidence(schemaVersion, origin, profileId, ruleFingerprint,
+                contentGeneration, settledRecognition, settledFacets, credit, profileRevision);
+    }
+
+    private static Channel settle(Channel channel, long profileAgeTicks,
+                                  java.util.function.ToIntFunction<Channel> settlementBp) {
+        long computed = channel.settledAt(profileAgeTicks,
+                settlementBp == null ? ProfileMath.FULL_BP : settlementBp.applyAsInt(channel));
+        long current = channel.current();
+        long target = Math.abs(computed) <= Math.abs(current) ? computed : current;
+        return channel.withCurrent(target);
     }
 
     /** The same payload with a bumped profile revision (§9.4 "Revision"). */

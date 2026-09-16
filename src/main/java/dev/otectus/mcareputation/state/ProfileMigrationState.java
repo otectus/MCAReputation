@@ -108,10 +108,12 @@ public final class ProfileMigrationState {
         return stubbed;
     }
 
+    /** How many stubs have been upgraded. Best-effort; see {@link #advanced}. */
     public long enriched() {
         return enriched;
     }
 
+    /** How many records the manifest cannot speak for. Best-effort; see {@link #advanced}. */
     public long unenrichable() {
         return unenrichable;
     }
@@ -120,7 +122,23 @@ public final class ProfileMigrationState {
         return passes;
     }
 
-    /** Records progress after one budgeted pass, leaving the cursor where it stopped. */
+    /**
+     * Records progress after one budgeted pass, leaving the cursor where it stopped.
+     *
+     * <p>{@link #enriched()} and {@link #unenrichable()} are <b>best-effort counters</b>, and this is
+     * the method that makes them so. {@code setDirty} is not a durable commit, so a pass whose
+     * progress never reached disk runs again after a restart and counts the same records a second
+     * time. That is deliberate: the alternative is either a per-record "counted" marker on every
+     * incident, which is real save weight for a diagnostic, or making a repeated pass skip records —
+     * and a pass that skips is a pass that can leave a stub unenriched forever, which is the
+     * correctness property this design gives up nothing else to keep.
+     *
+     * <p>Both over-counts are safe in the direction that matters. Nothing decides an <em>answer</em>
+     * from these numbers: {@link #coverage} reads {@code stubbed} and {@code unenrichable} only as
+     * "was there ever legacy history", which over-counting can only keep {@code PARTIAL_LEGACY} —
+     * never turn into a false {@code COMPLETE} (I08). They are an operator's progress report, and
+     * {@code /mcareputation debug profilemigration} is where they are read.
+     */
     public void advanced(@Nullable UUID nextCursor, long newlyStubbed, long newlyEnriched,
                          long newlyUnenrichable) {
         this.cursor = nextCursor;
@@ -158,7 +176,15 @@ public final class ProfileMigrationState {
                 + (quarantinedPayloads > 0 ? ", " + quarantinedPayloads + " quarantined payload(s)" : "");
     }
 
-    /** Empty when there is nothing to say, so a save that never migrated writes no tag. */
+    /**
+     * Empty when there is nothing to say, so a save that never migrated writes no tag.
+     *
+     * <p>Note on the three counters that are written here: {@code stubbed} is exact (the structural
+     * migration creates each stub once), while {@code enriched} and {@code unenrichable} are
+     * <b>best-effort</b> and may over-count a record examined by a pass that was performed twice
+     * because its progress was never durably written. See {@link #advanced} for why that is the
+     * chosen trade and why no answer depends on it.
+     */
     public CompoundTag save() {
         CompoundTag tag = new CompoundTag();
         if (!pending && stubbed == 0L && enriched == 0L && unenrichable == 0L && passes == 0L) {

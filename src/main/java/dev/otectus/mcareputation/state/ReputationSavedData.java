@@ -78,6 +78,13 @@ public final class ReputationSavedData extends SavedData {
     private final Set<CommunityKey> decayImmune = new TreeSet<>();
     /** How far §19.2's historical enrichment has got. Persisted; see {@link ProfileMigrationState}. */
     private ProfileMigrationState profileMigration = ProfileMigrationState.complete();
+    /**
+     * §12.2's bounded policy epochs for profile aging. Deliberately <b>not persisted</b>: game time
+     * does not advance while the world is not running, so the intervals that need remembering are the
+     * ones this JVM could have observed, and {@link ProfileFreezeLog} documents exactly what a restart
+     * inside a freeze does instead of guessing.
+     */
+    private final ProfileFreezeLog profileFreeze = new ProfileFreezeLog();
     private int loadedVersion = FORMAT_VERSION;
 
     /**
@@ -99,6 +106,17 @@ public final class ReputationSavedData extends SavedData {
 
     public int loadedVersion() {
         return loadedVersion;
+    }
+
+    /**
+     * The bounded policy epochs profile aging is measured against (§12.2).
+     *
+     * <p>Owned by the store because it is per-world state that outlives any one operation, and read by
+     * {@code ReconciliationService} alone: a caller that wanted to subtract frozen intervals itself
+     * would be a second aging path, which is the bypass the gate exists to prevent.
+     */
+    public ProfileFreezeLog profileFreezeLog() {
+        return profileFreeze;
     }
 
     /**
@@ -225,6 +243,15 @@ public final class ReputationSavedData extends SavedData {
      */
     public boolean setDecayImmune(CommunityKey community, boolean immune) {
         if (community == null) {
+            return false;
+        }
+        if (!writable()) {
+            // I14: this used to move the flag in memory, report success and never persist it. An
+            // operator would see "immunity enabled", restart, and find the village ageing again with
+            // no error anyone saw. Refusing is the only answer a read-only store can honestly give.
+            McaReputation.LOGGER.warn("[MCA: Reputation] refused to {} decay immunity for {}: the saved "
+                            + "data was written by a newer format, so this store is read-only",
+                    immune ? "enable" : "disable", community.asString());
             return false;
         }
         boolean changed = immune ? decayImmune.add(community) : decayImmune.remove(community);

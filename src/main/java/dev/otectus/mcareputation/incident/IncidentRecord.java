@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation.incident;
 
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.profile.IncidentProfileDefinition;
 import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
 import dev.otectus.mcareputation.profile.ProfileMath;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
@@ -286,6 +287,24 @@ public final class IncidentRecord {
     }
 
     /**
+     * Whether this record still holds live profile subunits, which is what makes it unprunable
+     * (§12.3, I06).
+     *
+     * <p>Deliberately not "does its public facet value round to something": §8.3 keeps {@code
+     * rawFacet} meaningful for retention even when the displayed integer clamps or truncates to zero,
+     * because a later opposing deed needs the evidence that produced it. Capacity cleanup that
+     * consulted the display would discard exactly the records whose evidence is still in play.
+     */
+    public boolean hasLiveProfileEvidence() {
+        return profileContributes() && profileCurrentMagnitude() > 0L;
+    }
+
+    /** The summed magnitude of every profile channel's current contribution, in subunits. */
+    public long profileCurrentMagnitude() {
+        return profileEvidence == null ? 0L : profileEvidence.currentMagnitude();
+    }
+
+    /**
      * Attaches the frozen payload the accepting transaction computed (§9.4).
      *
      * <p>Whole-payload assignment, because the payload is immutable: staging, commit and rollback all
@@ -499,6 +518,117 @@ public final class IncidentRecord {
         }
     }
 
+    // --- the profile channel (second clock, §12.2) --------------------------
+
+    /**
+     * Brings the profile evidence up to date for {@code gameTime}, charging only the ticks that were
+     * not frozen (§12.2).
+     *
+     * <p>Called from {@code ReconciliationService} and nowhere else. The second clock exists because
+     * profiles can be switched off while scalar standing keeps ageing, so one clock would pay the
+     * disabled interval out as catch-up the moment they came back on. {@code frozenTicks} is how many
+     * of the ticks since this record was last observed a bounded policy epoch says were frozen —
+     * which is what makes "no catch-up" true even for an interval no query observed.
+     *
+     * @param frozenTicks ticks in {@code (lastProfileObservedGameTime, gameTime]} that must not age
+     *                    the profile channel; clamped into the interval
+     * @return the change in this record's total profile magnitude ({@code new - old}, so never
+     *         positive in practice); {@code 0} when nothing moved
+     */
+    public long reconcileProfile(long gameTime, long frozenTicks) {
+        if (superseded) {
+            // Terminal, exactly as the scalar channel treats it: a folded record contributes nothing
+            // by derivation (profileContributes()), so there is nothing left to age and its clock
+            // stays where the fold left it.
+            return 0L;
+        }
+        if (gameTime > lastProfileObservedGameTime) {
+            long interval = gameTime - lastProfileObservedGameTime;
+            long frozen = Math.max(0L, Math.min(frozenTicks, interval));
+            profileElapsedTicks = boundProfileElapsed(profileElapsedTicks + (interval - frozen));
+            lastProfileObservedGameTime = gameTime;
+        }
+        return settleProfileEvidence();
+    }
+
+    /**
+     * Advances the profile observation clock without ageing anything: the per-record half of a profile
+     * freeze, and the exact analogue of {@link #skipDecayTo}.
+     *
+     * <p>Forward only, and it moves {@code lastProfileObservedGameTime} alone. The skipped interval was
+     * never counted, so switching profiles back on cannot repay it.
+     */
+    public void skipProfileTo(long gameTime) {
+        if (gameTime > lastProfileObservedGameTime) {
+            lastProfileObservedGameTime = gameTime;
+        }
+    }
+
+    /**
+     * Recomputes every profile channel at the age the clock already holds, applying §12.1's
+     * resolution modes for the record's current status.
+     *
+     * <p>Two callers: profile reconciliation, immediately after it moves the clock, and
+     * {@link #resolve}, which moves the status instead. Settlement is not ageing, so a transition
+     * settles the evidence whether or not profile aging is currently frozen — refusing to record that
+     * an apology happened until a config switch is flipped back would make the switch a way to keep a
+     * wrong at full magnitude.
+     *
+     * @return the change in total profile magnitude; {@code 0} when nothing moved
+     */
+    public long settleProfileEvidence() {
+        if (profileEvidence == null) {
+            return 0L;
+        }
+        long before = profileEvidence.currentMagnitude();
+        IncidentProfileEvidence settled =
+                profileEvidence.settledAt(profileElapsedTicks, this::settlementBasisPoints);
+        if (settled == profileEvidence) {
+            return 0L;
+        }
+        profileEvidence = settled;
+        return settled.currentMagnitude() - before;
+    }
+
+    /**
+     * §12.1's table, per channel: what multiplier this record's status leaves on one frozen channel.
+     *
+     * <ul>
+     *   <li>{@code recognition} — no moral reduction at all. Becoming known for something is not
+     *       undone by apologising for it (§7.3); it fades on its own authored lifetime.</li>
+     *   <li>{@code historical} — retains the authored evidence for the same reason: the bravery or
+     *       the violence was actually demonstrated, whatever happened afterwards.</li>
+     *   <li>{@code evaluative} — applies the frozen, explicitly authored multipliers, which the codec
+     *       and the load path both validate as non-increasing. Because {@link IncidentStatus} only
+     *       ever transitions to a strictly stronger status and the multipliers never increase along
+     *       that progression, settlement is monotonic for every transition order without storing a
+     *       settlement state of its own.</li>
+     * </ul>
+     *
+     * <p>{@code DISPROVEN} is zero in every mode: a deed shown never to have happened supplies no
+     * evidence of anything, including notoriety. {@code EXPIRED} is bookkeeping rather than a
+     * resolution ({@link IncidentStatus#isResolved()}), so it settles nothing and leaves the channel
+     * to its ordinary fading.
+     */
+    private int settlementBasisPoints(IncidentProfileEvidence.Channel channel) {
+        if (status == IncidentStatus.DISPROVEN) {
+            return 0;
+        }
+        if (!status.isResolved() || channel == null) {
+            return ProfileMath.FULL_BP;
+        }
+        if (channel.mode() != IncidentProfileDefinition.ResolutionMode.EVALUATIVE) {
+            return ProfileMath.FULL_BP;
+        }
+        IncidentProfileDefinition.ResolutionMultipliers bp = channel.resolution();
+        return switch (status) {
+            case APOLOGIZED -> bp.apologizedBp();
+            case ATONED -> bp.atonedBp();
+            case FORGIVEN -> bp.forgivenBp();
+            default -> ProfileMath.FULL_BP;
+        };
+    }
+
     /**
      * Applies a resolution.
      *
@@ -532,6 +662,11 @@ public final class IncidentRecord {
         // below the resolved value, keep the smaller magnitude.
         int decayed = decay == null ? settledDelta : decay.contributionAt(settledDelta, decayElapsedTicks);
         currentContribution = towardZeroMin(decayed, before);
+        // The profile channel settles in the same mutation, at its own age and under its own
+        // per-channel modes (§12.1). Separately from the scalar multiplier on purpose: running every
+        // facet through the scalar penalty is what §12.1 forbids, because an apology does not undo
+        // the violence a killing demonstrated or the fame it earned.
+        settleProfileEvidence();
         touch(gameTime);
         return Optional.of(currentContribution - before);
     }

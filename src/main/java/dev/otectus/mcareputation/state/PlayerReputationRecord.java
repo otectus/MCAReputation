@@ -397,7 +397,8 @@ public final class PlayerReputationRecord {
     /** The whole-player sweep at the default receipt horizon, for a caller with no policy snapshot. */
     public int enforcePlayerIncidentCap(int maxPerPlayer, long gameTime, int minScore, int maxScore) {
         return enforcePlayerIncidentCap(minScore, maxScore, new AdmissionPreflight(Integer.MAX_VALUE,
-                maxPerPlayer, ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, gameTime));
+                maxPerPlayer, ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, gameTime,
+                ReputationPolicy.DEFAULT_PROTECT_PROFILE_EVIDENCE));
     }
 
     /**
@@ -428,9 +429,10 @@ public final class PlayerReputationRecord {
                 break;
             }
             int target = Math.max(1, community.incidentCount() - (total - maxPerPlayer));
+            // The same rules at a tighter per-community cap: the whole-player sweep must not be able
+            // to prune what the per-community refusal would have protected, profile evidence included.
             List<IncidentRecord> removed = community.prune(minScore, maxScore,
-                    new AdmissionPreflight(target, maxPerPlayer, preflight.receiptHorizonTicks(),
-                            preflight.evaluationTime()));
+                    preflight.withCommunityCap(target));
             total -= removed.size();
             prunedTotal += removed.size();
             // A community that yields nothing (everything pinned) must not end the sweep: the

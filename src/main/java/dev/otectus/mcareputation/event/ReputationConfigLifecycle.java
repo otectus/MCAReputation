@@ -2,7 +2,9 @@ package dev.otectus.mcareputation.event;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.reputation.ReconciliationService;
 import dev.otectus.mcareputation.reputation.ReputationPolicy;
+import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.server.MinecraftServer;
 import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.config.ModConfigEvent;
@@ -67,6 +69,17 @@ public final class ReputationConfigLifecycle {
             return; // no world; there is nothing on screen to clean up
         }
         server.execute(() -> {
+            try {
+                // §12.2: the profile-aging transition has to be captured when it happens. A record
+                // nobody reads during a disabled interval cannot tell afterwards whether the interval
+                // counted, so the reload — not the next query — is what records that it did not.
+                ReconciliationService.observeProfilePolicy(policy, ReputationSavedData.get(server),
+                        server.overworld().getGameTime());
+            } catch (Throwable t) {
+                McaReputation.LOGGER.warn("[MCA: Reputation] could not record the reloaded profile "
+                        + "policy transition; profile aging falls back to what the next read observes",
+                        t);
+            }
             try {
                 StandingDisplay.applyConfigChange(server, scoreboardWas, tabListWas);
             } catch (Throwable t) {

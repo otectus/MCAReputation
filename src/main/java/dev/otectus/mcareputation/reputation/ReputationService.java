@@ -648,15 +648,14 @@ public final class ReputationService {
                     + "world clock {}; clamped", request.source(), request.incidentType(),
                     request.gameTime(), now);
         }
-        int minScore = McaReputationConfig.minimumScore();
-        int maxScore = McaReputationConfig.maximumScore();
-        // The caps still come from the live config rather than the snapshot, as they always have; what
-        // the preflight fixes is that all three inputs and the clock are now read once and reused by
-        // the refusal, the eviction pass and the whole-player sweep alike.
-        AdmissionPreflight preflight = new AdmissionPreflight(
-                McaReputationConfig.maxIncidentsPerCommunity(),
-                McaReputationConfig.maxIncidentsPerPlayer(),
-                policy.receiptRetentionTicks(), now);
+        // Bounds and caps from the transaction's own snapshot, not from the live config. The four
+        // values used to be read here, mid-transaction, from a spec a config reload can replace
+        // between two statements: a deed could then be admitted against one cap and clamped against
+        // another minimum, and the refusal, the eviction pass and the whole-player sweep had no way to
+        // prove they had been decided by the same rules (I09).
+        int minScore = policy.minimumScore();
+        int maxScore = policy.maximumScore();
+        AdmissionPreflight preflight = AdmissionPreflight.of(policy, now);
 
         // 4. dedupe — before anything is created or reconciled, so a duplicate is genuinely free, and
         // read through data.player() so a refusal does not grow the save (I04).
@@ -1856,6 +1855,17 @@ public final class ReputationService {
             int minScore = McaReputationConfig.minimumScore();
             int maxScore = McaReputationConfig.maximumScore();
             ReputationSavedData data = ctx.data();
+            if (!data.writable()) {
+                // I14, before getOrCreatePlayer: an administrative set/add used to be applied in
+                // memory on a store that will never be written, log an AUDIT line, publish a standing
+                // change and be gone on restart. A refusal costs the same command and leaves no
+                // record of a change that did not happen.
+                McaReputation.LOGGER.warn("[MCA: Reputation] refused an administrative standing change "
+                                + "from {} for player {} in {}: the saved data was written by a newer "
+                                + "format, so this store is read-only", source, playerId,
+                        community == null ? "?" : community.asString());
+                return ReputationResult.rejected(ReputationResult.Reason.DISABLED, community);
+            }
             PlayerReputationRecord playerRecord = data.getOrCreatePlayer(playerId);
             CommunityReputationRecord communityRecord = playerRecord.getOrCreate(community);
             publishReconcile(ctx, playerId, community,
@@ -1980,6 +1990,17 @@ public final class ReputationService {
                 return ImportResult.notApplied(ImportResult.Reason.DISABLED);
             }
             ReputationSavedData data = context.data();
+            if (!data.writable() && !request.dryRun()) {
+                // I14: an import that "succeeded" against a read-only store would write the migration
+                // marker in memory, report the baselines as imported, and lose both on restart — and
+                // the marker is the thing that would then make a real import impossible. A dry run is
+                // still allowed: it writes nothing by definition and reporting what would happen is
+                // exactly what an operator needs while the store is latched.
+                McaReputation.LOGGER.warn("[MCA: Reputation] refused a legacy import from {} for player "
+                                + "{}: the saved data was written by a newer format, so this store is "
+                                + "read-only", request.sourceId(), request.playerId());
+                return ImportResult.notApplied(ImportResult.Reason.DISABLED);
+            }
             // A preview must be pure. Consult without creating — and below, never write the marker on
             // a dry run: a preview that marked the player migrated would make the real import
             // impossible forever (§32.2).

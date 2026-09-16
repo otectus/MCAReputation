@@ -21,19 +21,36 @@ import dev.otectus.mcareputation.reputation.ReputationPolicy;
  * refused (§5 F09, I06), because folding preserves today's displayed number while silently changing
  * tomorrow's decay, the per-villager opinion, and the amends that were still available.
  *
- * @param evaluationTime the single game time the whole operation is evaluated at
+ * @param evaluationTime             the single game time the whole operation is evaluated at
+ * @param protectLiveProfileEvidence whether a record holding live profile subunits is unprunable
+ *                                   (§12.3). Carried here rather than read where it is needed, for
+ *                                   the same reason as the caps: the refusal, the eviction pass and
+ *                                   the diagnostic must all answer from one snapshot of the rules.
  */
 public record AdmissionPreflight(int maxIncidentsPerCommunity, int maxIncidentsPerPlayer,
-                                 long receiptHorizonTicks, long evaluationTime) {
+                                 long receiptHorizonTicks, long evaluationTime,
+                                 boolean protectLiveProfileEvidence) {
+
+    /** Whether live profile evidence protects its record from pruning at this preflight's rules. */
+    public boolean protectsLiveProfileEvidence() {
+        return protectLiveProfileEvidence;
+    }
 
     /** The preflight for one operation: the transaction's own policy snapshot and its one clock read. */
     public static AdmissionPreflight of(ReputationPolicy policy, long evaluationTime) {
         if (policy == null) {
             return new AdmissionPreflight(Integer.MAX_VALUE, Integer.MAX_VALUE,
-                    ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, evaluationTime);
+                    ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, evaluationTime,
+                    ReputationPolicy.DEFAULT_PROTECT_PROFILE_EVIDENCE);
         }
         return new AdmissionPreflight(policy.maxIncidentsPerCommunity(), policy.maxIncidentsPerPlayer(),
-                policy.receiptRetentionTicks(), evaluationTime);
+                policy.receiptRetentionTicks(), evaluationTime, policy.protectProfileEvidence());
+    }
+
+    /** The same rules at a different per-community cap: what the whole-player sweep passes down. */
+    public AdmissionPreflight withCommunityCap(int maxIncidents) {
+        return new AdmissionPreflight(maxIncidents, maxIncidentsPerPlayer, receiptHorizonTicks,
+                evaluationTime, protectLiveProfileEvidence);
     }
 
     /**
@@ -43,7 +60,9 @@ public record AdmissionPreflight(int maxIncidentsPerCommunity, int maxIncidentsP
      */
     public static AdmissionPreflight ofLoose(int maxIncidentsPerCommunity, long evaluationTime,
                                              long receiptHorizonTicks) {
+        // Profile evidence is protected here too: a caller with only loose values is exactly the one
+        // that cannot have decided otherwise, and the conservative answer keeps the evidence.
         return new AdmissionPreflight(maxIncidentsPerCommunity, Integer.MAX_VALUE, receiptHorizonTicks,
-                evaluationTime);
+                evaluationTime, ReputationPolicy.DEFAULT_PROTECT_PROFILE_EVIDENCE);
     }
 }

@@ -16,6 +16,8 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 
+import javax.annotation.Nullable;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -318,6 +320,94 @@ public final class CommunityReputationRecord {
         }
     }
 
+    // --- the profile channel (§12.2) ----------------------------------------
+
+    /** What one profile pass over this ledger did: how much magnitude moved, and whether a clock did. */
+    public record ProfileReconcileResult(long magnitudeDelta, boolean clockMoved) {
+
+        /** Whether anything persisted moved, which is what decides {@code setDirty}. */
+        public boolean moved() {
+            return magnitudeDelta != 0L || clockMoved;
+        }
+
+        /** Whether profile evidence actually changed value, as opposed to only its clock advancing. */
+        public boolean unitsMoved() {
+            return magnitudeDelta != 0L;
+        }
+    }
+
+    /**
+     * Ages every profile payload in this ledger and settles it, charging only the active ticks
+     * (§12.2).
+     *
+     * <p>Separate from {@link #reconcile} rather than folded into it, because the two channels freeze
+     * independently: profiles may be switched off while scalar standing keeps ageing, and the gate has
+     * to be able to say "age one, not the other" without a second policy appearing inside this class.
+     *
+     * <p>Records with no profile payload are skipped entirely — they have no profile channel, and
+     * moving a clock they never use would start writing a field the format-2 ledger did not have,
+     * which is precisely the byte-identity the golden fixtures check.
+     *
+     * @param freezeLog the bounded policy epochs (§12.2), or {@code null} to charge the whole interval
+     */
+    public ProfileReconcileResult reconcileProfiles(long gameTime,
+                                                    @Nullable ProfileFreezeLog freezeLog) {
+        long delta = 0L;
+        boolean clockMoved = false;
+        for (IncidentRecord incident : incidents.values()) {
+            if (!incident.hasProfileEvidence()) {
+                continue;
+            }
+            long observed = incident.lastProfileObservedGameTime();
+            long frozen = freezeLog == null ? 0L : freezeLog.frozenTicksBetween(observed, gameTime);
+            delta += incident.reconcileProfile(gameTime, frozen);
+            if (incident.lastProfileObservedGameTime() != observed) {
+                clockMoved = true;
+            }
+        }
+        return new ProfileReconcileResult(delta, clockMoved);
+    }
+
+    /**
+     * The profile half of a freeze: advance the observation clock of every payload without ageing
+     * anything (§12.2, §20).
+     *
+     * <p>The exact analogue of {@link #freezeTo} for the second channel, and the gate uses it for the
+     * one half of the freeze decision the epoch log deliberately does not track: per-community decay
+     * immunity. Skipping the interval as it passes is what makes lifting the freeze cost no catch-up
+     * for every interval a query observed, which is exactly the guarantee the scalar channel offers
+     * for the same flag.
+     */
+    public ProfileReconcileResult freezeProfilesTo(long gameTime) {
+        boolean clockMoved = false;
+        for (IncidentRecord incident : incidents.values()) {
+            if (!incident.hasProfileEvidence()) {
+                continue;
+            }
+            long observed = incident.lastProfileObservedGameTime();
+            incident.skipProfileTo(gameTime);
+            if (incident.lastProfileObservedGameTime() != observed) {
+                clockMoved = true;
+            }
+        }
+        return new ProfileReconcileResult(0L, clockMoved);
+    }
+
+    /**
+     * Retires every credit tracker whose window has ended at this evaluation time (§10.5).
+     *
+     * <p>Called from the reconciliation gate, so the counters are cleaned on the same schedule as
+     * everything else rather than only when the next deed happens to arrive. It cannot free a slot
+     * that still restricts an operation — {@link CreditWindowTrackers#dropExpired} is the only removal
+     * path and it measures each window from its own monotonic watermark — so this is cleanup, never
+     * the eviction exploit that would hand back a spent allowance.
+     *
+     * @return how many trackers were removed
+     */
+    public int dropExpiredCreditTrackers(long gameTime) {
+        return credit.dropExpired(gameTime);
+    }
+
     /**
      * Rebuilds the cached score and nothing else. The reconciliation gate needs the bounds re-applied
      * after a freeze or a config change without ageing a single contribution.
@@ -329,12 +419,14 @@ public final class CommunityReputationRecord {
     /**
      * Whether this record may be dropped to make room (§5 F09).
      *
-     * <p>Three things are not evictable at any cap. <b>Pinned</b> history, as before. Anything that
+     * <p>Four things are not evictable at any cap. <b>Pinned</b> history, as before. Anything that
      * still <b>contributes</b>, because folding live weight into the baseline preserves today's number
      * while silently changing tomorrow's - the fold does not decay, so the trajectory, the per-villager
      * opinion and the amends that were still available all move. And a recent <b>open negative</b>
      * record, which is the case a player can still make right and a producer may still hold a receipt
-     * against; it becomes evictable once it has aged past the receipt horizon.
+     * against; it becomes evictable once it has aged past the receipt horizon. And, since profiles,
+     * anything holding <b>live profile subunits</b>, which stay future-relevant after the scalar
+     * contribution has decayed to zero (§12.3).
      *
      * <p>Read at {@link AdmissionPreflight#evaluationTime()} and nowhere else. The age comparison is
      * the reason that matters: asked twice at two clock readings, the same ledger gives two answers,
@@ -342,6 +434,13 @@ public final class CommunityReputationRecord {
      */
     private boolean evictable(IncidentRecord incident, AdmissionPreflight preflight) {
         if (incident.pinned() || incident.contributes()) {
+            return false;
+        }
+        // Four, since profiles: live profile subunits are future-relevant evidence even when the
+        // scalar contribution has decayed to nothing and the displayed facet value clamps to zero
+        // (§12.3, I06). Dropping such a record keeps today's number and quietly changes what the
+        // village is able to say about the player, and what a later opposing deed is weighed against.
+        if (preflight.protectsLiveProfileEvidence() && incident.hasLiveProfileEvidence()) {
             return false;
         }
         boolean open = incident.status() == IncidentStatus.ACTIVE && !incident.isSuperseded();

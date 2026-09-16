@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation.reputation;
 
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.profile.ProfileMath;
 
 // An immutable snapshot of the policy-relevant COMMON config, taken once and read many times.
 public record ReputationPolicy(
@@ -31,7 +32,18 @@ public record ReputationPolicy(
         // and accounting for it under another (I09). P7 wires them to McaReputationConfig; until then
         // they carry the documented defaults, which is why fromConfig() names the constants below.
         boolean profilesEnabled,
-        boolean repeatCreditEnabled) {
+        boolean repeatCreditEnabled,
+        // The rest of §20's profile table that is policy rather than presentation. The four show*
+        // settings are CLIENT-side display and deliberately absent: this snapshot is the COMMON
+        // policy the server decides with, and a client preference must never be able to change what
+        // is recorded. Profile lifetimes and decay steps are absent for a different reason — §9.3 and
+        // §17 author them per contribution in the datapack and §9.4 freezes them onto each deed, so a
+        // config override would be a live reinterpretation of quantities a player already earned.
+        boolean facetOpinionEnabled,
+        int maxFacetOpinionAdjustment,
+        int recognitionCap,
+        int facetPointCap,
+        boolean protectProfileEvidence) {
 
     // How an incident claimed by an authority that declared no kinds is treated.
     public enum UndeclaredAuthorityMode {
@@ -54,6 +66,27 @@ public record ReputationPolicy(
     // that silently ran without them would accumulate history no later switch could correct.
     public static final boolean DEFAULT_PROFILES_ENABLED = true;
     public static final boolean DEFAULT_REPEAT_CREDIT_ENABLED = true;
+
+    /** §20: the bounded facet interpretation is on, and it is an opinion adjustment, not a write. */
+    public static final boolean DEFAULT_FACET_OPINION_ENABLED = true;
+
+    /** §20's documented default and hard range 0..100 for the combined facet adjustment. */
+    public static final int DEFAULT_MAX_FACET_OPINION_ADJUSTMENT = 25;
+
+    /** §7.1: public recognition is 0..1000, with no conversion from standing. */
+    public static final int DEFAULT_RECOGNITION_CAP = ProfileMath.MAX_RECOGNITION;
+
+    /** §8.1/§9.6: a facet's displayed magnitude never exceeds 100 points, whatever a pack authors. */
+    public static final int DEFAULT_FACET_POINT_CAP = ProfileMath.MAX_FACET_POINTS;
+
+    /**
+     * §12.3: a record holding live profile subunits is not prunable. Not offered as a config setting
+     * in §20 and not one here either — it is the retention rule the cap paths are decided against,
+     * carried in the snapshot so the refusal and the eviction pass cannot read it at two moments and
+     * disagree. A future operator override would be a decision to discard evidence, which §12.3 says
+     * requires measured save-size evidence rather than a switch.
+     */
+    public static final boolean DEFAULT_PROTECT_PROFILE_EVIDENCE = true;
 
     // Reads through the guarded accessors only, so this is safe before the spec is loaded.
     public static ReputationPolicy fromConfig() {
@@ -81,7 +114,12 @@ public record ReputationPolicy(
                 McaReputationConfig.coreAuthorityUndeclaredKinds(),
                 McaReputationConfig.conversationsIntegrationEnabled(),
                 DEFAULT_PROFILES_ENABLED,
-                DEFAULT_REPEAT_CREDIT_ENABLED);
+                DEFAULT_REPEAT_CREDIT_ENABLED,
+                DEFAULT_FACET_OPINION_ENABLED,
+                DEFAULT_MAX_FACET_OPINION_ADJUSTMENT,
+                DEFAULT_RECOGNITION_CAP,
+                DEFAULT_FACET_POINT_CAP,
+                DEFAULT_PROTECT_PROFILE_EVIDENCE);
     }
 
     // The documented config defaults, mirrored without touching the spec at all.
@@ -110,7 +148,12 @@ public record ReputationPolicy(
                 DEFAULT_UNDECLARED_AUTHORITY_MODE,
                 true,
                 DEFAULT_PROFILES_ENABLED,
-                DEFAULT_REPEAT_CREDIT_ENABLED);
+                DEFAULT_REPEAT_CREDIT_ENABLED,
+                DEFAULT_FACET_OPINION_ENABLED,
+                DEFAULT_MAX_FACET_OPINION_ADJUSTMENT,
+                DEFAULT_RECOGNITION_CAP,
+                DEFAULT_FACET_POINT_CAP,
+                DEFAULT_PROTECT_PROFILE_EVIDENCE);
     }
 
     public Builder toBuilder() {
@@ -149,6 +192,18 @@ public record ReputationPolicy(
         return toBuilder().repeatCreditEnabled(value).build();
     }
 
+    public ReputationPolicy withFacetOpinionEnabled(boolean value) {
+        return toBuilder().facetOpinionEnabled(value).build();
+    }
+
+    public ReputationPolicy withMaxFacetOpinionAdjustment(int value) {
+        return toBuilder().maxFacetOpinionAdjustment(value).build();
+    }
+
+    public ReputationPolicy withProtectProfileEvidence(boolean value) {
+        return toBuilder().protectProfileEvidence(value).build();
+    }
+
     // A mutable copy of one snapshot, so a test can vary a single field without naming twenty-one.
     public static final class Builder {
 
@@ -176,6 +231,11 @@ public record ReputationPolicy(
         private boolean conversationsIntegrationEnabled;
         private boolean profilesEnabled;
         private boolean repeatCreditEnabled;
+        private boolean facetOpinionEnabled;
+        private int maxFacetOpinionAdjustment;
+        private int recognitionCap;
+        private int facetPointCap;
+        private boolean protectProfileEvidence;
 
         private Builder(ReputationPolicy source) {
             this.enabled = source.enabled;
@@ -202,6 +262,11 @@ public record ReputationPolicy(
             this.conversationsIntegrationEnabled = source.conversationsIntegrationEnabled;
             this.profilesEnabled = source.profilesEnabled;
             this.repeatCreditEnabled = source.repeatCreditEnabled;
+            this.facetOpinionEnabled = source.facetOpinionEnabled;
+            this.maxFacetOpinionAdjustment = source.maxFacetOpinionAdjustment;
+            this.recognitionCap = source.recognitionCap;
+            this.facetPointCap = source.facetPointCap;
+            this.protectProfileEvidence = source.protectProfileEvidence;
         }
 
         public Builder enabled(boolean value) {
@@ -324,6 +389,31 @@ public record ReputationPolicy(
             return this;
         }
 
+        public Builder facetOpinionEnabled(boolean value) {
+            this.facetOpinionEnabled = value;
+            return this;
+        }
+
+        public Builder maxFacetOpinionAdjustment(int value) {
+            this.maxFacetOpinionAdjustment = value;
+            return this;
+        }
+
+        public Builder recognitionCap(int value) {
+            this.recognitionCap = value;
+            return this;
+        }
+
+        public Builder facetPointCap(int value) {
+            this.facetPointCap = value;
+            return this;
+        }
+
+        public Builder protectProfileEvidence(boolean value) {
+            this.protectProfileEvidence = value;
+            return this;
+        }
+
         public ReputationPolicy build() {
             return new ReputationPolicy(enabled, scoreDecayEnabled, tierTitlesEnabled, minimumScore,
                     maximumScore, villageSearchRadius, witnessRadius, maxWitnesses,
@@ -332,7 +422,8 @@ public record ReputationPolicy(
                     maxIncidentsPerCommunity, maxIncidentsPerPlayer, assaultCoalesceTicks,
                     selfDefenseWindowTicks, reconcileOnlineIntervalTicks, receiptRetentionTicks,
                     undeclaredAuthorityMode, conversationsIntegrationEnabled, profilesEnabled,
-                    repeatCreditEnabled);
+                    repeatCreditEnabled, facetOpinionEnabled, maxFacetOpinionAdjustment,
+                    recognitionCap, facetPointCap, protectProfileEvidence);
         }
     }
 }

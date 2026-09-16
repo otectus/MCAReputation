@@ -44,6 +44,33 @@ class ReputationPolicyTest {
         assertEquals(ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, policy.receiptRetentionTicks());
         assertEquals(ReputationPolicy.UndeclaredAuthorityMode.ASSAULT_KILL_ONLY,
                 policy.undeclaredAuthorityMode());
+
+        // §20's profile table, as policy rather than as a live config read. P7 wires these to the
+        // spec; until then the snapshot carries the documented defaults, which is what the profile
+        // arithmetic and the cap paths are decided against.
+        assertTrue(policy.profilesEnabled());
+        assertTrue(policy.repeatCreditEnabled());
+        assertTrue(policy.facetOpinionEnabled());
+        assertEquals(25, policy.maxFacetOpinionAdjustment());
+        assertEquals(1000, policy.recognitionCap());
+        assertEquals(100, policy.facetPointCap());
+        assertTrue(policy.protectProfileEvidence(),
+                "§12.3: live profile evidence is not prunable, and the cap paths read that from here");
+    }
+
+    @Test
+    void theProfileFieldsSurviveTheBuilderOneAtATime() {
+        ReputationPolicy base = ReputationPolicy.defaults();
+
+        assertFalse(base.withProfilesEnabled(false).profilesEnabled());
+        assertFalse(base.withRepeatCreditEnabled(false).repeatCreditEnabled());
+        assertFalse(base.withFacetOpinionEnabled(false).facetOpinionEnabled());
+        assertFalse(base.withProtectProfileEvidence(false).protectProfileEvidence());
+        assertEquals(0, base.withMaxFacetOpinionAdjustment(0).maxFacetOpinionAdjustment());
+        assertEquals(base, base.withMaxFacetOpinionAdjustment(7)
+                .withMaxFacetOpinionAdjustment(25), "and one field at a time means one field");
+        assertEquals(base.maxIncidentsPerCommunity(),
+                base.withProfilesEnabled(false).maxIncidentsPerCommunity());
     }
 
     @Test
