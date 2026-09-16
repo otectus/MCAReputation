@@ -43,9 +43,14 @@ public final class ClientReputationData {
     private static int totalCommunities;
 
     /**
-     * Whether the profile details expansion is open. Collapsed on every screen open by design (§18.1
-     * asks for one compact expansion, not a dossier), and remembered across refreshes within a
-     * session so a page turn does not close a pane the player just opened.
+     * Whether the profile details expansion is open.
+     *
+     * <p>Collapsed on every screen open (§18.1 asks for one compact expansion, not a dossier):
+     * {@link ReputationScreen}'s constructor calls {@link #collapseProfile()}, which is the one place
+     * that runs exactly once per open. It is held here rather than on the screen so that everything
+     * which rebuilds the screen's widgets without reopening it — a page turn, a snapshot refresh, a
+     * window resize — keeps a pane the player just opened. {@link #clear()} collapses it too, so a
+     * logout does not carry one world's open pane into the next.
      */
     private static boolean profileExpanded;
 
@@ -238,6 +243,14 @@ public final class ClientReputationData {
     /** Opens or closes the expansion. Held here rather than on the screen so a rebuild keeps it. */
     public static void toggleProfileExpanded() {
         profileExpanded = !profileExpanded;
+    }
+
+    /**
+     * Closes the expansion. Called from {@link ReputationScreen}'s constructor, so every open starts
+     * collapsed while a rebuild within one open screen does not.
+     */
+    public static void collapseProfile() {
+        profileExpanded = false;
     }
 
     /**

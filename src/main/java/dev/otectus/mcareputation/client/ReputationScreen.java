@@ -175,9 +175,20 @@ public final class ReputationScreen extends Screen {
     private boolean draggingScroll;
     private double dragOffset;
 
+    /**
+     * Opening the screen collapses the profile expansion (§18.1 asks for one compact expansion,
+     * not a dossier).
+     *
+     * <p>The reset lives here rather than in {@link #init()} because the constructor runs exactly
+     * once per open, while {@code init()} re-runs on every {@code rebuildWidgets()} — a page turn,
+     * a snapshot refresh, the toggle itself — and on a window resize, all of which must keep a pane
+     * the player just opened. The expansion state is held in {@link ClientReputationData} for that
+     * same reason, so those rebuilds do not lose it.
+     */
     public ReputationScreen(@Nullable Screen parent) {
         super(Component.translatable("mcareputation.screen.title"));
         this.parent = parent;
+        ClientReputationData.collapseProfile();
     }
 
     @Override
