@@ -25,7 +25,7 @@ dev.otectus.mcareputation                            3 files
 dev.otectus.mcareputation.api                        29 files
 dev.otectus.mcareputation.api.event                  7 files
 dev.otectus.mcareputation.api.profile                12 files
-dev.otectus.mcareputation.client                     14 files
+dev.otectus.mcareputation.client                     13 files
 dev.otectus.mcareputation.command                    2 files
 dev.otectus.mcareputation.community                  3 files
 dev.otectus.mcareputation.compat                     3 files
@@ -159,10 +159,11 @@ config keys and four debug subcommands). 0.5.0's reliability pass is beneath it.
 
 ## Known issues
 
-- **Nothing in `PRODUCTION_TESTS.md` has been run.** Every runtime gate there is still `⬜`, including
-  the 0.5.0-client-against-0.6.0-server protocol pairing, the profile screen, the real-world
-  format-2-to-3 migration, and the whole addon combination matrix. The unit suite is
-  loader-independent by design and cannot cover them.
+- **No `PRODUCTION_TESTS.md` gate has been ticked.** Every runtime gate there is still `⬜`,
+  including the 0.5.0-client-against-0.6.0-server protocol pairing, the profile screen, the real-world
+  format-2-to-3 migration, and the whole addon combination matrix. A dev `runServer`/`runClient` pass
+  is recorded there as evidence only, on the pre-rebase tree, and ticks nothing. The unit suite is
+  loader-independent by design and cannot cover these.
 - **Profession is resolved but weights nothing.** `McaReflect.professionId` reads it and the resolver
   reports it, but the shipped facet schema authors no profession override, so a resolved profession
   alone leaves the trait basis `NEUTRAL_DEFAULT`. Adding one would be a datapack schema change this

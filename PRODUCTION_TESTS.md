@@ -24,7 +24,7 @@ more — `build/libs/mcareputation-0.6.0.jar` *is* the artifact that ships.
 |---|---|---|
 | Phase 0 audit and reconciliation | ✅ | [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) |
 | MCA 7.7.36-beta.3 signature confirmation | ✅ | `javap` over the pinned `mca-neoforge` jar; every consumed signature present and compatible (IMPLEMENTATION_NOTES §2.1) |
-| MCA: Reputation compiles and unit tests | ✅ | **888 tests, 0 failures, 1 skipped** at 0.6.0 (0.5.0 on this branch was 531; 0.4.1 was 401; the 1.20.1 Forge baseline before the port was 255). The skip is the golden-fixture regeneration case, which only runs under `-Dmcareputation.regenerateFixtures=true`. |
+| MCA: Reputation compiles and unit tests | ✅ | **892 tests, 0 failures, 1 skipped** at 0.6.0, measured on this branch (the 1.20.1 Forge baseline before the port was 255). The skip is the golden-fixture regeneration case, which only runs under `-Dmcareputation.regenerateFixtures=true`. |
 | Golden 1.20.1 saved data loads under 1.21.1 | ✅ | `GoldenSavedDataCompatibilityTest` against three fixtures written by the unmodified Forge serializer: the format-1 file (migrated through both steps on load), the Forge 0.5.0 format-2 file (migrated 2 → 3), and the Forge 0.6.0 format-3 file — loaded with nothing to migrate, its frozen profile subunits and credit counters asserted exactly, and its SHA-256 pinned so a local regeneration cannot quietly replace the evidence |
 | Config keys and defaults unchanged | ✅ | `ConfigParityTest` pins both key sets and both filenames exactly; 0.5.0's two additions (`limits.receiptRetentionTicks`, `integration.coreAuthorityUndeclaredKinds`) and 0.6.0's eight `[profiles]` keys (four COMMON, four CLIENT) are pinned there and documented in CONFIG.md |
 | No Forge or relocated-MCA reference survives | ✅ | `NeoForgePortLintTest` (source, 19 idioms) + `OptionalClassloadTest` (bytecode) + `checkJarContents` (packaged bytecode) |
@@ -70,7 +70,10 @@ Recorded because 1.21.1 dev runs do load real MCA, and *only* as dev-run evidenc
 ticked by it, and the production runtime matrix is still `⬜`.
 
 Branch `neoforge/1.21.1` @ `d656613`, MCA: Reputation 0.6.0 + MCA `7.7.36-beta.3+1.21.1` + NeoForge
-`21.1.249`.
+`21.1.249`. `d656613` is the **pre-rebase** commit: the same 0.6.0 layer, but over this branch's own
+0.5.0 port rather than over `b70f320`. The 0.5.0 differences between the two are expression rather
+than behaviour, so the observations below still describe this build — but they were not re-run
+against it, and the jar hashes above are from the rebased tree, not from the run.
 
 - `runServer` (ModDevGradle, `run-server/`; commands driven over RCON because `JavaExec` stdin is
   not wired): no mixin apply failure, only a benign refmap `WARN`; `mcareputation ready (API v2)`;
@@ -109,8 +112,8 @@ step. Record the exact filenames and hashes below.
 
 | Artifact | File | SHA-256 |
 |---|---|---|
-| MCA: Reputation | `mcareputation-0.6.0.jar` | `46f9981050a58d7512a3a277fd751163501c1a5444e46016eb1d8f5d9bd9c9b8` |
-| MCA: Reputation API jar | `mcareputation-0.6.0-api.jar` | `4379d6d8a3a5828d0e57018ac952cf6c1d62440f0e646e370d93943fb37e901f` |
+| MCA: Reputation | `mcareputation-0.6.0.jar` | `8d0208d143d2f188998a740c57c89a554ceadb8878d2f21e839d76a754d6da24` |
+| MCA: Reputation API jar | `mcareputation-0.6.0-api.jar` | `3b84ffe2cb224e980db8207c5088588642b27dafd0e3a7a719c11e9c1c3c0681` |
 | MCA: Quests | `mcaquests-1.1.0.jar` | (to be recorded) |
 | MCA: Conversations | `mcaconversations-neoforge-2.0.0+1.21.1.jar` | (to be recorded) |
 | MCA Reborn | `mca-neoforge-7.7.36-beta.3+1.21.1.jar` | `de4763d34a41cb84ffa392b87cdb23191beddda2323b56552a1a2fcd7c436fc3` |
