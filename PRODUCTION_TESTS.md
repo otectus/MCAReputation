@@ -69,32 +69,57 @@ review remain manual-only and still gate the release.
 Recorded because 1.21.1 dev runs do load real MCA, and *only* as dev-run evidence: no gate below is
 ticked by it, and the production runtime matrix is still `⬜`.
 
-Branch `neoforge/1.21.1` @ `d656613`, MCA: Reputation 0.6.0 + MCA `7.7.36-beta.3+1.21.1` + NeoForge
-`21.1.249`. `d656613` is the **pre-rebase** commit: the same 0.6.0 layer, but over this branch's own
-0.5.0 port rather than over `b70f320`. The 0.5.0 differences between the two are expression rather
-than behaviour, so the observations below still describe this build — but they were not re-run
-against it, and the jar hashes above are from the rebased tree, not from the run.
+Branch `neoforge/1.21.1` @ `fc85759`, the post-rebase head (the 0.6.0 layer on top of the owner's
+pushed 0.5.0 port `b70f320`). MCA: Reputation 0.6.0 + MCA `7.7.36-beta.3+1.21.1` + NeoForge
+`21.1.249`. Commands were driven over RCON because `JavaExec` stdin is not wired.
 
-- `runServer` (ModDevGradle, `run-server/`; commands driven over RCON because `JavaExec` stdin is
-  not wired): no mixin apply failure, only a benign refmap `WARN`; `mcareputation ready (API v2)`;
+**Reputation alone** (`runServer` at `fc85759`, ModDevGradle `run-server/`):
+
+- Mod list: `mcareputation` 0.6.0, MCA `7.7.36-beta.3+1.21.1`, NeoForge `21.1.249`. No mixin apply
+  failure.
+- `mcareputation ready (API v2)`;
   `MCA integration active: mca 7.7.36-beta.3+1.21.1 (package root net.conczin.mca)` with no
-  reduced-interpretation `WARN`, so every optional member including the profession getter resolved;
-  reload reported `loaded 19 incident type(s), 1 tier ladder(s), and 2 title(s)` and
-  `profile generation 1: 7 facet(s), 1 recognition ladder(s), 9 incident profile(s), 6 credit polic(y/ies)`;
-  `Done (4.177s)`; zero `ERROR`, `FATAL` or exceptions; `save-all` and `stop` clean. Command replies:
-  `debug profilemigration` → `manifest v1, coverage complete, 0 stubbed... format v3 (this build
-  writes v3)`; `debug profile Steve here` → `No player was found`; `debug profile <uuid> here` → a
-  clean Brigadier refusal; `debug authorities` → no authorities registered, six kinds detected
-  natively; `debug integrations` → api version 2, quests/conversations/crime `true`.
-  Logs: `scratchpad/neoforge-runServer-latest.log`, replies `scratchpad/rcon-replies.txt`.
-- `runClient`: title screen reached (LWJGL 3.3.3, OpenAL, 15 atlases); both reloads published the
-  profile registries cleanly; clean quit after ~21s from stray desktop input. The only `ERROR`s are
-  the missing `libflite.so` (narrator, a system issue). **No in-screen check was performed**, so
-  §2's UI rows are untouched. Log: `scratchpad/neoforge-runClient-latest.log`.
+  reduced-interpretation `WARN`, so every optional member including the profession getter resolved.
+- `profile generation 1: 7 facet(s), 1 recognition ladder(s), 9 incident profile(s), 6 credit polic(y/ies)`;
+  `Done (1.621s)`; clean stop.
+- `mcareputation debug integrations` → api version 2, 0 authorities, all six kinds detected
+  natively. `mcareputation debug profilemigration` → coverage complete, format v3.
+- Logs: `scratchpad/final-runServer-reponly.log`, replies `scratchpad/rcon-replies-reponly.txt`.
+- `runClient` (Reputation only): title screen reached, full reload including `mod/mcareputation` and
+  all atlases, 90 s soak, no crash report and no `mcareputation` exception; the only `ERROR` is the
+  host's missing `libflite.so` narrator native. **No in-screen check was performed**, so §2's UI rows
+  are untouched. Log: `scratchpad/final-runClient-reponly.log`.
 
-What this run did *not* exercise: in-screen behaviour, the §1 row 12 protocol-6 handshake refusal
+**Suite handshake** (`runServer` with the three companion jars dropped into untracked
+`run-server/mods/`, removed afterwards):
+
+- Mod list: MCA: Conversations `1.7.2+1.21.1`, MCA: Crime `0.7.3`, MCA: Quests `1.6.6`,
+  MCA: Reputation `0.6.0`, MCA `7.7.36-beta.3+1.21.1`, NeoForge `21.1.249`. No dependency errors, no
+  exceptions, no extra library mods; `Done (1.797s)`.
+- Binding lines: `MCA: Crime — MCA: Reputation detected (API v2)`;
+  `[MCA: Quests] MCA: Reputation detected; village standing, tiers, and titles now delegate to it`;
+  `[MCA: Conversations] MCA: Reputation detected; villagers now take public standing into account`;
+  `MCA: Crime — MCA: Reputation capabilities: api v2 enabled=true delivery=true receipts=true supersede=true bound_resolution=true profiles=profile_snapshot_v1,speaker_profile_v1,repeat_credit_v1,profiled_delivery_v1,profile_change_v1`;
+  `'MCA: Crime' registered as a core incident authority`, with mirrors `MCA: Crime village standing`
+  and `mcaquests:fallback-store` and import provider `mcaquests:legacy-reputation`; on stop
+  `'MCA: Crime' withdrew its core incident authority`.
+- Data: `loaded 27 incident type(s), 2 tier ladder(s), 9 title(s)`; `profile generation 1: 7
+  facet(s), 1 recognition ladder(s), 18 incident profile(s), 8 credit polic(y/ies)`.
+- Command replies: `mcareputation debug integrations` → api version 2, `quests=true
+  conversations=true crime=true`, 1 authority (MCA: Crime), `MCA_VILLAGER_ASSAULT` /
+  `MCA_VILLAGER_KILL` claimed by MCA: Crime with native detection off and the other four native;
+  `mcareputation debug authorities` → both kinds `claimed by MCA: Crime (declared, canDeliver=true)`;
+  `crime debug integrations` → reputation `installed=true enabled=true state=ready` (authority held),
+  api v2 with all five profile strings, mca quests `state=ready`, outbox `pending=0 dead=0`;
+  `mcaquests compat status` → MCA fully available (`net.conczin.mca`). Conversations'
+  `conversations chat status` reply was truncated by the minimal RCON client (a test-tool
+  limitation); its binding is evidenced by the log line above.
+- Logs: `scratchpad/final-runServer-suite.log`, replies `scratchpad/rcon-replies-suite.txt`.
+
+What these runs did *not* exercise: in-screen behaviour, the §1 row 12 protocol-6 handshake refusal
 against a 0.5.0 client, a real format-2 world upgrade with enrichment (the server had no players and
-no world history), and any companion handshake against a live Reputation.
+no world history), and a player actually earning recognition or facets with a companion condition
+firing in-world.
 
 ## Building the artifacts
 
