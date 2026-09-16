@@ -17,5 +17,6 @@
     "phrase": "mcareputation.gossip.promise_broken",
     "with": ["player", "subject"]
   },
-  "max_override_abs": 40
+  "max_override_abs": 40,
+  "social_profile": "mcareputation:broken_commitment"
 }

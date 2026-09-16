@@ -1,0 +1,25 @@
+{
+  "allowed_incidents": [
+    "mcareputation:raid_repelled"
+  ],
+  "recognition": {
+    "points": 14,
+    "lifetime_ticks": 1344000,
+    "resolution_mode": "recognition"
+  },
+  "facets": {
+    "mcareputation:bravery": {
+      "points": 12,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    },
+    "mcareputation:reliability": {
+      "points": 4,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    }
+  },
+  "credit_class": "commendable",
+  "credit_policy": "mcareputation:raid_defense",
+  "major_evidence": true
+}

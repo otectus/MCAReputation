@@ -1,0 +1,19 @@
+{
+  "group": "mcareputation:mercy_sparing",
+  "window_ticks": 336000,
+  "credit_schedule_bp": [
+    10000,
+    5000,
+    0
+  ],
+  "tail_bp": 0,
+  "scope": "player_community",
+  "subject_limit": {
+    "role": "beneficiary",
+    "credit_schedule_bp": [
+      10000,
+      0
+    ],
+    "tail_bp": 0
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "group": "mcareputation:raid_defense",
+  "window_ticks": 336000,
+  "credit_schedule_bp": [
+    10000,
+    5000,
+    2500,
+    0
+  ],
+  "tail_bp": 0,
+  "scope": "player_community"
+}

@@ -1,0 +1,19 @@
+{
+  "name": {
+    "translate": "mcareputation.facet.mercy"
+  },
+  "description": {
+    "translate": "mcareputation.facet.mercy.description"
+  },
+  "range": {
+    "min": 0,
+    "max": 100
+  },
+  "positive_label": {
+    "translate": "mcareputation.facet.mercy.merciful"
+  },
+  "display_order": 60,
+  "label_min_magnitude": 10,
+  "label_min_evidence": 2,
+  "opinion_weight_bp": 2000
+}

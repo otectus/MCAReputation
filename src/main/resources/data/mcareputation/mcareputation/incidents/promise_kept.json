@@ -11,5 +11,6 @@
     "phrase": "mcareputation.gossip.promise_kept",
     "with": ["player", "subject"]
   },
-  "max_override_abs": 40
+  "max_override_abs": 40,
+  "social_profile": "mcareputation:kept_commitment"
 }

@@ -1,0 +1,24 @@
+{
+  "allowed_incidents": [
+    "mcareputation:villager_killed"
+  ],
+  "recognition": {
+    "points": 18,
+    "lifetime_ticks": 1344000,
+    "resolution_mode": "recognition"
+  },
+  "facets": {
+    "mcareputation:violence": {
+      "points": 20,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    },
+    "mcareputation:compassion": {
+      "points": -12,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "evaluative"
+    }
+  },
+  "credit_class": "adverse",
+  "major_evidence": true
+}

@@ -1,0 +1,21 @@
+{
+  "allowed_incidents": [
+    "mcareputation:project_completed",
+    "mcareputation:project_phase_completed"
+  ],
+  "recognition": {
+    "points": 5,
+    "lifetime_ticks": 1344000,
+    "resolution_mode": "recognition"
+  },
+  "facets": {
+    "mcareputation:generosity": {
+      "points": 6,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    }
+  },
+  "credit_class": "commendable",
+  "credit_policy": "mcareputation:donation_project",
+  "major_evidence": false
+}
