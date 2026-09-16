@@ -64,6 +64,35 @@ narrows — but does not replace — the manual pass:
 Installation-combination testing, in-game combat attribution, UI behaviour, performance, and log
 review remain manual-only and still gate the release.
 
+### Dev-run evidence, 2026-09-16 (not production certification)
+
+Recorded because 1.21.1 dev runs do load real MCA, and *only* as dev-run evidence: no gate below is
+ticked by it, and the production runtime matrix is still `⬜`.
+
+Branch `neoforge/1.21.1` @ `d656613`, MCA: Reputation 0.6.0 + MCA `7.7.36-beta.3+1.21.1` + NeoForge
+`21.1.249`.
+
+- `runServer` (ModDevGradle, `run-server/`; commands driven over RCON because `JavaExec` stdin is
+  not wired): no mixin apply failure, only a benign refmap `WARN`; `mcareputation ready (API v2)`;
+  `MCA integration active: mca 7.7.36-beta.3+1.21.1 (package root net.conczin.mca)` with no
+  reduced-interpretation `WARN`, so every optional member including the profession getter resolved;
+  reload reported `loaded 19 incident type(s), 1 tier ladder(s), and 2 title(s)` and
+  `profile generation 1: 7 facet(s), 1 recognition ladder(s), 9 incident profile(s), 6 credit polic(y/ies)`;
+  `Done (4.177s)`; zero `ERROR`, `FATAL` or exceptions; `save-all` and `stop` clean. Command replies:
+  `debug profilemigration` → `manifest v1, coverage complete, 0 stubbed... format v3 (this build
+  writes v3)`; `debug profile Steve here` → `No player was found`; `debug profile <uuid> here` → a
+  clean Brigadier refusal; `debug authorities` → no authorities registered, six kinds detected
+  natively; `debug integrations` → api version 2, quests/conversations/crime `true`.
+  Logs: `scratchpad/neoforge-runServer-latest.log`, replies `scratchpad/rcon-replies.txt`.
+- `runClient`: title screen reached (LWJGL 3.3.3, OpenAL, 15 atlases); both reloads published the
+  profile registries cleanly; clean quit after ~21s from stray desktop input. The only `ERROR`s are
+  the missing `libflite.so` (narrator, a system issue). **No in-screen check was performed**, so
+  §2's UI rows are untouched. Log: `scratchpad/neoforge-runClient-latest.log`.
+
+What this run did *not* exercise: in-screen behaviour, the §1 row 12 protocol-6 handshake refusal
+against a 0.5.0 client, a real format-2 world upgrade with enrichment (the server had no players and
+no world history), and any companion handshake against a live Reputation.
+
 ## Building the artifacts
 
 Build this repository **first** — both companions compile against its class output:
