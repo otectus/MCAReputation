@@ -35,6 +35,19 @@ public final class CoreIncidentAuthorities {
     private static final Set<CoreIncidentKind> LEGACY_KINDS =
             EnumSet.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT, CoreIncidentKind.MCA_VILLAGER_KILL);
 
+    /**
+     * Kinds an overlapping claim has already been reported for, so the line is logged once per kind
+     * per JVM rather than once per registration (§16.3's "one producer per core incident kind").
+     *
+     * <p>Debug rather than warn, deliberately. Two companions claiming one kind is a configuration
+     * an operator may have on purpose while migrating between them, and the consequence is visible in
+     * the ledger anyway: {@link #isClaimed} answers from the first claimant it finds and this mod
+     * stands down either way, so nothing is lost — there is just an ambiguity worth being able to see
+     * in a debug log when somebody asks why one of the two is never called.
+     */
+    private static final Set<CoreIncidentKind> OVERLAPPING_CLAIMS_LOGGED =
+            EnumSet.noneOf(CoreIncidentKind.class);
+
     private CoreIncidentAuthorities() {
     }
 
@@ -44,11 +57,75 @@ public final class CoreIncidentAuthorities {
             throw new IllegalArgumentException("CoreIncidentAuthority must not be null");
         }
         Registration registration = new Registration(authority);
+        logOverlappingClaims(authority);
         AUTHORITIES.add(registration);
         McaReputation.LOGGER.info("[MCA: Reputation] '{}' registered as a core incident authority; "
                         + "this mod will stand down from detecting the kinds it claims",
                 safeName(authority));
         return registration;
+    }
+
+    /**
+     * Reports, once per kind, that a second authority declares a kind an existing one already claims
+     * (§16.3).
+     *
+     * <p>Answered at registration rather than on the hot path: {@link #isClaimed} runs inside
+     * {@code LivingHurtEvent}, which fires for every point of damage dealt anywhere in the world, and
+     * a duplicate-detection pass there would cost every server the check to tell two companions apart
+     * on the servers that have both. An authority that declares nothing is compared on the kinds the
+     * undeclared-authority policy could still trust it with, which is the widest set it can end up
+     * owning.
+     */
+    private static void logOverlappingClaims(CoreIncidentAuthority arriving) {
+        if (AUTHORITIES.isEmpty()) {
+            return;
+        }
+        Set<CoreIncidentKind> arrivingKinds = effectiveDeclaredKinds(arriving);
+        if (arrivingKinds.isEmpty()) {
+            return;
+        }
+        for (Registration registration : AUTHORITIES) {
+            if (!registration.isActive()) {
+                continue;
+            }
+            CoreIncidentAuthority existing = registration.authority();
+            for (CoreIncidentKind kind : effectiveDeclaredKinds(existing)) {
+                if (!arrivingKinds.contains(kind)) {
+                    continue;
+                }
+                boolean fresh;
+                synchronized (OVERLAPPING_CLAIMS_LOGGED) {
+                    fresh = OVERLAPPING_CLAIMS_LOGGED.add(kind);
+                }
+                if (fresh) {
+                    McaReputation.LOGGER.debug("[MCA: Reputation] '{}' and '{}' both claim {}; §16.3 "
+                                    + "expects one producer per core incident kind. The first claimant "
+                                    + "that can deliver it wins and this mod stands down either way",
+                            safeName(existing), safeName(arriving), kind);
+                }
+            }
+        }
+    }
+
+    /** The kinds an authority can end up owning: what it declares, or what an undeclared one is trusted with. */
+    private static Set<CoreIncidentKind> effectiveDeclaredKinds(CoreIncidentAuthority authority) {
+        try {
+            Optional<Set<CoreIncidentKind>> declared = authority.declaredKinds();
+            if (declared == null || declared.isEmpty() || declared.get() == null) {
+                return LEGACY_KINDS;
+            }
+            // Copied element by element rather than through EnumSet.copyOf, which refuses an empty
+            // collection that is not already an EnumSet - and the set comes from a companion.
+            Set<CoreIncidentKind> kinds = EnumSet.noneOf(CoreIncidentKind.class);
+            for (CoreIncidentKind kind : declared.get()) {
+                if (kind != null) {
+                    kinds.add(kind);
+                }
+            }
+            return kinds;
+        } catch (Throwable t) {
+            return EnumSet.noneOf(CoreIncidentKind.class);
+        }
     }
 
     /**
@@ -109,6 +186,11 @@ public final class CoreIncidentAuthorities {
     /**
      * The effective claim for one registration: live, owning, able to deliver, and either declaring
      * this kind outright or allowed it by the undeclared-authority policy.
+     *
+     * <p>{@link CoreIncidentAuthority#canDeliver} is asked as well as {@code owns}, and it is the
+     * stronger of the two: a companion that owns a kind but cannot currently file it — its own
+     * integration disabled, its outbox unavailable — hands detection straight back rather than
+     * leaving the deed recorded by nobody (§16.3).
      *
      * <p>The last clause is the point. An authority written against 0.3.0 answers {@code true} from
      * {@code owns} for kinds that did not exist when it was written, so honouring a blanket claim
@@ -230,6 +312,16 @@ public final class CoreIncidentAuthorities {
     /** Drops every registration. Test-only; a live server calls {@link #clearServerScoped()}. */
     public static void clear() {
         AUTHORITIES.clear();
+        synchronized (OVERLAPPING_CLAIMS_LOGGED) {
+            OVERLAPPING_CLAIMS_LOGGED.clear();
+        }
+    }
+
+    /** Which kinds an overlapping claim has been reported for. Test-visible; empty on a clean JVM. */
+    static Set<CoreIncidentKind> overlappingClaimsLogged() {
+        synchronized (OVERLAPPING_CLAIMS_LOGGED) {
+            return Set.copyOf(OVERLAPPING_CLAIMS_LOGGED);
+        }
     }
 
     /**

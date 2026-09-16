@@ -62,6 +62,42 @@ public record ReputationCapabilities(int apiVersion, boolean enabled, boolean de
     /** {@link McaReputationApi#gossipStory} exists: enriched gossip with a semantic revision. */
     public static final String FEATURE_GOSSIP_STORY = "gossip_story";
 
+    // --- public profiles (0.6.0, §14.4) -------------------------------------
+    //
+    // Advertised only when the implementation and its payload handling exist, and — unlike the rows
+    // above — only while the feature is actually live: profiles switched off or content unpublished
+    // means a query cannot answer, so claiming support would make a companion skip the authored
+    // fallback it needs. The stable-support half of the question lives in ProfileCapabilities, which
+    // reports supported/enabled/published separately and keeps saying "supported" through a
+    // temporary disablement (§14.4).
+
+    /**
+     * {@link McaReputationApi#getProfileDetailed} exists: recognition, facets and coverage for one
+     * community, through the canonical reconciliation gate.
+     */
+    public static final String FEATURE_PROFILE_SNAPSHOT = "profile_snapshot_v1";
+
+    /**
+     * {@link McaReputationApi#getVillagerProfileDetailed} exists: a profile assembled from one
+     * observer's own knowledge, which never falls back to the community answer.
+     */
+    public static final String FEATURE_SPEAKER_PROFILE = "speaker_profile_v1";
+
+    /** §10's repeat-credit accounting is implemented and explained on an accepted delivery. */
+    public static final String FEATURE_REPEAT_CREDIT = "repeat_credit_v1";
+
+    /**
+     * {@link McaReputationApi#deliverProfiled} exists: an authored profile selection and a
+     * profile-aware supersession through the same canonical commit as {@code deliver}.
+     */
+    public static final String FEATURE_PROFILED_DELIVERY = "profiled_delivery_v1";
+
+    /**
+     * {@code ReputationProfileChangedEvent} is posted, including for a profile-only change no
+     * standing event can describe.
+     */
+    public static final String FEATURE_PROFILE_CHANGE = "profile_change_v1";
+
     public ReputationCapabilities {
         features = features == null ? Set.of() : Set.copyOf(features);
         nativeKinds = nativeKinds == null ? Set.of() : Set.copyOf(nativeKinds);

@@ -75,11 +75,17 @@ public final class ReconciliationService {
      * @param profileMagnitudeDelta the change in the ledger's total profile subunit magnitude; never
      *                              positive, because aging and settlement only ever reduce it
      * @param profileFrozen         whether the policy forbade ageing this community's profile channel
+     * @param profileRecognition    public recognition after this pass, already capped by the policy
+     * @param profileRecognitionDelta the change in that public integer; the transition §15's
+     *                              profile-only event has to report, and computable only by the pass
+     *                              that saw both sides of it
+     * @param profileRevision       the community record's profile revision after this pass
      */
     public record ReconcileOutcome(int oldScore, int newScore, String oldTierId, String newTierId,
                                    long contributionDelta, boolean frozen, long revision,
                                    ChangeCause cause, long profileMagnitudeDelta,
-                                   boolean profileFrozen) {
+                                   boolean profileFrozen, int profileRecognition,
+                                   int profileRecognitionDelta, long profileRevision) {
 
         public boolean scoreChanged() {
             return newScore != oldScore;
@@ -140,7 +146,7 @@ public final class ReconciliationService {
         if (maybe.isEmpty()) {
             String neutral = ReputationService.currentTierId(0);
             return new ReconcileOutcome(0, 0, neutral, neutral, 0L, frozen, 0L, cause, 0L,
-                    profileFrozen);
+                    profileFrozen, 0, 0, 0L);
         }
         CommunityReputationRecord record = maybe.get();
         int oldScore = record.score();
@@ -149,7 +155,9 @@ public final class ReconciliationService {
             // Neither clock, neither ledger, no tracker, no dirty flag (I04, DD7): a diagnostic that
             // promises to show stored state must not be the thing that changes it.
             return new ReconcileOutcome(oldScore, oldScore, oldTierId, oldTierId, 0L, frozen,
-                    record.revision(), cause, 0L, profileFrozen);
+                    record.revision(), cause, 0L, profileFrozen,
+                    publicRecognition(policy, record.recognitionSubunits()), 0,
+                    record.profileRevision());
         }
 
         long contributionBefore = record.contributionSum();
@@ -191,11 +199,33 @@ public final class ReconciliationService {
         }
         // The standing revision is deliberately not bumped by a profile-only change: it identifies the
         // standing a consumer cached, and moving it would invalidate every standing cache in the world
-        // on a day nothing about standing happened. P5 publishes the profile change on its own.
+        // on a day nothing about standing happened. The profile channel has its own counter, bumped
+        // here and only when profile evidence really moved, which is what a profile-dependent
+        // consumer invalidates against (§15).
         long revision = newScore == oldScore ? record.revision() : record.bumpRevision();
+        int recognitionAfter = publicRecognition(policy, profile.recognitionAfter());
+        int recognitionDelta = recognitionAfter - publicRecognition(policy, profile.recognitionBefore());
+        long profileRevision = profile.unitsMoved()
+                ? record.bumpProfileRevision()
+                : record.profileRevision();
         return new ReconcileOutcome(oldScore, newScore, oldTierId,
                 ReputationService.currentTierId(newScore), record.contributionSum() - contributionBefore,
-                frozen, revision, cause, profile.magnitudeDelta(), profileFrozen);
+                frozen, revision, cause, profile.magnitudeDelta(), profileFrozen, recognitionAfter,
+                recognitionDelta, profileRevision);
+    }
+
+    /**
+     * §7.1's public recognition for a subunit total, under this policy's ceiling.
+     *
+     * <p>Quantized once, here and in the read model, from the same cap: a gate that reported an
+     * uncapped figure would publish a recognition transition no query could reproduce.
+     */
+    private static int publicRecognition(ReputationPolicy policy, long subunits) {
+        int capped = policy == null
+                ? dev.otectus.mcareputation.profile.ProfileMath.MAX_RECOGNITION
+                : Math.max(0, policy.recognitionCap());
+        return Math.min(dev.otectus.mcareputation.profile.ProfileMath.publicRecognition(subunits),
+                capped);
     }
 
     /**
@@ -259,8 +289,9 @@ public final class ReconciliationService {
      *
      * <p>The single implementation behind both {@link ReputationSavedData#reconcilePlayer} and the
      * service's periodic sweep, so login, the sweep, the command and the API cannot drift apart.
-     * {@code onChange} is called for each community whose score actually moved; the sweep publishes a
-     * quiet standing change from it, everyone else passes a no-op.
+     * {@code onChange} is called for each community whose score actually moved, and for each one whose
+     * profile evidence moved on its own; the sweep publishes a quiet standing change from the former
+     * and a quiet profile change from the latter, everyone else passes a no-op.
      *
      * @return true when anything moved and the store was marked dirty
      */
@@ -281,10 +312,16 @@ public final class ReconciliationService {
                 changed = true;
                 onChange.accept(key, outcome);
             } else if (outcome.contributionDelta() != 0 || outcome.profileChanged()) {
-                // Profile evidence that faded without moving the score is still a change to the save.
-                // The sweep does not publish it as a standing change — there is none — and P5 picks it
-                // up from outcome.profileOnlyChange().
+                // Profile evidence that faded without moving the score is still a change to the save,
+                // and it is the one change no standing event can describe. The callback is handed it
+                // too, because the alternative is a fading recognition value that nothing outside this
+                // store ever hears about; the publisher recognises it from profileOnlyChange() and
+                // emits the profile envelope alone, never a StandingChange with identical scores
+                // (§15).
                 changed = true;
+                if (outcome.profileOnlyChange()) {
+                    onChange.accept(key, outcome);
+                }
             }
         }
         // Cap enforcement mutates the store (prunes incidents, folds weight into baselines) just as

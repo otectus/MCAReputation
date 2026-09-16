@@ -20,10 +20,15 @@ import dev.otectus.mcareputation.api.ReputationSnapshot;
 import dev.otectus.mcareputation.api.ResolutionResult;
 import dev.otectus.mcareputation.api.SpeakerContext;
 import dev.otectus.mcareputation.api.StandingChange;
+import dev.otectus.mcareputation.api.profile.ProfileAvailability;
+import dev.otectus.mcareputation.api.profile.ProfileCreditExplanation;
+import dev.otectus.mcareputation.api.profile.ProfiledDelivery;
+import dev.otectus.mcareputation.api.profile.ProfiledDeliveryResult;
 import dev.otectus.mcareputation.api.SupersedeSpec;
 import dev.otectus.mcareputation.api.event.ReputationChangedEvent;
 import dev.otectus.mcareputation.api.event.ReputationIncidentCreatedEvent;
 import dev.otectus.mcareputation.api.event.ReputationIncidentResolvedEvent;
+import dev.otectus.mcareputation.api.event.ReputationProfileChangedEvent;
 import dev.otectus.mcareputation.api.event.ReputationTierChangedEvent;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.community.CommunityMetadata;
@@ -56,7 +61,9 @@ import net.minecraft.server.level.ServerPlayer;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -220,6 +227,16 @@ public final class ReputationService {
     }
 
     private static DeliveryOutcome deliverInternal(ServiceContext ctx, IncidentDelivery delivery) {
+        return deliverInternal(ctx, delivery, null);
+    }
+
+    /**
+     * The keyed delivery transaction, optionally under an authored profile selection (§9.5).
+     *
+     * @param profileSelection the profile {@link #deliverProfiled} asked for, or {@code null}
+     */
+    private static DeliveryOutcome deliverInternal(ServiceContext ctx, IncidentDelivery delivery,
+                                                   @Nullable ResourceLocation profileSelection) {
         ReputationRequest request = delivery.request();
         ReputationSavedData data = ctx.data();
         // 1. writable store, before the receipt index is even consulted. A read-only store holds no
@@ -229,7 +246,7 @@ public final class ReputationService {
             return DeliveryOutcome.of(ReceiptOutcome.REFUSED_DISABLED, readOnlyRefusal(request));
         }
         if (!delivery.keyed()) {
-            ReputationResult result = recordInternal(ctx, request);
+            ReputationResult result = recordInternal(ctx, request, profileSelection);
             return DeliveryOutcome.of(outcomeFor(ctx, request, result), result);
         }
 
@@ -271,7 +288,7 @@ public final class ReputationService {
         //    mutation as the ledger write, and only then the derived milestones and the publication:
         //    a listener answering a query from inside our own event must never see an accepted deed
         //    with no receipt behind it (§3.2, §11.1 steps 7-9).
-        StagedOperation staged = commit(ctx, request, null);
+        StagedOperation staged = commit(ctx, request, null, profileSelection);
         if (!staged.created()) {
             ReputationResult refusal = staged.refusal();
             ReceiptOutcome refusalOutcome = outcomeFor(ctx, request, refusal);
@@ -288,8 +305,187 @@ public final class ReputationService {
                 Optional.of(staged.incident().id()), now);
         StagedOperation filed = staged.withReceipt(receipt);
         Accepted accepted = derive(ctx, request, filed);
-        publish(ctx, request, accepted);
+        publish(ctx, request, accepted, operationKey);
         return DeliveryOutcome.of(outcome, accepted.result(), receipt.toView());
+    }
+
+    // ------------------------------------------------------------------
+    // Profiled delivery (§9.5, §14.3)
+    // ------------------------------------------------------------------
+
+    /**
+     * One delivery with the two profile-specific things a producer may need to say about it: which
+     * authored profile it should be judged by, and which earlier deed it absorbs.
+     *
+     * <p>Normalised into the <em>same</em> canonical commit as {@link #deliver} and
+     * {@link #recordSuperseding} rather than into a second transaction beside them, which is the
+     * whole point of §9.5's wrapper: one acceptance path means one dedupe rule, one receipt index,
+     * one admission decision and one publication order, whichever entry point a companion happens to
+     * call.
+     */
+    public static ProfiledDeliveryResult deliverProfiled(ProfiledDelivery profiled) {
+        return deliverProfiledWith(null, profiled);
+    }
+
+    /** Seam entry point: {@code ctx} may replace the server for tests. */
+    static ProfiledDeliveryResult deliverProfiledWith(@Nullable ServiceContext ctx,
+                                                      ProfiledDelivery profiled) {
+        if (profiled == null) {
+            return ProfiledDeliveryResult.withoutProfile(
+                    DeliveryOutcome.of(ReceiptOutcome.REFUSED_INVALID,
+                            ReputationResult.rejected(ReputationResult.Reason.INVALID, null)),
+                    ProfileAvailability.UNRESOLVED);
+        }
+        ReputationRequest request = profiled.delivery().request();
+        try {
+            ServiceContext context = ctx != null ? ctx : ServiceContext.of(request.server());
+            return deliverProfiledInternal(context, profiled);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.error("[MCA: Reputation] profiled transaction failed for player {} "
+                    + "incident {}; nothing was written", request.playerId(), request.incidentType(), t);
+            return ProfiledDeliveryResult.withoutProfile(
+                    DeliveryOutcome.of(ReceiptOutcome.REFUSED_INVALID,
+                            ReputationResult.rejected(ReputationResult.Reason.ERROR,
+                                    request.community())),
+                    ProfileAvailability.ERROR);
+        }
+    }
+
+    private static ProfiledDeliveryResult deliverProfiledInternal(ServiceContext ctx,
+                                                                  ProfiledDelivery profiled) {
+        IncidentDelivery delivery = profiled.delivery();
+        ReputationRequest request = delivery.request();
+        @Nullable ResourceLocation selection = profiled.profileSelection().orElse(null);
+        if (!ctx.data().writable()) {
+            // Reported as READ_ONLY on the profile half as well as refused on the delivery half: a
+            // producer must be able to tell "we could not write" from "profiles are off".
+            return ProfiledDeliveryResult.withoutProfile(
+                    DeliveryOutcome.of(ReceiptOutcome.REFUSED_DISABLED, readOnlyRefusal(request)),
+                    ProfileAvailability.READ_ONLY);
+        }
+        DeliveryOutcome outcome = profiled.supersession().isPresent()
+                ? deliverSuperseding(ctx, delivery, profiled.supersession().get(), selection)
+                : deliverInternal(ctx, delivery, selection);
+        return explainProfiledDelivery(ctx, request, outcome);
+    }
+
+    /**
+     * A keyed or unkeyed delivery that absorbs an earlier deed (§16.3's assault-to-killing parity).
+     *
+     * <p>Three orderings matter here and all three are the existing ones. The supersede terms are
+     * validated first, from a pure read, so a spec that does not hold costs the producer nothing and
+     * falls straight through to an ordinary delivery — a real deed is never dropped because its
+     * replacement terms were wrong. The receipt index is consulted before the ledger, so a replay
+     * cannot fold a precursor twice. And the receipt itself is filed by the hook inside the canonical
+     * mutation rather than by this method afterwards, so nothing is ever published ahead of it.
+     */
+    private static DeliveryOutcome deliverSuperseding(ServiceContext ctx, IncidentDelivery delivery,
+                                                      SupersedeSpec spec,
+                                                      @Nullable ResourceLocation selection) {
+        ReputationRequest request = delivery.request();
+        ReputationSavedData data = ctx.data();
+        CommunityKey community = request.community();
+        long now = ctx.now();
+        Optional<IncidentRecord> maybePrecursor = spec == null || spec.precursorIncidentId() == null
+                ? Optional.empty()
+                : data.player(request.playerId())
+                        .flatMap(record -> record.community(community))
+                        .flatMap(record -> record.incident(spec.precursorIncidentId()));
+        if (supersedeRefusal(maybePrecursor, request, spec, now).isPresent()) {
+            return deliverInternal(ctx, delivery, selection);
+        }
+        if (!delivery.keyed()) {
+            ReputationResult result = supersedeInternal(ctx, request, spec, null, selection, null);
+            return DeliveryOutcome.of(outcomeFor(ctx, request, result), result);
+        }
+
+        String namespace = delivery.producerNamespace();
+        String operationKey = delivery.operationKey();
+        Optional<PlayerReputationRecord> maybePlayer = data.player(request.playerId());
+        if (maybePlayer.isPresent()) {
+            PlayerReputationRecord playerRecord = maybePlayer.get();
+            Optional<OperationReceipt> stored =
+                    playerRecord.findReceipt(namespace, community, operationKey);
+            if (stored.isEmpty()) {
+                stored = playerRecord.findLegacyReceipt(community, operationKey);
+            }
+            if (stored.isPresent()) {
+                return replay(ctx, data, playerRecord, stored.get(), request, now);
+            }
+        }
+
+        OperationReceipt[] filed = new OperationReceipt[1];
+        ReputationResult result = supersedeInternal(ctx, request, spec, (incident, receiptOutcome) -> {
+            filed[0] = fileReceipt(data, request, namespace, operationKey, receiptOutcome,
+                    Optional.of(incident.id()), now);
+        }, selection, operationKey);
+        if (filed[0] != null) {
+            return DeliveryOutcome.of(filed[0].outcome(), result, filed[0].toView());
+        }
+        // Nothing was created, so the hook never ran. A terminal refusal is still remembered, exactly
+        // as an ordinary keyed delivery remembers one; a retryable one deliberately is not.
+        ReceiptOutcome refusal = outcomeFor(ctx, request, result);
+        if (!refusal.isTerminal() || result.reason() == ReputationResult.Reason.ERROR) {
+            return DeliveryOutcome.of(refusal, result);
+        }
+        OperationReceipt receipt = fileReceipt(data, request, namespace, operationKey, refusal,
+                result.incidentId(), now);
+        return DeliveryOutcome.of(refusal, result, receipt.toView());
+    }
+
+    /**
+     * The profile half of a delivery's answer, read from what was actually recorded.
+     *
+     * <p>Read back from the incident rather than from the staging, deliberately: on a replayed
+     * delivery there is no staging at all, and the honest answer to "what is this operation worth" is
+     * whatever the deed it already produced is carrying (§9.4's frozen quantities).
+     */
+    private static ProfiledDeliveryResult explainProfiledDelivery(ServiceContext ctx,
+                                                                  ReputationRequest request,
+                                                                  DeliveryOutcome outcome) {
+        ReputationPolicy policy = ctx.policy();
+        ProfileAvailability availability;
+        if (!policy.enabled() || !policy.profilesEnabled()) {
+            availability = ProfileAvailability.DISABLED;
+        } else if (ProfileRegistryBundle.current().isEmpty()) {
+            availability = ProfileAvailability.UNSUPPORTED;
+        } else {
+            availability = ProfileAvailability.AVAILABLE;
+        }
+        Optional<IncidentProfileEvidence> maybeEvidence = outcome.result().incidentId()
+                .flatMap(id -> incidentWith(ctx, request.playerId(), request.community(), id))
+                .flatMap(IncidentRecord::profileEvidence);
+        if (maybeEvidence.isEmpty()) {
+            return ProfiledDeliveryResult.withoutProfile(outcome, availability);
+        }
+        IncidentProfileEvidence evidence = maybeEvidence.get();
+        if (evidence.origin() == IncidentProfileEvidence.Origin.DISABLED_AT_OCCURRENCE) {
+            // The deed was accepted while profiles were off. The window accounting advanced (§20) and
+            // the payload records that honestly, so the producer is told DISABLED rather than shown a
+            // profile that was never observed.
+            availability = ProfileAvailability.DISABLED;
+        }
+        boolean recorded = evidence.origin() == IncidentProfileEvidence.Origin.LIVE
+                && evidence.hasCurrentSubunits();
+        return new ProfiledDeliveryResult(outcome, availability, Optional.of(evidence.profileId()),
+                Optional.of(explainCredit(evidence.credit())), recorded);
+    }
+
+    /** The frozen credit decision, in the public vocabulary. One value per rule, never a catch-all. */
+    private static ProfileCreditExplanation explainCredit(CreditDecision decision) {
+        ProfileCreditExplanation.Reason reason = switch (decision.reason()) {
+            case NO_POLICY -> ProfileCreditExplanation.Reason.NO_POLICY;
+            case FULL_CREDIT -> ProfileCreditExplanation.Reason.FULL_CREDIT;
+            case GROUP_SCHEDULE -> ProfileCreditExplanation.Reason.GROUP_SCHEDULE;
+            case SUBJECT_CEILING -> ProfileCreditExplanation.Reason.SUBJECT_CEILING;
+            case SUBJECT_MISSING -> ProfileCreditExplanation.Reason.SUBJECT_MISSING;
+            case CAPACITY_OVERFLOW -> ProfileCreditExplanation.Reason.CAPACITY_OVERFLOW;
+            case NOT_COMMENDABLE -> ProfileCreditExplanation.Reason.NOT_COMMENDABLE;
+            case LEGACY_FULL_CREDIT -> ProfileCreditExplanation.Reason.LEGACY_FULL_CREDIT;
+            case CREDIT_DISABLED -> ProfileCreditExplanation.Reason.CREDIT_DISABLED;
+        };
+        return new ProfileCreditExplanation(decision.group(), decision.subjectRole(),
+                decision.groupOrdinal(), decision.subjectOrdinal(), decision.effectiveBp(), reason);
     }
 
     /** Appends one operation receipt and marks the store dirty. Never reached on a read-only store. */
@@ -436,7 +632,13 @@ public final class ReputationService {
     }
 
     private static ReputationResult recordInternal(ServiceContext ctx, ReputationRequest request) {
-        StagedOperation staged = commit(ctx, request, null);
+        return recordInternal(ctx, request, null);
+    }
+
+    /** The unkeyed transaction, optionally under an authored profile selection (§9.5). */
+    private static ReputationResult recordInternal(ServiceContext ctx, ReputationRequest request,
+                                                   @Nullable ResourceLocation profileSelection) {
+        StagedOperation staged = commit(ctx, request, null, profileSelection);
         if (!staged.created()) {
             return staged.refusal();
         }
@@ -579,6 +781,18 @@ public final class ReputationService {
      * envelope, and a failure in either cannot undo what was committed or consume the operation again.
      */
     private static void publish(ServiceContext ctx, ReputationRequest request, Accepted accepted) {
+        publish(ctx, request, accepted, null);
+    }
+
+    /**
+     * Step 9, for a delivery that has an operation identity to name in the profile envelope.
+     *
+     * @param operationKey the producer's key, carried into
+     *                     {@link ReputationProfileChangedEvent#operationKey()} so a consumer can tie
+     *                     the profile change to the delivery it acknowledged
+     */
+    private static void publish(ServiceContext ctx, ReputationRequest request, Accepted accepted,
+                                @Nullable String operationKey) {
         StagedOperation staged = accepted.staged();
         IncidentRecord incident = staged.incident();
         @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
@@ -588,6 +802,11 @@ public final class ReputationService {
                 staged.community(), player, accepted.tier(),
                 new ReputationIncidentCreatedEvent(request.playerId(), player, accepted.view()),
                 incident.id(), incident.type(), request.source());
+
+        // Last, after the standing envelope: one operation may publish its incident event, one
+        // standing envelope and one profile event, and the profile event is the only one that can
+        // describe what the village can now say about this player (§15).
+        publishProfileChange(ctx, request, staged, operationKey);
 
         if (McaReputationConfig.debugLogging()) {
             int appliedDelta = staged.newScore() - staged.oldScore();
@@ -607,6 +826,20 @@ public final class ReputationService {
      */
     private static StagedOperation commit(ServiceContext ctx, ReputationRequest request,
                                           @Nullable PrecursorStaging precursor) {
+        return commit(ctx, request, precursor, null);
+    }
+
+    /**
+     * The same transaction with an authored profile selection (§9.5).
+     *
+     * @param profileSelection the profile a producer asked for instead of the incident's default, or
+     *                         {@code null} for the ordinary case. It selects an authored profile by id
+     *                         and nothing else: no numeric override, no facet value and no credit
+     *                         percentage ever crosses this boundary.
+     */
+    private static StagedOperation commit(ServiceContext ctx, ReputationRequest request,
+                                          @Nullable PrecursorStaging precursor,
+                                          @Nullable ResourceLocation profileSelection) {
         // 1. server thread, master switch, writable store
         if (!ctx.isServerThread()) {
             McaReputation.LOGGER.error("[MCA: Reputation] record() called off the server thread from {}; "
@@ -756,7 +989,7 @@ public final class ReputationService {
         // created no evidence, which is the entire reason the slots are staged rather than filled as
         // the transaction goes.
         ProfileStaging profileStaging = stageProfile(definition, policy, knownPlayer, knownCommunity,
-                visibility, request, occurredAt, now);
+                visibility, request, occurredAt, now, profileSelection);
 
         // 9. the last read that can fail, taken before the first write. Everything after this point is
         // an in-memory mutation of records this transaction already holds, so a failure cannot leave
@@ -867,12 +1100,14 @@ public final class ReputationService {
                                                Optional<PlayerReputationRecord> knownPlayer,
                                                Optional<CommunityReputationRecord> knownCommunity,
                                                IncidentVisibility visibility,
-                                               ReputationRequest request, long occurredAt, long now) {
-        Optional<ResourceLocation> profileId = definition.socialProfile();
+                                               ReputationRequest request, long occurredAt, long now,
+                                               @Nullable ResourceLocation profileSelection) {
+        ProfileRegistryBundle bundle = ProfileRegistryBundle.current();
+        Optional<ResourceLocation> profileId =
+                resolveProfileSelection(definition, bundle, request, profileSelection);
         if (profileId.isEmpty() || visibility.effective() == IncidentVisibility.PRIVATE) {
             return ProfileStaging.NONE;
         }
-        ProfileRegistryBundle bundle = ProfileRegistryBundle.current();
         Optional<IncidentProfileDefinition> maybeProfile = bundle.profile(profileId.get());
         if (maybeProfile.isEmpty()) {
             if (McaReputationConfig.debugLogging()) {
@@ -938,6 +1173,40 @@ public final class ReputationService {
                 IncidentProfileEvidence.fingerprint(profileId.get(), profile), bundle.generation(),
                 recognition, facets, frozen);
         return new ProfileStaging(new PendingProfilePayload.Staged(evidence), reservation);
+    }
+
+    /**
+     * Which authored profile this deed is judged by (§9.5).
+     *
+     * <p>A producer's selection has to be checked against the same allowlist an authored default is,
+     * and then some: it arrives from another mod rather than from the pack that wrote the incident.
+     * An unknown or disallowed selection falls back to the incident's own default rather than
+     * discarding the deed's profile evidence — the producer asked for the wrong rules, which is not a
+     * reason to record the encounter as though nothing socially significant happened — and it is
+     * warned about, because a silent fallback is how a commission ends up counting as a generic
+     * errand forever.
+     */
+    private static Optional<ResourceLocation> resolveProfileSelection(
+            IncidentDefinition definition, ProfileRegistryBundle bundle, ReputationRequest request,
+            @Nullable ResourceLocation selection) {
+        if (selection == null) {
+            return definition.socialProfile();
+        }
+        Optional<IncidentProfileDefinition> selected = bundle.profile(selection);
+        if (selected.isEmpty()) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] {} selected social profile {} for {}, which no "
+                            + "published pack defines; falling back to the incident's own profile",
+                    request.source(), selection, request.incidentType());
+            return definition.socialProfile();
+        }
+        if (!selected.get().permits(request.incidentType())) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] {} selected social profile {} for {}, which the "
+                            + "profile's allowed_incidents does not admit; falling back to the "
+                            + "incident's own profile (spec 9.5)", request.source(), selection,
+                    request.incidentType());
+            return definition.socialProfile();
+        }
+        return Optional.of(selection);
     }
 
     /**
@@ -1083,6 +1352,36 @@ public final class ReputationService {
 
     private static ReputationResult supersedeInternal(ServiceContext ctx, ReputationRequest successor,
                                                       SupersedeSpec spec) {
+        return supersedeInternal(ctx, successor, spec, null, null, null);
+    }
+
+    /**
+     * What a receipt filer does for a superseding delivery: file the operation's receipt inside the
+     * canonical mutation, before anything is published.
+     *
+     * <p>The hook exists so a keyed superseding delivery keeps §11.1's ordering. Filing the receipt
+     * from the caller, after this method returned, would put it after the standing envelope — and a
+     * synchronous listener querying the store from inside our own event would then see an accepted
+     * deed with no receipt behind it, which is the exact defect §3.2 records.
+     */
+    @FunctionalInterface
+    private interface ReceiptFiler {
+
+        void file(IncidentRecord incident, ReceiptOutcome outcome);
+    }
+
+    /**
+     * The supersession transaction (§11.3), with the two things a profiled delivery adds.
+     *
+     * @param filer           files the operation receipt after the canonical mutation and before the
+     *                        publication, or {@code null} for an unkeyed supersession
+     * @param profileSelection an authored profile selection for the successor (§9.5)
+     * @param operationKey     the producer's key, named in the profile envelope
+     */
+    private static ReputationResult supersedeInternal(ServiceContext ctx, ReputationRequest successor,
+                                                      SupersedeSpec spec, @Nullable ReceiptFiler filer,
+                                                      @Nullable ResourceLocation profileSelection,
+                                                      @Nullable String operationKey) {
         ReputationSavedData data = ctx.data();
         CommunityKey community = successor.community();
         long now = ctx.now();
@@ -1105,7 +1404,7 @@ public final class ReputationService {
                         spec == null ? "?" : spec.precursorIncidentId(), successor.incidentType(),
                         refusal.get());
             }
-            return recordInternal(ctx, successor);
+            return recordInternal(ctx, successor, profileSelection);
         }
         IncidentRecord precursor = maybePrecursor.orElseThrow();
 
@@ -1128,7 +1427,7 @@ public final class ReputationService {
         precursor.foldInto(null, now);
         communityRecord.recomputeScore(minScore, maxScore);
 
-        StagedOperation staged = commit(ctx, successor, staging);
+        StagedOperation staged = commit(ctx, successor, staging, profileSelection);
         if (!staged.created()) {
             staged.rollBackPrecursor();
             communityRecord.recomputeScore(minScore, maxScore);
@@ -1147,6 +1446,12 @@ public final class ReputationService {
         communityRecord.recomputeScore(minScore, maxScore);
         int newScore = communityRecord.score();
 
+        // The receipt lands here: after the ledger, the score and the fold are all final, and before
+        // a single notification has gone out (§11.1 steps 7-9).
+        if (filer != null) {
+            filer.file(incident, outcomeFor(staged));
+        }
+
         @Nullable ServerPlayer player = ctx.onlinePlayer(successor.playerId());
         TierOutcome tier = applyTierTransition(ctx, staged.playerRecord(), communityRecord, player,
                 oldScore, newScore, now);
@@ -1160,6 +1465,8 @@ public final class ReputationService {
                 communityRecord, player, tier,
                 new ReputationIncidentCreatedEvent(successor.playerId(), player, view),
                 incident.id(), incident.type(), successor.source());
+
+        publishProfileChange(ctx, successor, staged, operationKey);
 
         McaReputation.LOGGER.debug("[MCA: Reputation] {} superseded {} with {} for {} in {}: {} -> {}",
                 successor.source(), precursor.id(), incident.id(), successor.playerId(),
@@ -2302,9 +2609,104 @@ public final class ReputationService {
         }
     }
 
+    /**
+     * Publishes the profile half of an accepted deed (§15).
+     *
+     * <p>Only for evidence that is actually {@link IncidentProfileEvidence.Origin#LIVE} and actually
+     * changed something. A deed accepted while profiles were switched off, one whose profile was
+     * suppressed to nothing by repeat credit, and one backdated so far that its contribution arrived
+     * already spent all move no public evidence, and announcing them would be exactly the
+     * meaningless event spam §15 forbids.
+     *
+     * <p>The transition is measured by folding the ledger twice, with and without this deed, rather
+     * than by subtracting the payload: the public integers are capped and quantized, so a deed at the
+     * recognition ceiling legitimately changes nothing and has to be able to say so.
+     */
+    private static void publishProfileChange(ServiceContext ctx, ReputationRequest request,
+                                             StagedOperation staged, @Nullable String operationKey) {
+        if (staged.policy() == null || staged.community() == null || !staged.created()) {
+            return;
+        }
+        Optional<IncidentProfileEvidence> maybeEvidence = staged.profile()
+                .filter(payload -> payload instanceof PendingProfilePayload.Staged)
+                .map(payload -> ((PendingProfilePayload.Staged) payload).evidence())
+                .filter(evidence -> evidence.origin() == IncidentProfileEvidence.Origin.LIVE);
+        if (maybeEvidence.isEmpty() || !maybeEvidence.get().hasCurrentSubunits()) {
+            return;
+        }
+        CommunityReputationRecord record = staged.community();
+        ProfileRegistryBundle bundle = ProfileRegistryBundle.current();
+        ProfileAggregator.Aggregate after =
+                ProfileAggregator.community(staged.policy(), record, bundle);
+        ProfileAggregator.Aggregate before = ProfileAggregator.communityExcluding(staged.policy(),
+                record, bundle, staged.incident().id());
+        List<ResourceLocation> changed = changedFacets(before, after);
+        int oldRecognition = before.recognition().value();
+        int newRecognition = after.recognition().value();
+        if (oldRecognition == newRecognition && changed.isEmpty()) {
+            return;
+        }
+        @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
+        postSafely(ctx, new ReputationProfileChangedEvent(request.playerId(), player, record.key(),
+                oldRecognition, newRecognition, changed, record.bumpProfileRevision(),
+                ChangeCause.DEED, staged.incident().id(), staged.incident().type(), operationKey,
+                request.source(), false));
+    }
+
+    /** Which facet values two folds of the same ledger disagree about, in the read model's order. */
+    private static List<ResourceLocation> changedFacets(ProfileAggregator.Aggregate before,
+                                                        ProfileAggregator.Aggregate after) {
+        Map<ResourceLocation, Integer> old = new LinkedHashMap<>();
+        for (dev.otectus.mcareputation.api.profile.FacetValue facet : before.facets()) {
+            old.put(facet.facet(), facet.value());
+        }
+        List<ResourceLocation> changed = new ArrayList<>();
+        for (dev.otectus.mcareputation.api.profile.FacetValue facet : after.facets()) {
+            Integer previous = old.remove(facet.facet());
+            if (previous == null ? facet.value() != 0 : previous != facet.value()) {
+                changed.add(facet.facet());
+            }
+        }
+        // A facet that existed only because of the excluded deed is a change too.
+        for (Map.Entry<ResourceLocation, Integer> entry : old.entrySet()) {
+            if (entry.getValue() != 0) {
+                changed.add(entry.getKey());
+            }
+        }
+        return changed;
+    }
+
+    /**
+     * The profile envelope for a reconciliation pass that moved profile evidence and nothing the
+     * standing channel reports (§15).
+     *
+     * <p>Published only for the profile-<em>only</em> case. A pass that moved both channels already
+     * publishes the standing envelope, which is the invalidation signal a consumer keyed on either
+     * channel acts on; adding a second notification of the same pass is the competing-notification
+     * defect §15 names. Quiet and caused by decay: ordinary fading must never toast, and a value
+     * oscillating across a label threshold must never announce a milestone.
+     *
+     * <p>The changed-facet set is deliberately empty here. Itemising it would mean folding every aged
+     * ledger twice on the sweep, for an answer §15 already tells consumers to re-query at an
+     * interaction boundary; the profile revision is the part they need.
+     */
+    private static void publishProfileReconcile(ServiceContext ctx, UUID playerId,
+                                                CommunityKey community,
+                                                ReconciliationService.ReconcileOutcome outcome) {
+        if (!outcome.profileOnlyChange()) {
+            return;
+        }
+        @Nullable ServerPlayer player = ctx.onlinePlayer(playerId);
+        postSafely(ctx, new ReputationProfileChangedEvent(playerId, player, community,
+                outcome.profileRecognition() - outcome.profileRecognitionDelta(),
+                outcome.profileRecognition(), List.of(), outcome.profileRevision(),
+                ChangeCause.DECAY, null, null, null, BuiltinIncidents.SOURCE_CORE, true));
+    }
+
     /** The envelope for a change the reconciliation gate made: always decay, always quiet. */
     private static void publishReconcile(ServiceContext ctx, UUID playerId, CommunityKey community,
                                          ReconciliationService.ReconcileOutcome outcome) {
+        publishProfileReconcile(ctx, playerId, community, outcome);
         if (!outcome.scoreChanged()) {
             return;
         }

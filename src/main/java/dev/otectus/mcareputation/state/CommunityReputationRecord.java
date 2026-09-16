@@ -75,6 +75,8 @@ public final class CommunityReputationRecord {
     // Bumped by the service on every real score change, so a consumer can tell one change from a
     // repeat of the same one. Persisted since format 2, or a restart would replay old revisions.
     private long revision;
+    // The profile channel's counter. Not persisted; see profileRevision().
+    private long profileRevision;
 
     public CommunityReputationRecord(CommunityKey key) {
         this.key = key;
@@ -112,6 +114,29 @@ public final class CommunityReputationRecord {
     /** @return the new revision. Called by the service after a change it actually published. */
     public long bumpRevision() {
         return ++revision;
+    }
+
+    /**
+     * The profile channel's own change counter (§15's three revisions).
+     *
+     * <p>Separate from {@link #revision()} because the two invalidate different caches: profile
+     * evidence fades on its own authored lifetimes, so a village can change what it is able to say
+     * about a player on a day the score, the tier and the standing revision all stand still. Bumping
+     * the standing revision for that would invalidate every standing cache in the world on a day
+     * nothing about standing happened.
+     *
+     * <p><b>In memory only</b>, deliberately: persisting it would add a field to a save layout this
+     * version does not change, and a restart is already an invalidation boundary for a consumer that
+     * caches profile-dependent state — §15 asks consumers to re-evaluate at an interaction boundary
+     * rather than to trust a number across a session.
+     */
+    public long profileRevision() {
+        return profileRevision;
+    }
+
+    /** @return the new profile revision. Called by the gate and the service after a real change. */
+    public long bumpProfileRevision() {
+        return ++profileRevision;
     }
 
     /**
@@ -322,8 +347,22 @@ public final class CommunityReputationRecord {
 
     // --- the profile channel (§12.2) ----------------------------------------
 
-    /** What one profile pass over this ledger did: how much magnitude moved, and whether a clock did. */
-    public record ProfileReconcileResult(long magnitudeDelta, boolean clockMoved) {
+    /**
+     * What one profile pass over this ledger did.
+     *
+     * <p>The two recognition sums are here rather than recomputed by the caller because only this
+     * pass can see both sides of it: recognition fades on the deeds' own lifetimes, so the value
+     * before the pass no longer exists once the pass has run. §15's profile-only change event needs
+     * the transition, and a caller folding the ledger afterwards could only ever report the new value
+     * twice.
+     *
+     * @param magnitudeDelta      change in total profile subunit magnitude across every channel
+     * @param clockMoved          whether any record's profile observation clock advanced
+     * @param recognitionBefore   the ledger's recognition subunits before the pass
+     * @param recognitionAfter    the same sum after it
+     */
+    public record ProfileReconcileResult(long magnitudeDelta, boolean clockMoved,
+                                         long recognitionBefore, long recognitionAfter) {
 
         /** Whether anything persisted moved, which is what decides {@code setDirty}. */
         public boolean moved() {
@@ -354,6 +393,7 @@ public final class CommunityReputationRecord {
                                                     @Nullable ProfileFreezeLog freezeLog) {
         long delta = 0L;
         boolean clockMoved = false;
+        long recognitionBefore = recognitionSubunits();
         for (IncidentRecord incident : incidents.values()) {
             if (!incident.hasProfileEvidence()) {
                 continue;
@@ -365,7 +405,35 @@ public final class CommunityReputationRecord {
                 clockMoved = true;
             }
         }
-        return new ProfileReconcileResult(delta, clockMoved);
+        return new ProfileReconcileResult(delta, clockMoved, recognitionBefore, recognitionSubunits());
+    }
+
+    /**
+     * This ledger's recognition contribution, in subunits (§7.1).
+     *
+     * <p>Exactly the summation the public read model performs, including the two exclusions: a folded
+     * record's weight was absorbed by its successor and a disproven one evidences nothing, though both
+     * keep their frozen units on disk. Two different answers to "how well known is this player" would
+     * be worse than none.
+     */
+    public long recognitionSubunits() {
+        long total = 0L;
+        for (IncidentRecord incident : incidents.values()) {
+            if (incident.isSuperseded() || incident.status() == IncidentStatus.DISPROVEN) {
+                continue;
+            }
+            Optional<dev.otectus.mcareputation.profile.IncidentProfileEvidence> evidence =
+                    incident.profileEvidence();
+            if (evidence.isEmpty()) {
+                continue;
+            }
+            for (var channel : evidence.get().channels()) {
+                if (channel.isRecognition()) {
+                    total = dev.otectus.mcareputation.profile.ProfileMath.add(total, channel.current());
+                }
+            }
+        }
+        return total;
     }
 
     /**
@@ -390,7 +458,10 @@ public final class CommunityReputationRecord {
                 clockMoved = true;
             }
         }
-        return new ProfileReconcileResult(0L, clockMoved);
+        // Nothing aged, so the recognition sum is the same on both sides by construction; reading it
+        // once and reporting it twice is the honest way to say that.
+        long recognition = recognitionSubunits();
+        return new ProfileReconcileResult(0L, clockMoved, recognition, recognition);
     }
 
     /**

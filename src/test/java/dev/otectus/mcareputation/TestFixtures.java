@@ -10,6 +10,7 @@ import dev.otectus.mcareputation.incident.IncidentSubject;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.incident.ResolutionPolicy;
 import dev.otectus.mcareputation.credit.CreditPolicy;
+import dev.otectus.mcareputation.profile.FacetDefinition;
 import dev.otectus.mcareputation.profile.IncidentProfileDefinition;
 import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
 import net.minecraft.network.chat.Component;
@@ -120,9 +121,31 @@ public final class TestFixtures {
                 Optional.of(new CreditPolicy.SubjectLimit("beneficiary", List.of(10000, 5000, 0), 0)));
     }
 
+    /**
+     * A bipolar facet definition for {@link #FACET}: a label from 5 points and two evidence items, a
+     * 50% interpretation weight, and no personality overrides.
+     *
+     * <p>Published separately from the profile because the two carry different things: the profile
+     * authors the quantities a deed freezes, the facet authors the presentation and the interpretation
+     * weight a reload may change (§9.4). A test that publishes only the profile is testing a facet
+     * whose definition is missing, which is a real and different case.
+     */
+    public static FacetDefinition facet() {
+        return new FacetDefinition(Component.literal("Bravery"), Optional.empty(),
+                new FacetDefinition.Range(-100, 100), Component.literal("Brave"),
+                Optional.of(Component.literal("Cowardly")), 10, 5, 2, 5_000, Map.of());
+    }
+
     /** Publishes one profile generation. Call {@link ProfileRegistryBundle#clear()} afterwards. */
     public static void publishProfile(IncidentProfileDefinition profile, CreditPolicy creditPolicy) {
         ProfileRegistryBundle.publish(Map.of(), Map.of(), Map.of(PROFILE, profile),
+                creditPolicy == null ? Map.of() : Map.of(CREDIT_POLICY, creditPolicy));
+    }
+
+    /** The same, with facet definitions published too: what a complete content generation looks like. */
+    public static void publishProfile(IncidentProfileDefinition profile, CreditPolicy creditPolicy,
+                                      Map<ResourceLocation, FacetDefinition> facets) {
+        ProfileRegistryBundle.publish(facets, Map.of(), Map.of(PROFILE, profile),
                 creditPolicy == null ? Map.of() : Map.of(CREDIT_POLICY, creditPolicy));
     }
 

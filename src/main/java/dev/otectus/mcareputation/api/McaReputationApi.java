@@ -2,10 +2,19 @@ package dev.otectus.mcareputation.api;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.profile.ProfileCapabilities;
+import dev.otectus.mcareputation.api.profile.ProfileAvailability;
+import dev.otectus.mcareputation.api.profile.ProfileQuery;
+import dev.otectus.mcareputation.api.profile.ProfileQueryResult;
+import dev.otectus.mcareputation.api.profile.ProfileSnapshot;
+import dev.otectus.mcareputation.api.profile.ProfiledDelivery;
+import dev.otectus.mcareputation.api.profile.ProfiledDeliveryResult;
+import dev.otectus.mcareputation.api.profile.VillagerProfileSnapshot;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.event.CoreIncidentAuthorities;
 import dev.otectus.mcareputation.community.CommunityResolver;
 import dev.otectus.mcareputation.incident.IncidentStatus;
+import dev.otectus.mcareputation.reputation.ProfileService;
 import dev.otectus.mcareputation.reputation.ReputationService;
 import dev.otectus.mcareputation.reputation.ReputationTierSet;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
@@ -847,7 +856,7 @@ public final class McaReputationApi {
         }
         return new ReputationCapabilities(API_VERSION, enabled,
                 McaReputationConfig.scoreDecayEnabled(), McaReputationConfig.villagerOpinionEnabled(),
-                Set.of(ReputationCapabilities.FEATURE_STANDING_CHANGE,
+                featureSet(Set.of(ReputationCapabilities.FEATURE_STANDING_CHANGE,
                         ReputationCapabilities.FEATURE_EFFECTIVE_AUTHORITY,
                         ReputationCapabilities.FEATURE_DUPLICATE_IDENTITY,
                         ReputationCapabilities.FEATURE_SUPERSEDE,
@@ -859,8 +868,29 @@ public final class McaReputationApi {
                         ReputationCapabilities.FEATURE_BOUND_RESOLUTION,
                         ReputationCapabilities.FEATURE_TITLE_SYNC,
                         ReputationCapabilities.FEATURE_LADDER_HIGH_WATER,
-                        ReputationCapabilities.FEATURE_GOSSIP_STORY),
+                        ReputationCapabilities.FEATURE_GOSSIP_STORY)),
                 nativeKinds, claimants, readinessReason);
+    }
+
+    /**
+     * The stable feature set plus the profile features, when those are actually live.
+     *
+     * <p>The profile rows are conditional and the older rows are not, and the difference is what a
+     * companion does with them. Every row above is true of this binary whatever the config says, so
+     * withdrawing one would only make a bridge re-probe. A profile feature, in contrast, cannot
+     * answer at all while profiles are switched off or no pack has published content — advertising
+     * it then would make a consumer skip the authored fallback it needs and treat an unavailable
+     * result as a negative answer. The stable half of that information is not lost: it is in
+     * {@link #profileCapabilities}, which keeps reporting {@code supported} through a temporary
+     * disablement exactly as §14.4 requires.
+     */
+    private static Set<String> featureSet(Set<String> stable) {
+        if (!ProfileService.live(McaReputationConfig.snapshot())) {
+            return stable;
+        }
+        Set<String> features = new LinkedHashSet<>(stable);
+        features.addAll(ProfileService.FEATURES);
+        return features;
     }
 
     /** Whether the core hook behind a kind is switched on at all (§23's {@code core_events} block). */
@@ -891,6 +921,268 @@ public final class McaReputationApi {
      */
     public static boolean hasExternalAuthority(CoreIncidentKind kind) {
         return CoreIncidentAuthorities.isClaimed(kind);
+    }
+
+    // ------------------------------------------------------------------
+    // Public profiles (§14.3)
+    // ------------------------------------------------------------------
+
+    /**
+     * What the profile feature can do right now (§14.4).
+     *
+     * <p>Answer the readiness question here rather than by reflecting over methods or guessing from
+     * the mod version: {@link ProfileCapabilities#ready()} is the one boolean that means "a profile
+     * query asked now will return a real answer". A null server answers with the static half, so a
+     * companion may call this from common setup.
+     *
+     * <p>Deliberately not gated on {@code enableConversationsIntegration} (R02). That switch belongs
+     * to one adapter; turning it off must not disable quest eligibility, admin inspection, or this
+     * mod's own queries.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileCapabilities profileCapabilities(@Nullable MinecraftServer server) {
+        try {
+            return ProfileService.capabilities(McaReputationConfig.snapshot(),
+                    server == null ? null : ReputationSavedData.get(server));
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] profileCapabilities failed; reporting the "
+                    + "static half", t);
+            return ProfileService.capabilities(null, null);
+        }
+    }
+
+    /**
+     * A community's public profile for one player: recognition, facets, dominant traits, revisions
+     * and coverage (§14.3).
+     *
+     * <p>Detailed by design, with no convenience zero beside it. "This player has no recognition
+     * here" and "we cannot say" are different facts, and a gate that reads an ambiguous zero as the
+     * first will eventually admit a player on the strength of a disabled feature. Reconciles the
+     * community it was asked about through the canonical gate, creates no player or community record,
+     * and synthesises a neutral read model — unsaved — for a valid combination that has none.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<ProfileSnapshot> getProfileDetailed(MinecraftServer server,
+                                                                         UUID player,
+                                                                         CommunityKey community) {
+        try {
+            if (server == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_target");
+            }
+            return ProfileService.profile(McaReputationConfig.snapshot(),
+                    ReputationSavedData.get(server), player, community, gameTime(server), false);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] getProfileDetailed failed; returning "
+                    + "unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * The stored profile exactly as it sits on disk, for diagnostics (§14.3).
+     *
+     * <p>Strictly read-only: the gate is entered with {@code INSPECT}, so neither clock moves,
+     * neither ledger ages, no tracker retires and nothing is marked dirty. A diagnostic that changed
+     * the state it reports would be worse than no diagnostic.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<ProfileSnapshot> inspectStoredProfile(MinecraftServer server,
+                                                                           UUID player,
+                                                                           CommunityKey community) {
+        try {
+            if (server == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_target");
+            }
+            return ProfileService.profile(McaReputationConfig.snapshot(),
+                    ReputationSavedData.get(server), player, community, gameTime(server), true);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] inspectStoredProfile failed; returning "
+                    + "unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * What one villager makes of a player's public profile, from the evidence that villager actually
+     * knows (§13).
+     *
+     * <p>The filtering happens before the aggregation, not after: the community's facet vector is
+     * never computed and scaled down, because the shape of that vector is itself evidence of events
+     * this speaker may never have learned (§13.1). A villager who knows nothing answers
+     * {@code AVAILABLE} with an empty profile and a zero opinion — a real answer, and one a caller
+     * must <b>not</b> replace with the community-wide view (§13.3).
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<VillagerProfileSnapshot> getVillagerProfileDetailed(
+            MinecraftServer server, UUID player, UUID villager, CommunityKey community) {
+        try {
+            if (server == null || villager == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        villager == null ? "no_speaker_context" : "unresolved_target");
+            }
+            boolean resident = CommunityResolver.isResident(server, community, villager);
+            return ProfileService.speakerProfile(McaReputationConfig.snapshot(),
+                    ReputationSavedData.get(server), player, community,
+                    SpeakerContext.of(villager, resident), gameTime(server));
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] getVillagerProfileDetailed failed; returning "
+                    + "unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * The same question asked about a villager entity: their community and residency are resolved
+     * here, so the entity and UUID entry points answer identically for the same loaded villager
+     * (§13.2).
+     *
+     * <p>A villager belonging to no community this mod can name is {@code UNRESOLVED}, never a silent
+     * zero and never the nearest village's profile.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<VillagerProfileSnapshot> getVillagerProfileDetailed(
+            MinecraftServer server, UUID player, Entity villager) {
+        try {
+            if (villager == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "no_speaker_context");
+            }
+            Optional<CommunityKey> community = resolveCommunity(villager);
+            if (community.isEmpty()) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_community");
+            }
+            return getVillagerProfileDetailed(server, player, villager.getUUID(), community.get());
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] getVillagerProfileDetailed(entity) failed; "
+                    + "returning unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * Whether a player's public profile satisfies an authored predicate (§14.5).
+     *
+     * <p>Every clause is ANDed. An unknown facet or recognition tier fails closed — a typo cannot
+     * open a gate — and an unobserved facet is not negative evidence, so a "nonviolent" requirement
+     * is not satisfied by a community that has simply never seen this player. A clause that depends
+     * on complete history refuses distinguishably on a save whose history is not complete, so the
+     * authored fallback runs instead of a wrong answer.
+     *
+     * <p>Not gated on the Conversations integration switch: this same predicate backs quest
+     * eligibility and admin inspection (R02).
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<Boolean> matchesProfile(MinecraftServer server, UUID player,
+                                                             CommunityKey community,
+                                                             ProfileQuery query) {
+        try {
+            if (server == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_target");
+            }
+            return ProfileService.matches(McaReputationConfig.snapshot(),
+                    ReputationSavedData.get(server), player, community, query, gameTime(server));
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] matchesProfile failed; returning unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * The same predicate, evaluated against what one villager knows (§13.1, §14.5).
+     *
+     * <p><b>Never widens.</b> A missing or unresolvable {@link SpeakerContext} answers
+     * {@code UNRESOLVED} rather than falling back to the community profile: a speaker-scoped gate
+     * that quietly became a community gate is how a stranger gets treated as a friend, and §13.3
+     * forbids it outright. A valid zero speaker view stays zero.
+     *
+     * <p>The community is an explicit argument because {@link SpeakerContext} does not carry one —
+     * it names a villager and their residency, and "which village is this question about" is a
+     * separate fact. Use {@link #matchesSpeakerProfile(MinecraftServer, UUID, Entity, ProfileQuery)}
+     * to have both resolved from a loaded villager.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<Boolean> matchesSpeakerProfile(MinecraftServer server, UUID player,
+                                                                     CommunityKey community,
+                                                                     @Nullable SpeakerContext speaker,
+                                                                     ProfileQuery query) {
+        try {
+            if (server == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_target");
+            }
+            return ProfileService.matchesSpeaker(McaReputationConfig.snapshot(),
+                    ReputationSavedData.get(server), player, community, speaker, query,
+                    gameTime(server));
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] matchesSpeakerProfile failed; returning "
+                    + "unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * The speaker-scoped predicate with the speaker and their community resolved from a loaded
+     * villager entity.
+     *
+     * <p>Identical in every other respect, including the refusal to widen: a villager whose community
+     * cannot be named is {@code UNRESOLVED}.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfileQueryResult<Boolean> matchesSpeakerProfile(MinecraftServer server, UUID player,
+                                                                     Entity villager,
+                                                                     ProfileQuery query) {
+        try {
+            if (villager == null) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "no_speaker_context");
+            }
+            Optional<CommunityKey> community = resolveCommunity(villager);
+            Optional<SpeakerContext> speaker = speakerContext(server, villager);
+            if (community.isEmpty() || speaker.isEmpty()) {
+                return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
+                        "unresolved_community");
+            }
+            return matchesSpeakerProfile(server, player, community.get(), speaker.get(), query);
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] matchesSpeakerProfile(entity) failed; "
+                    + "returning unavailable", t);
+            return ProfileQueryResult.unavailable(ProfileAvailability.ERROR, "internal_error");
+        }
+    }
+
+    /**
+     * Delivers one deed with an authored profile selection, a profile-aware supersession, or both
+     * (§9.5, §14.3).
+     *
+     * <p>The same canonical commit as {@link #deliver} and {@link #recordSuperseding}: one dedupe
+     * rule, one receipt index, one admission decision, one publication order. The answer reports the
+     * two halves separately, because they fail independently — a deed can be recorded and move
+     * standing while profiles are switched off, and §16.3 is explicit that a social delivery
+     * failure must never undo a legal settlement.
+     *
+     * @since MCA: Reputation 0.6.0
+     */
+    public static ProfiledDeliveryResult deliverProfiled(ProfiledDelivery delivery) {
+        if (delivery != null && !integrationEnabled(delivery.delivery().request().source())) {
+            return ProfiledDeliveryResult.withoutProfile(
+                    DeliveryOutcome.of(ReceiptOutcome.REFUSED_DISABLED,
+                            ReputationResult.rejected(ReputationResult.Reason.DISABLED,
+                                    delivery.delivery().request().community())),
+                    ProfileAvailability.DISABLED);
+        }
+        return ReputationService.deliverProfiled(delivery);
     }
 
     // ------------------------------------------------------------------

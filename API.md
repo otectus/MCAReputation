@@ -216,6 +216,21 @@ boolean      setDecayImmune(MinecraftServer, CommunityKey, boolean immune);
 // Core incident detection
 CoreIncidentAuthorityRegistration registerCoreIncidentAuthority(CoreIncidentAuthority);
 boolean                           hasExternalAuthority(CoreIncidentKind);
+
+// Public profiles (0.6.0)
+ProfileCapabilities                     profileCapabilities(MinecraftServer);   // null server allowed
+ProfileQueryResult<ProfileSnapshot>     getProfileDetailed(MinecraftServer, UUID player, CommunityKey);
+ProfileQueryResult<ProfileSnapshot>     inspectStoredProfile(MinecraftServer, UUID, CommunityKey);
+ProfileQueryResult<VillagerProfileSnapshot> getVillagerProfileDetailed(MinecraftServer, UUID player,
+                                                                       UUID villager, CommunityKey);
+ProfileQueryResult<VillagerProfileSnapshot> getVillagerProfileDetailed(MinecraftServer, UUID player,
+                                                                       Entity villager);
+ProfileQueryResult<Boolean>             matchesProfile(MinecraftServer, UUID, CommunityKey, ProfileQuery);
+ProfileQueryResult<Boolean>             matchesSpeakerProfile(MinecraftServer, UUID, CommunityKey,
+                                                              SpeakerContext, ProfileQuery);
+ProfileQueryResult<Boolean>             matchesSpeakerProfile(MinecraftServer, UUID, Entity villager,
+                                                              ProfileQuery);
+ProfiledDeliveryResult                  deliverProfiled(ProfiledDelivery);
 ```
 
 `getCheckBias` is non-zero only for `trust` and `respect`, and hard-clamped to ±8. Warmth, attraction,
@@ -246,6 +261,14 @@ community with no record and no opinion feature disabled is `AVAILABLE`, not an 
 `nativeKinds` this build is still detecting itself, a `claimants` map of which authority (if any) has
 effectively claimed each `CoreIncidentKind`, and an optional `readinessReason` for an operator. This is
 additive; a companion probes for the method and falls back to its own assumptions without it.
+
+0.6.0 adds five profile feature strings — `FEATURE_PROFILE_SNAPSHOT` (`profile_snapshot_v1`),
+`FEATURE_SPEAKER_PROFILE` (`speaker_profile_v1`), `FEATURE_REPEAT_CREDIT` (`repeat_credit_v1`),
+`FEATURE_PROFILED_DELIVERY` (`profiled_delivery_v1`), `FEATURE_PROFILE_CHANGE` (`profile_change_v1`).
+Unlike the thirteen older rows, these appear **only while the feature is live** (profiles enabled and a
+datapack generation with profile content published), because a query that cannot answer must not look
+like a negative answer about the player. The stable "this build supports profiles" half of the question
+is `profileCapabilities(server)`, which keeps reporting `supported` through a temporary disablement.
 
 ### Standing change envelope
 
@@ -286,7 +309,8 @@ dedupe key cannot express.
 
 `ReceiptOutcome` is `APPLIED`, `DUPLICATE`, `ACCEPTED_NO_PUBLIC_INCIDENT`, `REFUSED_DISABLED`,
 `REFUSED_INVALID`, `REFUSED_CAPACITY`. `isTerminal()` is true for `APPLIED`,
-`ACCEPTED_NO_PUBLIC_INCIDENT`, and `REFUSED_INVALID` — these persist a receipt and replay forever.
+`ACCEPTED_NO_PUBLIC_INCIDENT`, and `REFUSED_INVALID` — these persist a receipt and replay for as long
+as it survives the retention horizon described below.
 `REFUSED_DISABLED` and `REFUSED_CAPACITY` are retryable and store nothing; `DUPLICATE` is reported but
 never itself stored, since the original receipt already holds the answer.
 
@@ -340,6 +364,78 @@ empty for it, since there is a change to acknowledge and no baseline line to say
 `ExternalGossipCandidate` are untouched, so an adapter written against the older call keeps its exact
 baseline behaviour.
 
+### Public profiles (0.6.0)
+
+A public profile is what a community can **say** about a player, separately from how much it likes
+them: `recognition` (how widely known, 0..1000, on its own tier ladder) and `facets` (what they are
+known for). Recognition is not friendship — a revered hero and an infamous murderer can carry the same
+recognition, and recognition alone never authorises familiarity.
+
+Every type lives in `dev.otectus.mcareputation.api.profile` and is in the compile-only API jar:
+
+| Type | Contents |
+|---|---|
+| `ProfileSnapshot` | Player, community, standing score/tier for context, `RecognitionValue`, `List<FacetValue>` (sorted by facet id), `dominantFacets` (at most three, strongest first), standing/profile revisions, definition generation, evaluation time, `ProfileCoverage`. |
+| `FacetValue` | Value clamped to the facet's authored range, the range itself, supporting/opposing evidence counts and strengths, `observed`, `majorEvidence`, `labelEligible`. |
+| `RecognitionValue` | `value`, `tierId`, `evidenceCount`, `observed()`. |
+| `VillagerProfileSnapshot` | The observer, their knowledge-filtered `knownProfile`, `baseOpinion` + `facetAdjustment` = `finalOpinion`, involved/witnessed/hearsay counts, and `TraitBasis` (`RESOLVED`, `NEUTRAL_DEFAULT`, `DISABLED`). |
+| `ProfileQueryResult<T>` | `availability`, `Optional<T> value`, and a short machine-readable `reason` token for logs. |
+| `ProfileAvailability` | `AVAILABLE`, `DISABLED`, `UNSUPPORTED`, `UNRESOLVED`, `READ_ONLY`, `MIGRATING`, `INCOMPLETE_HISTORY`, `ERROR`. |
+| `ProfileCoverage` | `COMPLETE_SINCE_RECORD_START`, `PARTIAL_LEGACY`, `MIGRATING`. |
+| `ProfileQuery` | ANDed recognition bounds, a minimum recognition tier, up to 16 `FacetPredicate`s, and `allowPartialHistory`. |
+| `ProfileCapabilities` | Schema version, `supported`/`enabled`/`contentPublished`/`readOnly`, the repeat-credit and facet-opinion switches, the recognition/facet/dominant/adjustment bounds, coverage, published facet ids, feature strings, `readinessReason`, and `ready()`. |
+| `ProfiledDelivery` / `ProfiledDeliveryResult` | An `IncidentDelivery` plus an optional authored `profileSelection` and an optional `SupersedeSpec`; the result carries the ordinary `DeliveryOutcome`, the profile availability, the profile actually applied, and a `ProfileCreditExplanation`. |
+
+**Detailed results, not convenience zeros.** "No recognition here" and "we cannot say" are different
+facts. An authored access condition must read `ProfileQueryResult`, because a zero fallback eventually
+admits a player on the strength of a disabled feature. `AVAILABLE` with everything zero and
+`COMPLETE_SINCE_RECORD_START` is a genuine stranger with a clean record; the same zero with
+`PARTIAL_LEGACY` is a save that cannot prove it.
+
+**Reads go through the canonical gate.** `getProfileDetailed` reconciles the community it was asked
+about (`Intent.QUERY`); `inspectStoredProfile` is strictly read-only (`Intent.INSPECT`: no clock moves,
+nothing ages, nothing is dirtied). Neither creates a player or community record — a valid combination
+with no record answers from a synthesised neutral read model that is never saved.
+
+**Predicate semantics (`ProfileQuery`).** All clauses are ANDed.
+
+* Unknown facet or recognition tier ids **fail closed**: the answer is `AVAILABLE` and `false`, with
+  `reason` naming the unknown id. A datapack typo must not open a gate.
+* A **valid but unobserved** facet is not negative evidence. Facet clauses require at least one live
+  evidence item (`minEvidence` defaults to 1), so a "nonviolent" gate is not satisfied by a village that
+  has simply never seen the player. `FacetPredicate.allowUnobserved` is the named, documented escape
+  hatch for "no contrary evidence is known".
+* An invalid query — inverted bounds, a blank id, a duplicated facet, more than 16 clauses — answers
+  `UNRESOLVED` with `invalid_query` rather than `false`, so the authored fallback runs.
+* `allowPartialHistory` defaults `false`. A clause that relies on an upper bound or on
+  `allowUnobserved` (`dependsOnCompleteHistory()`) refuses on a save whose history is not complete:
+  `INCOMPLETE_HISTORY` (`partial_legacy_history`) or `MIGRATING` (`migrating_history`). An observed
+  lower bound still answers, because missing history can only hide evidence.
+* Recognition zero is a legitimate requirement: `maxRecognition(0)` asks for a complete-history stranger.
+
+**Speaker-scoped queries never widen.** `getVillagerProfileDetailed` and `matchesSpeakerProfile` filter
+each incident through the existing awareness rules **before** aggregating, so the community's facet
+vector is never computed and scaled down — that would leak events the speaker has not learned. A
+missing or unresolvable `SpeakerContext` answers `UNRESOLVED` with `no_speaker_context`; it is never
+answered from the community profile. A villager who genuinely knows nothing is `AVAILABLE` with an
+empty profile and a zero opinion, and that valid zero must not be replaced by the village's view.
+The facet opinion term is one capped contribution (`maxFacetOpinionAdjustment`, default 25), never a
+third independent bonus, and the final external Trust/Respect check contribution still obeys ±8.
+In 0.6.0 the observer's interpretation weights are the authored neutral defaults, reported as
+`TraitBasis.NEUTRAL_DEFAULT`.
+
+**`deliverProfiled`.** The same canonical commit as `deliver`/`recordSuperseding`: one dedupe rule, one
+receipt index, one admission decision, one publication order. `profileSelection` picks an *authored*
+profile by id for a generic incident (a rescue versus a crafting commission) and nothing else — no
+numeric override, no facet value, no credit percentage, and never from a client packet. A selection the
+profile's `allowed_incidents` does not admit, or one no pack defines, is warned about and falls back to
+the incident's own profile rather than dropping the deed's evidence. `supersession` routes the delivery
+through the profile-aware supersession path, with the receipt filed inside the canonical mutation, so a
+keyed superseding delivery replays without folding a precursor twice. The delivery and profile halves
+fail independently: a deed still records and still moves standing while profiles are switched off
+(`profileAvailability == DISABLED`), because a social delivery failure must never undo a legal
+settlement.
+
 ### Title sync additions
 
 `globalTitles(server, player)` enumerates a player's global titles directly, with no community record
@@ -371,8 +467,9 @@ change.
 
 Every method introduced in this section — per-villager opinion, decay immunity, `capabilities`,
 `deliver`/receipts, `recordSuperseding`, the speaker-aware and bound-resolution overloads,
-`highWaterTierId`/`globalTitles`, `getVillagerOpinionDetailed`, `gossipStory`, and the three
-`ReputationMirror`/`CoreIncidentAuthority` defaults — is **additive to API version 1**.
+`highWaterTierId`/`globalTitles`, `getVillagerOpinionDetailed`, `gossipStory`, the three
+`ReputationMirror`/`CoreIncidentAuthority` defaults, and 0.6.0's whole `api.profile` surface with
+`ReputationProfileChangedEvent` — is **additive to API version 1**.
 `getApiVersion()` deliberately does not move for any of it: a bridge written against the original
 version remains fully compatible, and a companion written for the original API neither calls these
 methods nor is affected by them, so a mismatch is silent and fine. Use `capabilities(server)` to
@@ -416,7 +513,7 @@ so no two call sites can spell one outcome differently.
 
 ## Forge events
 
-All five are **server-side, posted after the canonical commit, immutable, and non-cancellable**. The
+All six are **server-side, posted after the canonical commit, immutable, and non-cancellable**. The
 store is already consistent when a listener runs, so a listener may safely query it.
 
 There is deliberately no pre-change cancellable event in this version. Cancellation would break idempotency —
@@ -430,6 +527,7 @@ standing through authored data, or by recording and resolving incidents of your 
 | `ReputationIncidentCreatedEvent` | A deed was recorded. Note that a zero-delta narrative record fires this and **no** change event. |
 | `ReputationIncidentResolvedEvent` | A status genuinely moved. A repeated or weaker resolution stays silent. |
 | `ReputationTitleGrantedEvent` | A title was **newly** earned. Re-granting one already held posts nothing. |
+| `ReputationProfileChangedEvent` | A player's public profile in one community changed: an accepted deed that carried live profile evidence (`cause() == DEED`, loud, after that operation's standing envelope), or a reconciliation pass that moved profile evidence and **nothing else** (`cause() == DECAY`, quiet, with no standing event at all). Never a second notification of a standing change. `changedFacets()` is itemised only for a deed; treat the event as an invalidation and re-query against `profileRevision()`. |
 
 A listener that throws is caught and logged; the committed transaction stands.
 

@@ -176,6 +176,23 @@ public final class TestDeliverySeam implements ServiceContext {
         return ReputationService.deliverWith(this, delivery);
     }
 
+    /** The profiled transaction: an authored profile selection, a supersession, or both (§9.5). */
+    public dev.otectus.mcareputation.api.profile.ProfiledDeliveryResult deliverProfiled(
+            dev.otectus.mcareputation.api.profile.ProfiledDelivery delivery) {
+        return ReputationService.deliverProfiledWith(this, delivery);
+    }
+
+    /** This seam's policy snapshot, so a profile read is evaluated by the same rules a write was. */
+    public ReputationPolicy policySnapshot() {
+        return policy();
+    }
+
+    /** The periodic sweep for one player: what ages a ledger nobody is looking at (§15.1). */
+    public boolean reconcile(UUID player, long gameTime) {
+        this.gameTime = gameTime;
+        return ReputationService.reconcileWith(this, player, gameTime);
+    }
+
     public ReputationResult record(ReputationRequest request) {
         return ReputationService.recordWith(this, request);
     }
