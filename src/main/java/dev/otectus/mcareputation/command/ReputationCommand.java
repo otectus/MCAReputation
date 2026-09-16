@@ -39,6 +39,7 @@ import dev.otectus.mcareputation.reputation.ReputationTierSet;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
 import dev.otectus.mcareputation.reputation.TitleService;
 import dev.otectus.mcareputation.reputation.Titles;
+import dev.otectus.mcareputation.state.AdmissionPreflight;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.OperationReceipt;
@@ -1131,6 +1132,9 @@ public final class ReputationCommand {
         long gameTime = server.overworld().getGameTime();
         long horizon = McaReputationConfig.receiptRetentionTicks();
         int maxIncidents = McaReputationConfig.maxIncidentsPerCommunity();
+        // The same bundle the transaction decides with, so the diagnostic cannot answer a question the
+        // refusal never asked: one cap, one horizon, one evaluation time.
+        AdmissionPreflight preflight = AdmissionPreflight.ofLoose(maxIncidents, gameTime, horizon);
         Optional<PlayerReputationRecord> player =
                 ReputationSavedData.get(server).player(subject.getUUID());
 
@@ -1149,8 +1153,8 @@ public final class ReputationCommand {
                 continue;
             }
             reported++;
-            int evictable = record.evictableIncidentCount(gameTime, horizon);
-            boolean canAdmit = record.canAdmit(maxIncidents, gameTime, horizon);
+            int evictable = record.evictableIncidentCount(preflight);
+            boolean canAdmit = record.canAdmit(preflight);
             source.sendSuccess(() -> Component.translatable(
                     "mcareputation.command.debug.receipts.community",
                     record.key().asString(), record.incidentCount(), maxIncidents, evictable,

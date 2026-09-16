@@ -38,9 +38,11 @@ import java.util.UUID;
  * <p>{@link #score} is a <b>cache</b>. §13.4 is explicit that a corrupted cached score must never
  * become authoritative, so {@link #recomputeScore} can rebuild it from the baseline and the ledger at
  * any moment, and {@link #load} does exactly that on every world load rather than trusting the number
- * it just read. That is also what makes pruning safe: dropping an incident that still carries weight
- * would silently change the score, so {@link #prune} folds any remaining contribution into the
- * baseline first and the invariant holds across the operation.
+ * it just read. Pruning is safe for a stricter reason than it once was: {@link #prune} only ever drops
+ * records that already carry no weight, so the invariant holds without the baseline fold the older
+ * policy relied on. A full ledger in which everything still carries weight refuses the next deed
+ * instead ({@link #canAdmit}); folding live weight to satisfy a display cap preserved today's number
+ * while silently changing tomorrow's decay, and §2.3 withdrew it.
  *
  * <p>{@code baseline} is standing that did not come from a deed in this ledger: an administrator's
  * {@code /mcareputation set}, or a legacy Quests balance imported by migration (§32.2). Keeping it
@@ -288,14 +290,18 @@ public final class CommunityReputationRecord {
      * opinion and the amends that were still available all move. And a recent <b>open negative</b>
      * record, which is the case a player can still make right and a producer may still hold a receipt
      * against; it becomes evictable once it has aged past the receipt horizon.
+     *
+     * <p>Read at {@link AdmissionPreflight#evaluationTime()} and nowhere else. The age comparison is
+     * the reason that matters: asked twice at two clock readings, the same ledger gives two answers,
+     * and a refusal that disagrees with the eviction pass that follows it is how a cap gets exceeded.
      */
-    private boolean evictable(IncidentRecord incident, long gameTime, long receiptHorizonTicks) {
+    private boolean evictable(IncidentRecord incident, AdmissionPreflight preflight) {
         if (incident.pinned() || incident.contributes()) {
             return false;
         }
         boolean open = incident.status() == IncidentStatus.ACTIVE && !incident.isSuperseded();
         return !(open && incident.baseDelta() < 0
-                && incident.ageTicks(gameTime) < receiptHorizonTicks);
+                && incident.ageTicks(preflight.evaluationTime()) < preflight.receiptHorizonTicks());
     }
 
     /**
@@ -303,19 +309,25 @@ public final class CommunityReputationRecord {
      * something in the ledger is evictable. When this is false the deed is refused with
      * {@code Reason.CAPACITY} <em>before</em> anything is written (D5), rather than the cap being
      * quietly exceeded and live history evicted to pay for it.
+     *
+     * <p>Answer this <em>after</em> the operation's reconciliation pass, never before. Eligibility is
+     * a function of age, so a ledger full of contributions that decay to zero at the evaluation time
+     * is admissible - and a preflight that runs first sees them still live and refuses every deed,
+     * permanently, because nothing in the refusal path ever reaches reconciliation to age them
+     * (§3.2, §11.1 step 4).
      */
-    public boolean canAdmit(int maxIncidents, long gameTime, long receiptHorizonTicks) {
-        if (incidents.size() < maxIncidents) {
+    public boolean canAdmit(AdmissionPreflight preflight) {
+        if (incidents.size() < preflight.maxIncidentsPerCommunity()) {
             return true;
         }
-        return hasEvictableIncident(gameTime, receiptHorizonTicks);
+        return hasEvictableIncident(preflight);
     }
 
     /** How many records could be dropped to make room; what the capacity diagnostic reports (D5). */
-    public int evictableIncidentCount(long gameTime, long receiptHorizonTicks) {
+    public int evictableIncidentCount(AdmissionPreflight preflight) {
         int count = 0;
         for (IncidentRecord incident : incidents.values()) {
-            if (evictable(incident, gameTime, receiptHorizonTicks)) {
+            if (evictable(incident, preflight)) {
                 count++;
             }
         }
@@ -323,9 +335,9 @@ public final class CommunityReputationRecord {
     }
 
     /** Whether anything in this ledger could be dropped at all. */
-    public boolean hasEvictableIncident(long gameTime, long receiptHorizonTicks) {
+    public boolean hasEvictableIncident(AdmissionPreflight preflight) {
         for (IncidentRecord incident : incidents.values()) {
-            if (evictable(incident, gameTime, receiptHorizonTicks)) {
+            if (evictable(incident, preflight)) {
                 return true;
             }
         }
@@ -334,17 +346,21 @@ public final class CommunityReputationRecord {
 
     /** The cap sweep at the default receipt horizon. */
     public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore) {
-        return prune(maxIncidents, gameTime, minScore, maxScore,
-                ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS);
+        return prune(minScore, maxScore, AdmissionPreflight.ofLoose(maxIncidents, gameTime,
+                ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS));
     }
 
     /**
      * Enforces the per-community incident cap in the priority order of §13.5.
      *
      * <p>The ordering is the whole point: history is discarded in the order it stops mattering.
-     * Anything still carrying weight has that weight folded into the baseline first, so the player's
-     * score is bit-for-bit unchanged by pruning — losing the <em>explanation</em> for standing is
-     * acceptable when the ledger is full, silently losing the standing itself is not.
+     * <b>Nothing live is dropped at all.</b> {@link #evictable} refuses any record that still
+     * contributes, so the four passes below choose only between records already worth zero and the
+     * baseline fold is a belt-and-braces guard that cannot fire — the earlier policy of folding live
+     * weight to satisfy a display cap is what §2.3 withdrew, because it preserved today's number while
+     * changing tomorrow's decay, speaker knowledge and resolution options. A ledger with nothing
+     * evictable is refused admission instead (see {@link #canAdmit}); losing the <em>explanation</em>
+     * for standing is acceptable when the ledger is full, losing the evidence is not.
      *
      * <p>Pinned incidents are never dropped. If a ledger somehow consists entirely of pinned entries
      * the cap is exceeded rather than violated, and the situation is logged; only an administrator
@@ -352,8 +368,9 @@ public final class CommunityReputationRecord {
      *
      * @return the incidents that were removed, oldest first
      */
-    public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore,
-                                      long receiptHorizonTicks) {
+    public List<IncidentRecord> prune(int minScore, int maxScore, AdmissionPreflight preflight) {
+        int maxIncidents = preflight.maxIncidentsPerCommunity();
+        long gameTime = preflight.evaluationTime();
         List<IncidentRecord> removed = new ArrayList<>();
         if (incidents.size() <= maxIncidents) {
             return removed;
@@ -380,7 +397,7 @@ public final class CommunityReputationRecord {
                 if (incidents.size() <= maxIncidents) {
                     break;
                 }
-                if (!evictable(candidate, gameTime, receiptHorizonTicks) || !pass.test(candidate)) {
+                if (!evictable(candidate, preflight) || !pass.test(candidate)) {
                     continue;
                 }
                 // Retained weight can no longer reach this point - evictable() rejects anything that

@@ -36,6 +36,7 @@ import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.network.SnapshotSelection;
+import dev.otectus.mcareputation.state.AdmissionPreflight;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 import dev.otectus.mcareputation.state.OperationReceipt;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
@@ -73,16 +74,26 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *   <li>resolve the incident definition;</li>
  *   <li>check dedupe — an already-seen key returns the earlier outcome and stops here;</li>
  *   <li>reconcile outstanding decay, so the "before" score is the real one;</li>
+ *   <li>decide admission <em>against the reconciled ledger</em>, and refuse if the cap holds;</li>
  *   <li>compute visibility and the effective delta;</li>
  *   <li>create and store the incident;</li>
  *   <li>update the score and the cached community metadata;</li>
- *   <li>resolve old and new tier, and update the high-water mark;</li>
- *   <li>grant any newly earned title;</li>
+ *   <li>file the operation receipt, in the same mutation as the ledger write;</li>
+ *   <li>resolve old and new tier, update the high-water mark, grant any newly earned title;</li>
  *   <li>mark the save dirty;</li>
  *   <li>notify mirrors — after the canonical commit, never before;</li>
  *   <li>post the Forge events;</li>
  *   <li>player feedback, which rides on those events (see {@code ReputationFeedback}).</li>
  * </ol>
+ *
+ * <p>Two orderings in that list are load-bearing rather than incidental. <b>Admission comes after
+ * reconciliation</b> (step 6 after step 5): eligibility to evict is a function of age, so a preflight
+ * that ran first would see a ledger of contributions that have in fact decayed to nothing as still
+ * live, refuse the deed, and — because a refusal never reaches reconciliation — refuse the next one
+ * too, permanently. <b>The receipt is filed before anything is published</b> (step 10 before step 12):
+ * a synchronous listener must not be able to observe an accepted deed whose accounting is unfinished,
+ * which is also what leaves room for the profile evidence and credit reservation a later phase
+ * attaches to the same accepted operation (§11.1).
  *
  * <p>Steps 12–14 are outside the canonical commit on purpose: a mirror or a listener that throws is
  * caught and logged, and the committed transaction still stands (§18). Validation failure in steps
@@ -166,6 +177,14 @@ public final class ReputationService {
      * from the receipt store first, so an operation that produced <em>no</em> incident — an unwitnessed
      * deed, an invalid request — is still remembered and still answers the same way, which a ledger
      * lookup cannot do.
+     *
+     * <p>The replay horizon is <b>bounded</b>, and honestly so. Receipts age out at
+     * {@code receiptRetentionTicks} and the per-player budget evicts the oldest first, so beyond
+     * {@link #receiptFloor} an absent receipt is not evidence that the operation never happened — it is
+     * evidence that this store can no longer say. A producer holding an unacknowledged operation older
+     * than the floor must quarantine it for reconciliation rather than retry it under the same key
+     * (§10.6). Exactly-once accounting here is a guarantee within a supported recovery window, not a
+     * distributed transaction across two independently saved mods.
      */
     public static DeliveryOutcome deliver(IncidentDelivery delivery) {
         return deliverWith(null, delivery);
@@ -193,20 +212,27 @@ public final class ReputationService {
 
     private static DeliveryOutcome deliverInternal(ServiceContext ctx, IncidentDelivery delivery) {
         ReputationRequest request = delivery.request();
+        ReputationSavedData data = ctx.data();
+        // 1. writable store, before the receipt index is even consulted. A read-only store holds no
+        //    loaded receipt to replay and may not file a new one, so there is nothing here it can
+        //    honestly answer (I14).
+        if (!data.writable()) {
+            return DeliveryOutcome.of(ReceiptOutcome.REFUSED_DISABLED, readOnlyRefusal(request));
+        }
         if (!delivery.keyed()) {
             ReputationResult result = recordInternal(ctx, request);
             return DeliveryOutcome.of(outcomeFor(ctx, request, result), result);
         }
 
-        ReputationSavedData data = ctx.data();
         UUID playerId = request.playerId();
         CommunityKey community = request.community();
         String namespace = delivery.producerNamespace();
         String operationKey = delivery.operationKey();
         long now = ctx.now();
 
-        // 1. the receipt index, consulted before the ledger: it is the only index that remembers a
-        //    delivery which produced nothing. Never creates a player record.
+        // 2. the receipt index, consulted before the ledger: it is the only index that remembers a
+        //    delivery which produced nothing. Never creates a player record, and a replay can never
+        //    reach the acceptance path below — which is what stops it reserving a second allowance.
         Optional<PlayerReputationRecord> maybePlayer = data.player(playerId);
         if (maybePlayer.isPresent()) {
             PlayerReputationRecord playerRecord = maybePlayer.get();
@@ -219,7 +245,7 @@ public final class ReputationService {
                 return replay(ctx, data, playerRecord, stored.get(), request, now);
             }
 
-            // 2. the legacy path: a retained incident under this key that predates receipts. It gets
+            // 3. the legacy path: a retained incident under this key that predates receipts. It gets
             //    one synthesised now, so the next replay is answered by the index rather than a scan.
             Optional<IncidentRecord> existing = playerRecord.findByDedupeKey(community, operationKey);
             if (existing.isPresent()) {
@@ -232,19 +258,58 @@ public final class ReputationService {
             }
         }
 
-        // 3. a genuinely new operation: the ordinary transaction, then the receipt in the same
-        //    mutation as the ledger write.
-        ReputationResult result = recordInternal(ctx, request);
-        ReceiptOutcome outcome = outcomeFor(ctx, request, result);
-        if (!outcome.isTerminal() || result.reason() == ReputationResult.Reason.ERROR) {
-            return DeliveryOutcome.of(outcome, result);
+        // 4. a genuinely new operation. The canonical mutation first, then the receipt in the same
+        //    mutation as the ledger write, and only then the derived milestones and the publication:
+        //    a listener answering a query from inside our own event must never see an accepted deed
+        //    with no receipt behind it (§3.2, §11.1 steps 7-9).
+        StagedOperation staged = commit(ctx, request, null);
+        if (!staged.created()) {
+            ReputationResult refusal = staged.refusal();
+            ReceiptOutcome refusalOutcome = outcomeFor(ctx, request, refusal);
+            if (!refusalOutcome.isTerminal() || refusal.reason() == ReputationResult.Reason.ERROR) {
+                return DeliveryOutcome.of(refusalOutcome, refusal);
+            }
+            OperationReceipt filed = fileReceipt(data, request, namespace, operationKey, refusalOutcome,
+                    refusal.incidentId(), now);
+            return DeliveryOutcome.of(refusalOutcome, refusal, filed.toView());
         }
-        PlayerReputationRecord owner = data.getOrCreatePlayer(playerId);
-        OperationReceipt receipt = new OperationReceipt(namespace, playerId, community, operationKey,
-                outcome, result.incidentId(), request.gameTime(), now);
-        owner.recordReceipt(receipt);
+
+        ReceiptOutcome outcome = outcomeFor(staged);
+        OperationReceipt receipt = fileReceipt(data, request, namespace, operationKey, outcome,
+                Optional.of(staged.incident().id()), now);
+        StagedOperation filed = staged.withReceipt(receipt);
+        Accepted accepted = derive(ctx, request, filed);
+        publish(ctx, request, accepted);
+        return DeliveryOutcome.of(outcome, accepted.result(), receipt.toView());
+    }
+
+    /** Appends one operation receipt and marks the store dirty. Never reached on a read-only store. */
+    private static OperationReceipt fileReceipt(ReputationSavedData data, ReputationRequest request,
+                                                String namespace, String operationKey,
+                                                ReceiptOutcome outcome, Optional<UUID> incidentId,
+                                                long now) {
+        OperationReceipt receipt = new OperationReceipt(namespace, request.playerId(),
+                request.community(), operationKey, outcome, incidentId, request.gameTime(), now);
+        data.getOrCreatePlayer(request.playerId()).recordReceipt(receipt);
         data.setDirty();
-        return DeliveryOutcome.of(outcome, result, receipt.toView());
+        return receipt;
+    }
+
+    /**
+     * The refusal a store latched read-only by a future save format produces (I14, §11.2 "read-only").
+     *
+     * <p>The store used to accept these writes, apply them in memory and never persist them. That is
+     * the one outcome no consumer can recover from: the toast fires, a producer files the returned
+     * incident id as proof of settlement, and the whole transaction is gone on restart with nobody
+     * having seen an error. Refusing is retryable and files no receipt, so the operation survives the
+     * downgrade or the restored backup that fixes the cause.
+     */
+    private static ReputationResult readOnlyRefusal(ReputationRequest request) {
+        McaReputation.LOGGER.warn("[MCA: Reputation] refused {} from {} for player {}: the saved data on "
+                        + "disk was written by a newer format, so this store is read-only and nothing "
+                        + "was recorded. Run the newer version of MCA: Reputation, or restore a backup.",
+                request.incidentType(), request.source(), request.playerId());
+        return ReputationResult.rejected(ReputationResult.Reason.DISABLED, request.community());
     }
 
     /** Answers a replayed operation from its stored receipt, without touching the ledger. */
@@ -282,6 +347,13 @@ public final class ReputationService {
      * {@code ACCEPTED_NO_PUBLIC_INCIDENT} rather than {@code APPLIED}: the producer's operation was
      * accepted, nothing public came of it, and the receipt still names the record that was retained.
      */
+    private static ReceiptOutcome outcomeFor(StagedOperation staged) {
+        return staged.incident().visibility().effective() != IncidentVisibility.PRIVATE
+                ? ReceiptOutcome.APPLIED
+                : ReceiptOutcome.ACCEPTED_NO_PUBLIC_INCIDENT;
+    }
+
+    /** The same decision for a result that has no staged operation behind it: a refusal, or a replay. */
     private static ReceiptOutcome outcomeFor(ServiceContext ctx, ReputationRequest request,
                                              ReputationResult result) {
         if (result.applied()) {
@@ -355,83 +427,211 @@ public final class ReputationService {
     }
 
     private static ReputationResult recordInternal(ServiceContext ctx, ReputationRequest request) {
-        Commit commit = commit(ctx, request);
-        if (!commit.created()) {
-            return commit.refusal();
+        StagedOperation staged = commit(ctx, request, null);
+        if (!staged.created()) {
+            return staged.refusal();
         }
-        // 9-10. tier, high-water, title
-        @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
-        TierOutcome tier = applyTierTransition(ctx, commit.playerRecord(), commit.community(), player,
-                commit.oldScore(), commit.newScore(), commit.now());
-
-        // 12-13. mirrors, then events — both outside the canonical commit, through the one envelope
-        IncidentRecord incident = commit.incident();
-        ReputationIncidentView view = ReputationIncidentView.of(incident, commit.now());
-        publishStandingChange(ctx,
-                standingChange(request.playerId(), commit.community(), commit.oldScore(),
-                        commit.newScore(), tier, ChangeCause.DEED, false),
-                commit.community(), player, tier,
-                new ReputationIncidentCreatedEvent(request.playerId(), player, view),
-                incident.id(), incident.type(), request.source());
-
-        int appliedDelta = commit.newScore() - commit.oldScore();
-        if (McaReputationConfig.debugLogging()) {
-            McaReputation.LOGGER.debug("[MCA: Reputation] {} recorded {} for {} in {}: {} -> {} ({}{}), tier {}",
-                    request.source(), request.incidentType(), request.playerId(),
-                    request.community().asString(), commit.oldScore(), commit.newScore(),
-                    appliedDelta >= 0 ? "+" : "", appliedDelta, tier.newTierId);
-        }
-        return ReputationResult.applied(incident.id(), request.community(), commit.oldScore(),
-                commit.newScore(), appliedDelta, currentTierId(commit.oldScore()), tier.newTierId,
-                tier.firstTime);
+        // An unkeyed record has no receipt to file between the commit and the publication, so the two
+        // remaining steps run back to back: derive what the committed score implies, then announce it.
+        Accepted accepted = derive(ctx, request, staged);
+        publish(ctx, request, accepted);
+        return accepted.result();
     }
 
     /**
-     * What the canonical half of a record transaction produced: either a refusal, or the committed
-     * incident and the scores around it, with the tier transition and the publication still to come.
+     * One operation staged against the store: the identity it was accepted under, the rules it was
+     * judged by, everything it is about to write, and everything it would have to put back.
      *
-     * <p>Split out so {@link #recordSuperseding} can run the same creation path with its publication
-     * deferred, and then announce one net change instead of two (§5 F05, DD8).
+     * <p>§11.1 requires an operation to be <em>staged</em> rather than assembled as it goes, and the
+     * difference is not cosmetic. A transaction that writes each consequence as it computes it has no
+     * moment at which "accepted" is true and nothing has been published — so the receipt lands after
+     * the notification, and a synchronous listener can observe a deed whose accounting is half
+     * finished (§3.2). Carrying the whole decision in one value makes the commit one step and the
+     * rollback one step.
+     *
+     * <p>Every slot exists even where this version cannot fill it. {@link #profile} and {@link #credit}
+     * are the reserved seams for incident profile evidence and repeat-credit reservations: always empty
+     * here, and declared now so the staging, commit and rollback sites already have somewhere to put
+     * them rather than growing an append-after-publication path later.
+     *
+     * @param permittedEvictions the records the admission decision allowed the commit to drop, in the
+     *                           order it dropped them. Never anything live — {@code evictable} refuses
+     *                           a contributing record, so a ledger full of live history is refused
+     *                           admission rather than compacted (§2.3, I06).
+     * @param precursor          the incident a supersession folded, with the exact state to restore
+     * @param receipt            the filed receipt, present only once it is actually in the store
      */
-    private record Commit(@Nullable ReputationResult refusal, @Nullable IncidentRecord incident,
-                          @Nullable PlayerReputationRecord playerRecord,
-                          @Nullable CommunityReputationRecord community,
-                          int oldScore, int newScore, long now) {
+    private record StagedOperation(@Nullable ReputationResult refusal, @Nullable Identity identity,
+                                   @Nullable ReputationPolicy policy, long evaluationTime,
+                                   @Nullable IncidentRecord incident,
+                                   Optional<PendingProfilePayload> profile,
+                                   Optional<PendingCreditReservation> credit,
+                                   List<IncidentRecord> permittedEvictions,
+                                   Optional<PrecursorStaging> precursor,
+                                   Optional<OperationReceipt> receipt,
+                                   @Nullable PlayerReputationRecord playerRecord,
+                                   @Nullable CommunityReputationRecord community,
+                                   Standing oldStanding, Standing newStanding) {
 
         boolean created() {
             return incident != null;
         }
+
+        int oldScore() {
+            return oldStanding.score();
+        }
+
+        int newScore() {
+            return newStanding.score();
+        }
+
+        /** The same operation with its receipt filed. */
+        StagedOperation withReceipt(OperationReceipt filed) {
+            return new StagedOperation(refusal, identity, policy, evaluationTime, incident, profile,
+                    credit, permittedEvictions, precursor, Optional.of(filed), playerRecord, community,
+                    oldStanding, newStanding);
+        }
+
+        /** Puts the precursor back exactly as it was. A no-op when no supersession was staged. */
+        void rollBackPrecursor() {
+            precursor.ifPresent(PrecursorStaging::rollBack);
+        }
     }
 
-    /** Steps 1-11 of the §18 transaction: everything up to and including the canonical commit. */
-    private static Commit commit(ServiceContext ctx, ReputationRequest request) {
-        // 1. server thread
+    /** The normalized identity one operation is accepted under. */
+    private record Identity(UUID playerId, CommunityKey community, ResourceLocation incidentType,
+                            ResourceLocation source, Optional<String> dedupeKey) {
+
+        static Identity of(ReputationRequest request) {
+            return new Identity(request.playerId(), request.community(), request.incidentType(),
+                    request.source(), request.dedupeKey());
+        }
+    }
+
+    /** A standing read model: a score and the tier it falls in, as of one evaluation time. */
+    private record Standing(int score, String tierId) {
+
+        static Standing of(int score) {
+            return new Standing(score, currentTierId(score));
+        }
+    }
+
+    /**
+     * A precursor a supersession is about to fold, with the exact state to put back when the successor
+     * turns out to carry no public weight (§11.3).
+     *
+     * <p>The rollback has to be exact, not approximate. Restoring the two scalars but advancing the
+     * story revision tells every consumer keyed on that revision that the narrative moved, so an
+     * attempted-and-refused replacement becomes gossip; touching the update clock leaves a refused
+     * operation visible in the ledger's own timestamps.
+     */
+    private record PrecursorStaging(IncidentRecord precursor, IncidentRecord.LifecycleSnapshot before) {
+
+        static PrecursorStaging of(IncidentRecord precursor) {
+            return new PrecursorStaging(precursor, precursor.snapshotLifecycle());
+        }
+
+        void rollBack() {
+            precursor.restoreLifecycle(before);
+        }
+    }
+
+    /**
+     * An accepted operation whose canonical state is complete and whose notifications have not gone
+     * out yet (§11.1 steps 8-9). A listener that throws from here cannot leave accounting unfinished,
+     * because there is no accounting left to do.
+     */
+    private record Accepted(StagedOperation staged, TierOutcome tier, ReputationResult result,
+                            ReputationIncidentView view) {
+    }
+
+    /**
+     * Step 8: the milestone, title and read-model consequences of a score that is already committed.
+     *
+     * <p>Mutating, and deliberately still inside the transaction — a tier title is accepted state, not
+     * a notification — but it publishes no standing change of its own. The caller decides when the
+     * announcement goes out, which is what lets the keyed delivery path file its receipt first.
+     */
+    private static Accepted derive(ServiceContext ctx, ReputationRequest request, StagedOperation staged) {
+        @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
+        TierOutcome tier = applyTierTransition(ctx, staged.playerRecord(), staged.community(), player,
+                staged.oldScore(), staged.newScore(), staged.evaluationTime());
+        IncidentRecord incident = staged.incident();
+        ReputationResult result = ReputationResult.applied(incident.id(), request.community(),
+                staged.oldScore(), staged.newScore(), staged.newScore() - staged.oldScore(),
+                staged.oldStanding().tierId(), tier.newTierId, tier.firstTime);
+        return new Accepted(staged, tier, result,
+                ReputationIncidentView.of(incident, staged.evaluationTime()));
+    }
+
+    /**
+     * Step 9: mirrors, then events, once every accepted fact — incident, score, receipt, titles — is
+     * already visible to anyone who looks. Both are outside the canonical commit, through the one
+     * envelope, and a failure in either cannot undo what was committed or consume the operation again.
+     */
+    private static void publish(ServiceContext ctx, ReputationRequest request, Accepted accepted) {
+        StagedOperation staged = accepted.staged();
+        IncidentRecord incident = staged.incident();
+        @Nullable ServerPlayer player = ctx.onlinePlayer(request.playerId());
+        publishStandingChange(ctx,
+                standingChange(request.playerId(), staged.community(), staged.oldScore(),
+                        staged.newScore(), accepted.tier(), ChangeCause.DEED, false),
+                staged.community(), player, accepted.tier(),
+                new ReputationIncidentCreatedEvent(request.playerId(), player, accepted.view()),
+                incident.id(), incident.type(), request.source());
+
+        if (McaReputationConfig.debugLogging()) {
+            int appliedDelta = staged.newScore() - staged.oldScore();
+            McaReputation.LOGGER.debug("[MCA: Reputation] {} recorded {} for {} in {}: {} -> {} ({}{}), tier {}",
+                    request.source(), request.incidentType(), request.playerId(),
+                    request.community().asString(), staged.oldScore(), staged.newScore(),
+                    appliedDelta >= 0 ? "+" : "", appliedDelta, accepted.tier().newTierId);
+        }
+    }
+
+    /**
+     * Steps 1-7 of the §18 transaction: everything up to and including the canonical mutation, with
+     * nothing filed and nothing published.
+     *
+     * @param precursor the supersession this commit is part of, already folded, with the state to put
+     *                  back if the successor is refused; {@code null} for an ordinary record
+     */
+    private static StagedOperation commit(ServiceContext ctx, ReputationRequest request,
+                                          @Nullable PrecursorStaging precursor) {
+        // 1. server thread, master switch, writable store
         if (!ctx.isServerThread()) {
             McaReputation.LOGGER.error("[MCA: Reputation] record() called off the server thread from {}; "
                             + "refusing. Writes are server-thread only (spec 25).",
                     request.source());
-            return refused(ReputationResult.rejected(ReputationResult.Reason.INVALID, request.community()));
+            return refused(request, precursor,
+                    ReputationResult.rejected(ReputationResult.Reason.INVALID, request.community()));
         }
         if (!McaReputationConfig.enabled()) {
-            return refused(ReputationResult.rejected(ReputationResult.Reason.DISABLED, request.community()));
+            return refused(request, precursor,
+                    ReputationResult.rejected(ReputationResult.Reason.DISABLED, request.community()));
+        }
+        ReputationSavedData data = ctx.data();
+        if (!data.writable()) {
+            return refused(request, precursor, readOnlyRefusal(request));
         }
 
-        // 3. definition
+        // 2. definition
         Optional<IncidentDefinition> maybeDefinition = IncidentRegistry.get(request.incidentType());
         if (maybeDefinition.isEmpty()) {
             McaReputation.LOGGER.warn("[MCA: Reputation] {} asked to record unknown incident type {}; ignoring",
                     request.source(), request.incidentType());
-            return refused(ReputationResult.rejected(ReputationResult.Reason.UNKNOWN_INCIDENT,
-                    request.community()));
+            return refused(request, precursor,
+                    ReputationResult.rejected(ReputationResult.Reason.UNKNOWN_INCIDENT,
+                            request.community()));
         }
         IncidentDefinition definition = maybeDefinition.get();
 
-        ReputationSavedData data = ctx.data();
-        PlayerReputationRecord playerRecord = data.getOrCreatePlayer(request.playerId());
         CommunityKey community = request.community();
-        // "Now" is the world clock; the request carries when the deed happened (§5 F10, DD4). A
-        // future occurrence time is a producer clock error and clamps to now rather than banking
-        // negative age; an older one is honest history and is aged below before it reaches the score.
+        // 3. one policy snapshot and one evaluation time for the whole operation (I09). "Now" is the
+        // world clock; the request carries when the deed happened (§5 F10, DD4). A future occurrence
+        // time is a producer clock error and clamps to now rather than banking negative age; an older
+        // one is honest history and is aged below before it reaches the score.
+        ReputationPolicy policy = ctx.policy();
         long now = ctx.now();
         long occurredAt = Math.min(request.gameTime(), now);
         if (request.gameTime() > now && McaReputationConfig.debugLogging()) {
@@ -441,13 +641,21 @@ public final class ReputationService {
         }
         int minScore = McaReputationConfig.minimumScore();
         int maxScore = McaReputationConfig.maximumScore();
+        // The caps still come from the live config rather than the snapshot, as they always have; what
+        // the preflight fixes is that all three inputs and the clock are now read once and reused by
+        // the refusal, the eviction pass and the whole-player sweep alike.
+        AdmissionPreflight preflight = new AdmissionPreflight(
+                McaReputationConfig.maxIncidentsPerCommunity(),
+                McaReputationConfig.maxIncidentsPerPlayer(),
+                policy.receiptRetentionTicks(), now);
 
-        // 4. dedupe — before anything is created or reconciled, so a duplicate is genuinely free
-        if (request.dedupeKey().isPresent()) {
+        // 4. dedupe — before anything is created or reconciled, so a duplicate is genuinely free, and
+        // read through data.player() so a refusal does not grow the save (I04).
+        Optional<PlayerReputationRecord> knownPlayer = data.player(request.playerId());
+        if (request.dedupeKey().isPresent() && knownPlayer.isPresent()) {
             Optional<IncidentRecord> existing =
-                    playerRecord.findByDedupeKey(community, request.dedupeKey().get());
+                    knownPlayer.get().findByDedupeKey(community, request.dedupeKey().get());
             if (existing.isPresent()) {
-                CommunityReputationRecord existingCommunity = playerRecord.getOrCreate(community);
                 // The refusal still reports the community's *current* standing, so bring decay up to
                 // date first — a DUPLICATE answer with a stale score would disagree with the very next
                 // query. Through the gate, so replaying a deed cannot age a protected village.
@@ -455,6 +663,8 @@ public final class ReputationService {
                         ReconciliationService.reconcile(ctx, data, request.playerId(), community,
                                 now, ChangeCause.DECAY,
                                 ReconciliationService.Intent.QUERY));
+                int score = knownPlayer.get().community(community)
+                        .map(CommunityReputationRecord::score).orElse(0);
                 if (McaReputationConfig.debugLogging()) {
                     McaReputation.LOGGER.debug("[MCA: Reputation] dedupe refused {} from {} (key '{}')",
                             request.incidentType(), request.source(), request.dedupeKey().get());
@@ -462,42 +672,45 @@ public final class ReputationService {
                 // Hand back the id the first attempt produced. A companion that crashed between our
                 // commit and its own link write can only repair itself if the replay tells it what
                 // already exists.
-                return refused(ReputationResult.duplicate(existing.get().id(), community,
-                        existingCommunity.score(), currentTierId(existingCommunity.score())));
+                return refused(request, precursor, ReputationResult.duplicate(existing.get().id(),
+                        community, score, currentTierId(score)));
             }
         }
 
-        // 4b. capacity, before anything is created (§5 F09, D5). Silently losing live contribution to
-        // satisfy a display cap is the defect; refusing the deed outright is honest, and because
-        // nothing has been written yet the refusal costs no partial commit, no receipt and no event.
-        long receiptHorizon = ctx.policy().receiptRetentionTicks();
-        Optional<CommunityReputationRecord> knownCommunity = playerRecord.community(community);
-        boolean noRoom = !playerRecord.canAdmitCommunity(community)
-                || knownCommunity.map(record -> !record.canAdmit(
-                        McaReputationConfig.maxIncidentsPerCommunity(), now, receiptHorizon))
-                        .orElse(false)
-                || (playerRecord.totalIncidentCount() >= McaReputationConfig.maxIncidentsPerPlayer()
-                        && !playerRecord.hasEvictableIncident(now, receiptHorizon));
+        // 5. reconcile outstanding decay, *before* the admission decision (§3.2, §11.1 step 4). This
+        // order is the fix: eligibility to evict is a function of age, so admission asked first sees
+        // contributions that have already decayed to nothing as still live and refuses the deed — and
+        // since a refusal returns here without reconciling, the next deed is refused too, forever. The
+        // gate creates nothing, so a ledger that does not exist yet is simply not aged.
+        reconcileThroughGate(ctx, data, request.playerId(), community, now);
+
+        // 6. admission, still before anything is created (§5 F09, D5). Silently losing live
+        // contribution to satisfy a display cap is the defect; refusing the deed outright is honest,
+        // and because nothing has been written yet the refusal costs no partial commit, no receipt and
+        // no event.
+        Optional<CommunityReputationRecord> knownCommunity =
+                knownPlayer.flatMap(record -> record.community(community));
+        boolean noRoom = knownPlayer.isPresent()
+                && (!knownPlayer.get().canAdmitCommunity(community)
+                        || knownCommunity.map(record -> !record.canAdmit(preflight)).orElse(false)
+                        || (knownPlayer.get().totalIncidentCount() >= preflight.maxIncidentsPerPlayer()
+                                && !knownPlayer.get().hasEvictableIncident(preflight)));
         if (noRoom) {
             McaReputation.LOGGER.warn("[MCA: Reputation] refused {} from {} for player {} in {}: the "
                             + "ledger is full and nothing in it may be evicted. Clear a pin or raise "
                             + "maxIncidentsPerCommunity.", request.incidentType(), request.source(),
                     request.playerId(), community.asString());
-            return refused(ReputationResult.notApplied(ReputationResult.Reason.CAPACITY, community,
-                    knownCommunity.map(CommunityReputationRecord::score).orElse(0),
-                    currentTierId(knownCommunity.map(CommunityReputationRecord::score).orElse(0))));
+            int score = knownCommunity.map(CommunityReputationRecord::score).orElse(0);
+            return refused(request, precursor, ReputationResult.notApplied(
+                    ReputationResult.Reason.CAPACITY, community, score, currentTierId(score)));
         }
 
-        CommunityReputationRecord communityRecord = playerRecord.getOrCreate(community);
-
-        // 5. reconcile outstanding decay so oldScore is honest
-        publishReconcile(ctx, request.playerId(), community,
-                ReconciliationService.reconcile(ctx, data, request.playerId(), community,
-                        now, ChangeCause.DECAY, ReconciliationService.Intent.MUTATE));
-        int oldScore = communityRecord.score();
+        // 7. the reconciled "before" standing of the encounter, read without creating anything: a
+        // community this player has no record in stands at zero by definition (§17.1).
+        int oldScore = knownCommunity.map(CommunityReputationRecord::score).orElse(0);
         String oldTierId = currentTierId(oldScore);
 
-        // 6. visibility and effective delta
+        // 8. visibility and effective delta
         IncidentVisibility visibility = request.visibilityOverride().orElse(definition.visibility());
         if (visibility == IncidentVisibility.GLOBAL_RESERVED) {
             // §19.2: reserved for a future fame system; behaves as VILLAGE in this version, noted so
@@ -522,14 +735,33 @@ public final class ReputationService {
                     McaReputation.LOGGER.debug("[MCA: Reputation] {} went unwitnessed and is not retained; "
                             + "no public change", request.incidentType());
                 }
-                return refused(ReputationResult.notApplied(ReputationResult.Reason.UNWITNESSED, community,
-                        oldScore, oldTierId));
+                return refused(request, precursor, ReputationResult.notApplied(
+                        ReputationResult.Reason.UNWITNESSED, community, oldScore, oldTierId));
             }
             delta = 0;
             visibility = IncidentVisibility.PRIVATE;
         }
 
-        // 7. create and store
+        // 9. the last read that can fail, taken before the first write. Everything after this point is
+        // an in-memory mutation of records this transaction already holds, so a failure cannot leave
+        // the ledger half written — which is the only condition under which the contained-failure log
+        // line may honestly say nothing was written (§11.1).
+        @Nullable ServerPlayer namedPlayer = ctx.onlinePlayer(request.playerId());
+
+        // 10. create and store — one canonical mutation, in which the incident, the score, the caps and
+        // (for a keyed delivery) the receipt all land together.
+        PlayerReputationRecord playerRecord = data.getOrCreatePlayer(request.playerId());
+        CommunityReputationRecord communityRecord = playerRecord.getOrCreate(community);
+        // A community seen for the first time carries a persisted clock of zero; through the gate again
+        // — idempotent at one evaluation time — so it starts at now rather than claiming the whole
+        // world's elapsed history is unobserved. For the record the preflight already reconciled the
+        // guard skips it, so nothing is aged twice and nothing is published twice.
+        if (communityRecord.lastReconciledGameTime() < now) {
+            reconcileThroughGate(ctx, data, request.playerId(), community, now);
+        }
+        if (namedPlayer != null) {
+            playerRecord.setLastKnownName(namedPlayer.getGameProfile().getName());
+        }
         IncidentRecord incident = IncidentRecord.create(UUID.randomUUID(), request.incidentType(),
                 request.playerId(), community, occurredAt, now, request.source(), request.dedupeKey(),
                 delta, visibility, definition.severity(), request.subjects());
@@ -543,27 +775,45 @@ public final class ReputationService {
         communityRecord.addIncident(incident);
         playerRecord.indexDedupe(incident);
 
-        // 8. score and bounds
+        // Score and bounds, against the same preflight the admission decision used: the refusal above
+        // and the eviction here have to agree about which records may go, or the cap is exceeded with a
+        // warning that names no cause anyone can act on.
         communityRecord.recomputeScore(minScore, maxScore);
-        communityRecord.prune(McaReputationConfig.maxIncidentsPerCommunity(), now, minScore, maxScore,
-                receiptHorizon);
-        playerRecord.enforcePlayerIncidentCap(McaReputationConfig.maxIncidentsPerPlayer(),
-                now, minScore, maxScore);
+        List<IncidentRecord> evicted = List.copyOf(communityRecord.prune(minScore, maxScore, preflight));
+        playerRecord.enforcePlayerIncidentCap(minScore, maxScore, preflight);
         int newScore = communityRecord.score();
 
-        @Nullable ServerPlayer namedPlayer = ctx.onlinePlayer(request.playerId());
-        if (namedPlayer != null) {
-            playerRecord.setLastKnownName(namedPlayer.getGameProfile().getName());
-        }
-
-        // 11. persist
         data.setDirty();
-        return new Commit(null, incident, playerRecord, communityRecord, oldScore, newScore, now);
+        return new StagedOperation(null, Identity.of(request), policy, now, incident,
+                // Nothing to stage in either reserved slot yet; see PendingProfilePayload.
+                Optional.empty(), Optional.empty(), evicted,
+                Optional.ofNullable(precursor), Optional.empty(), playerRecord, communityRecord,
+                new Standing(oldScore, oldTierId), Standing.of(newScore));
     }
 
-    /** A transaction that never created anything: the refusal is the whole outcome. */
-    private static Commit refused(ReputationResult result) {
-        return new Commit(result, null, null, null, 0, 0, 0L);
+    /**
+     * A transaction that never created anything: the refusal is the whole outcome, and the only state
+     * it carries is the precursor its caller may still have to put back.
+     */
+    private static StagedOperation refused(ReputationRequest request,
+                                           @Nullable PrecursorStaging precursor,
+                                           ReputationResult result) {
+        return new StagedOperation(result, request == null ? null : Identity.of(request), null, 0L,
+                null, Optional.empty(), Optional.empty(), List.of(), Optional.ofNullable(precursor),
+                Optional.empty(), null, null, Standing.of(0), Standing.of(0));
+    }
+
+    /**
+     * The reconciliation gate, published (§5 F07). Idempotent at one evaluation time, which is what
+     * lets one transaction call it twice: once as the preflight, before admission has a chance to
+     * refuse the deed, and once after the records exist so a community first seen now starts its
+     * persisted clock at now.
+     */
+    private static void reconcileThroughGate(ServiceContext ctx, ReputationSavedData data, UUID playerId,
+                                             CommunityKey community, long now) {
+        publishReconcile(ctx, playerId, community,
+                ReconciliationService.reconcile(ctx, data, playerId, community, now, ChangeCause.DECAY,
+                        ReconciliationService.Intent.MUTATE));
     }
 
     // ------------------------------------------------------------------
@@ -607,6 +857,11 @@ public final class ReputationService {
         ReputationSavedData data = ctx.data();
         CommunityKey community = successor.community();
         long now = ctx.now();
+        // Before the precursor is even looked up: a read-only store cannot fold one and cannot be
+        // trusted to have loaded it (I14).
+        if (!data.writable()) {
+            return readOnlyRefusal(successor);
+        }
         Optional<IncidentRecord> maybePrecursor = spec == null || spec.precursorIncidentId() == null
                 ? Optional.empty()
                 : data.player(successor.playerId())
@@ -632,40 +887,39 @@ public final class ReputationService {
                 .orElseThrow();
         // The "before" score of the whole encounter, taken before the fold: what the one published
         // change reports moving from.
-        publishReconcile(ctx, successor.playerId(), community,
-                ReconciliationService.reconcile(ctx, data, successor.playerId(), community, now,
-                        ChangeCause.DECAY, ReconciliationService.Intent.MUTATE));
+        reconcileThroughGate(ctx, data, successor.playerId(), community, now);
         int oldScore = communityRecord.score();
 
         // Fold first, so the successor's own delta lands on a ledger that no longer double-counts the
-        // lead-up. The pre-fold weight is snapshotted: an unseen killing must not refund the beating
-        // the village did see.
-        int foldedSettled = precursor.settledDelta();
-        int foldedCurrent = precursor.currentContribution();
+        // lead-up. The precursor's whole lifecycle is snapshotted before the fold, not just its two
+        // scalars: an unseen killing must not refund the beating the village did see, and a refused
+        // replacement must leave no trace at all — no advanced story revision, no touched update
+        // clock, no half-written successor link (§11.3).
+        PrecursorStaging staging = PrecursorStaging.of(precursor);
         precursor.foldInto(null, now);
         communityRecord.recomputeScore(minScore, maxScore);
 
-        Commit commit = commit(ctx, successor);
-        if (!commit.created()) {
-            precursor.restoreContribution(foldedSettled, foldedCurrent, now);
+        StagedOperation staged = commit(ctx, successor, staging);
+        if (!staged.created()) {
+            staged.rollBackPrecursor();
             communityRecord.recomputeScore(minScore, maxScore);
             data.setDirty();
             int score = communityRecord.score();
             String tierId = currentTierId(score);
-            return new ReputationResult(false, commit.refusal().incidentId(), community, score, score, 0,
-                    tierId, tierId, false, false, commit.refusal().reason());
+            return new ReputationResult(false, staged.refusal().incidentId(), community, score, score, 0,
+                    tierId, tierId, false, false, staged.refusal().reason());
         }
-        IncidentRecord incident = commit.incident();
+        IncidentRecord incident = staged.incident();
         if (incident.contributes()) {
             precursor.linkSuccessor(incident.id());
         } else {
-            precursor.restoreContribution(foldedSettled, foldedCurrent, now);
+            staged.rollBackPrecursor();
         }
         communityRecord.recomputeScore(minScore, maxScore);
         int newScore = communityRecord.score();
 
         @Nullable ServerPlayer player = ctx.onlinePlayer(successor.playerId());
-        TierOutcome tier = applyTierTransition(ctx, commit.playerRecord(), communityRecord, player,
+        TierOutcome tier = applyTierTransition(ctx, staged.playerRecord(), communityRecord, player,
                 oldScore, newScore, now);
         data.setDirty();
 
@@ -763,6 +1017,14 @@ public final class ReputationService {
                 return ResolutionResult.notApplied(ResolutionResult.Reason.DISABLED);
             }
             ReputationSavedData data = ctx.data();
+            if (!data.writable()) {
+                // I14: softening an incident in memory on a store that will never be written reports a
+                // completed amends the player would have to make again after a restart.
+                McaReputation.LOGGER.warn("[MCA: Reputation] refused a resolution from {} for player {}: "
+                        + "the saved data was written by a newer format, so this store is read-only",
+                        source, playerId);
+                return ResolutionResult.notApplied(ResolutionResult.Reason.DISABLED);
+            }
             Optional<CommunityReputationRecord> maybeCommunity = data.player(playerId)
                     .flatMap(record -> record.community(community));
             if (maybeCommunity.isEmpty()) {
@@ -973,6 +1235,12 @@ public final class ReputationService {
                 return resolveWith(ctx, playerId, community, incidentId, status, source, gameTime);
             }
             ReputationSavedData data = ctx.data();
+            if (!data.writable()) {
+                // I14, and deliberately not NOT_FOUND: nothing was loaded from a future-format file, so
+                // "this mod has never seen that incident" is a claim the store is in no position to
+                // make, and the receipt this path would file could never be persisted anyway.
+                return ResolutionResult.notApplied(ResolutionResult.Reason.DISABLED);
+            }
             String namespace = source.getNamespace();
             Optional<PlayerReputationRecord> maybePlayer = data.player(playerId);
             if (maybePlayer.isPresent()) {
@@ -1042,7 +1310,13 @@ public final class ReputationService {
                                            String namespace, String operationKey, ReceiptOutcome outcome,
                                            Optional<UUID> incidentId, long gameTime) {
         ReputationSavedData data = ctx.data();
-        data.getOrCreatePlayer(playerId).recordReceipt(new OperationReceipt(namespace, playerId, community,
+        // I14: no receipt on a store that cannot persist one. A receipt that is filed and then lost is
+        // worse than none — the producer treats the operation as settled and never retries it.
+        Optional<PlayerReputationRecord> owner = data.getOrCreatePlayerIfWritable(playerId);
+        if (owner.isEmpty()) {
+            return;
+        }
+        owner.get().recordReceipt(new OperationReceipt(namespace, playerId, community,
                 operationKey, outcome, incidentId, gameTime, ctx.now()));
         data.setDirty();
     }

@@ -4,6 +4,7 @@ import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
@@ -344,24 +345,37 @@ public final class PlayerReputationRecord {
      * is at the whole-player cap, the next deed is refused with {@code Reason.CAPACITY} rather than the
      * cap being exceeded (§5 F09, D5).
      */
-    public boolean hasEvictableIncident(long gameTime, long receiptHorizonTicks) {
+    public boolean hasEvictableIncident(AdmissionPreflight preflight) {
         for (CommunityReputationRecord community : communities.values()) {
-            if (community.hasEvictableIncident(gameTime, receiptHorizonTicks)) {
+            if (community.hasEvictableIncident(preflight)) {
                 return true;
             }
         }
         return false;
     }
 
+    /** The whole-player sweep at the default receipt horizon, for a caller with no policy snapshot. */
+    public int enforcePlayerIncidentCap(int maxPerPlayer, long gameTime, int minScore, int maxScore) {
+        return enforcePlayerIncidentCap(minScore, maxScore, new AdmissionPreflight(Integer.MAX_VALUE,
+                maxPerPlayer, ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, gameTime));
+    }
+
     /**
      * Enforces the whole-player incident cap (§13.5) by pruning the fullest community first, using the
-     * same priority order and the same fold-into-baseline guarantee as the per-community pass.
+     * same priority order and the same never-drop-live-evidence guarantee as the per-community pass.
      * Iterating fullest-first means a player who is deeply involved in one village does not lose the
      * only two incidents they have somewhere else.
      *
+     * <p>Takes the operation's own {@link AdmissionPreflight}, so the sweep uses the configured
+     * receipt horizon the refusal was decided against. It used to pass the <em>default</em> horizon
+     * down to the per-community pass: on any server that had tuned the setting, the preflight and the
+     * sweep disagreed about which records were evictable, and the cap was exceeded with a warning that
+     * named no actionable cause.
+     *
      * @return how many incidents were pruned; {@code 0} means the store did not change
      */
-    public int enforcePlayerIncidentCap(int maxPerPlayer, long gameTime, int minScore, int maxScore) {
+    public int enforcePlayerIncidentCap(int minScore, int maxScore, AdmissionPreflight preflight) {
+        int maxPerPlayer = preflight.maxIncidentsPerPlayer();
         int total = totalIncidentCount();
         if (total <= maxPerPlayer) {
             return 0;
@@ -374,7 +388,9 @@ public final class PlayerReputationRecord {
                 break;
             }
             int target = Math.max(1, community.incidentCount() - (total - maxPerPlayer));
-            List<IncidentRecord> removed = community.prune(target, gameTime, minScore, maxScore);
+            List<IncidentRecord> removed = community.prune(minScore, maxScore,
+                    new AdmissionPreflight(target, maxPerPlayer, preflight.receiptHorizonTicks(),
+                            preflight.evaluationTime()));
             total -= removed.size();
             prunedTotal += removed.size();
             // A community that yields nothing (everything pinned) must not end the sweep: the

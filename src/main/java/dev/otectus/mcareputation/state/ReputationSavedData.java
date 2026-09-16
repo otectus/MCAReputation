@@ -83,12 +83,36 @@ public final class ReputationSavedData extends SavedData {
     }
 
     /**
-     * True when this store is latched read-only because the file came from a newer format. Every
-     * mutation is still accepted by the API and simply never persisted, so a server stays playable
-     * while an operator downgrades or restores a backup.
+     * True when this store is latched read-only because the file came from a newer format. Nothing
+     * was loaded and nothing will be written, so a server stays playable — read-only — while an
+     * operator downgrades or restores a backup.
      */
     public boolean isReadOnly() {
         return readOnly;
+    }
+
+    /**
+     * Whether a mutation may be attempted at all. Every write path checks this <em>before</em> it
+     * changes anything (I14).
+     *
+     * <p>This used to be the opposite promise: mutations were accepted, applied in memory, and simply
+     * never persisted. That is the worst of the available behaviours. A player's deed is recorded, the
+     * toast fires, a producer stores the returned incident id as durable proof of settlement, and the
+     * whole transaction evaporates on restart with no error anyone saw. An honest refusal — one a
+     * producer can classify as retryable/degraded and an operator can read in the log — costs the same
+     * deed and keeps every consumer's state consistent with what is actually on disk.
+     */
+    public boolean writable() {
+        return !readOnly;
+    }
+
+    /**
+     * The player's record for a path that is about to write, or empty when this store may not be
+     * written. Creates nothing on a read-only store, so a refused operation leaves no trace of having
+     * been attempted.
+     */
+    public Optional<PlayerReputationRecord> getOrCreatePlayerIfWritable(UUID playerId) {
+        return writable() ? Optional.of(getOrCreatePlayer(playerId)) : Optional.empty();
     }
 
     @Override

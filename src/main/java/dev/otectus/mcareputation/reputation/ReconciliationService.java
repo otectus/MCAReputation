@@ -2,6 +2,7 @@ package dev.otectus.mcareputation.reputation;
 
 import dev.otectus.mcareputation.api.ChangeCause;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.state.AdmissionPreflight;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.ReputationSavedData;
@@ -161,8 +162,8 @@ public final class ReconciliationService {
         }
         // Cap enforcement mutates the store (prunes incidents, folds weight into baselines) just as
         // decay does; either kind of change must mark the save dirty or a crash loses it.
-        if (record.enforcePlayerIncidentCap(policy.maxIncidentsPerPlayer(), gameTime,
-                policy.minimumScore(), policy.maximumScore()) > 0) {
+        if (record.enforcePlayerIncidentCap(policy.minimumScore(), policy.maximumScore(),
+                AdmissionPreflight.of(policy, gameTime)) > 0) {
             changed = true;
         }
         // Receipts age out on the same sweep as everything else, so the horizon is enforced without a

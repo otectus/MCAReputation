@@ -515,6 +515,11 @@ public final class IncidentRecord {
      * is recorded so the pair totals the killing's target, and when the killing then turns out to
      * carry no public weight — refused, duplicate, or retained unwitnessed — the assault's already
      * witnessed penalty must come back rather than being silently refunded.
+     *
+     * <p>Approximate by construction: it restores the two scalars and clears the terminal flags, but
+     * it <em>advances</em> the story revision and the update clock rather than putting them back.
+     * Prefer {@link #snapshotLifecycle()} and {@link #restoreLifecycle} on any path that must be able
+     * to claim nothing was written; this overload stays for the one-field callers that predate it.
      */
     public void restoreContribution(int settledDelta, int currentContribution, long gameTime) {
         this.settledDelta = settledDelta;
@@ -524,6 +529,59 @@ public final class IncidentRecord {
         this.storyRevision++;
         context.remove(BuiltinIncidents.CONTEXT_SUPERSEDED_BY);
         touch(gameTime);
+    }
+
+    /**
+     * Every mutable field a staged supersession can move, captured before it moves (§11.3).
+     *
+     * <p>A refused successor must leave the precursor <em>exactly</em> as it was — not approximately,
+     * and not "the score came back". A rollback that bumps the story revision tells every consumer
+     * keyed on that revision that the narrative changed, so an attempted-and-refused replacement
+     * becomes gossip; one that touches the update clock makes a refused operation visible in the
+     * ledger's own timestamps.
+     *
+     * <p>The component list is the contract. When a later phase adds profile evidence, a credit
+     * reservation or a second elapsed clock to this class, it must appear here too or the rollback
+     * silently stops being complete — {@code SupersedeLifecycleTest} pins the count to make that a
+     * test failure rather than a discovery in production.
+     *
+     * @param supersededByContext the {@code superseded_by} context entry as it was.
+     *                            {@link #linkSuccessor} writes one for readers older than the typed
+     *                            field, so a rollback that blindly removed the key would also erase
+     *                            the entry a legacy record already carried on its own.
+     */
+    public record LifecycleSnapshot(IncidentStatus status, int settledDelta, int currentContribution,
+                                    long updatedGameTime, long decayElapsedTicks,
+                                    long lastReconciledGameTime, boolean pinned, boolean superseded,
+                                    @Nullable UUID supersededBy, long storyRevision,
+                                    Optional<String> supersededByContext) {
+    }
+
+    /** Captures {@link LifecycleSnapshot} from this record's current state. */
+    public LifecycleSnapshot snapshotLifecycle() {
+        return new LifecycleSnapshot(status, settledDelta, currentContribution, updatedGameTime,
+                decayElapsedTicks, lastReconciledGameTime, pinned, superseded, supersededBy,
+                storyRevision, context(BuiltinIncidents.CONTEXT_SUPERSEDED_BY));
+    }
+
+    /** Puts back exactly what {@link #snapshotLifecycle()} captured. Writes nothing else. */
+    public void restoreLifecycle(LifecycleSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        this.status = snapshot.status();
+        this.settledDelta = snapshot.settledDelta();
+        this.currentContribution = snapshot.currentContribution();
+        this.updatedGameTime = snapshot.updatedGameTime();
+        this.decayElapsedTicks = snapshot.decayElapsedTicks();
+        this.lastReconciledGameTime = snapshot.lastReconciledGameTime();
+        this.pinned = snapshot.pinned();
+        this.superseded = snapshot.superseded();
+        this.supersededBy = snapshot.supersededBy();
+        this.storyRevision = snapshot.storyRevision();
+        snapshot.supersededByContext().ifPresentOrElse(
+                value -> context.put(BuiltinIncidents.CONTEXT_SUPERSEDED_BY, value),
+                () -> context.remove(BuiltinIncidents.CONTEXT_SUPERSEDED_BY));
     }
 
     /**
