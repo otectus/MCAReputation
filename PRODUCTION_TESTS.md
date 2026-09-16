@@ -16,7 +16,7 @@ MCA's NeoForge artifact is mojmap and loads as a real mod in the dev runs, so `r
 `runServer` here *do* exercise genuine MCA behaviour. The gate remains anyway, for the reason Spec
 Appendix D actually gives: "production verified" means the built jars were tested in a production-style
 instance, not that compilation and unit tests passed. There is no reobfuscation step to worry about any
-more — `build/libs/mcareputation-0.3.0.jar` *is* the artifact that ships.
+more — `build/libs/mcareputation-0.6.0.jar` *is* the artifact that ships.
 
 ## What has passed so far
 
@@ -24,15 +24,21 @@ more — `build/libs/mcareputation-0.3.0.jar` *is* the artifact that ships.
 |---|---|---|
 | Phase 0 audit and reconciliation | ✅ | [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) |
 | MCA 7.7.36-beta.3 signature confirmation | ✅ | `javap` over the pinned `mca-neoforge` jar; every consumed signature present and compatible (IMPLEMENTATION_NOTES §2.1) |
-| MCA: Reputation compiles and unit tests | ✅ | **343 tests, 0 failures, 0 skipped** (1.20.1 Forge baseline was 255) |
-| Golden 1.20.1 saved data loads under 1.21.1 | ✅ | `GoldenSavedDataCompatibilityTest` against a fixture written by the unmodified Forge serializer |
-| Config keys and defaults unchanged | ✅ | `ConfigParityTest` pins both key sets and both filenames exactly |
+| MCA: Reputation compiles and unit tests | ✅ | **888 tests, 0 failures, 1 skipped** at 0.6.0 (0.5.0 on this branch was 531; 0.4.1 was 401; the 1.20.1 Forge baseline before the port was 255). The skip is the golden-fixture regeneration case, which only runs under `-Dmcareputation.regenerateFixtures=true`. |
+| Golden 1.20.1 saved data loads under 1.21.1 | ✅ | `GoldenSavedDataCompatibilityTest` against three fixtures written by the unmodified Forge serializer: the format-1 file (migrated through both steps on load), the Forge 0.5.0 format-2 file (migrated 2 → 3), and the Forge 0.6.0 format-3 file — loaded with nothing to migrate, its frozen profile subunits and credit counters asserted exactly, and its SHA-256 pinned so a local regeneration cannot quietly replace the evidence |
+| Config keys and defaults unchanged | ✅ | `ConfigParityTest` pins both key sets and both filenames exactly; 0.5.0's two additions (`limits.receiptRetentionTicks`, `integration.coreAuthorityUndeclaredKinds`) and 0.6.0's eight `[profiles]` keys (four COMMON, four CLIENT) are pinned there and documented in CONFIG.md |
 | No Forge or relocated-MCA reference survives | ✅ | `NeoForgePortLintTest` (source, 19 idioms) + `OptionalClassloadTest` (bytecode) + `checkJarContents` (packaged bytecode) |
 | Dedicated-server safety of the packet seam | ✅ | `ClientPacketSinkTest` + a bytecode assertion that no class under `network/` names a client type |
 | MCA: Quests compiles and regression suite | ✅ | **331 tests, 0 failures**, with `compat/reputation/**` compiled against this port for the first time |
 | MCA: Conversations compiles and regression suite | ✅ | **537 tests, 0 failures**, with `compat/reputation/**` compiled and the optional dependency entry restored |
 | Shipped jar contains no shaded companion classes | ✅ | `checkJarContents`, run as part of `build` |
 | No mixins to lint | ✅ | the mod ships none; asserted by `OptionalClassloadTest` and `checkJarContents` |
+| Save format 1 → 2 migration | ✅ | `SavedDataMigrationTest` over the checked-in format-1 fixture: receipts recovered, legacy supersessions made terminal, idempotent on a second run, no score moved — and still run *before* the 2 → 3 step when a format-1 file arrives, asserted separately |
+| Save format 2 → 3 migration and enrichment | ✅ | `ProfileEvidencePersistenceTest`: profiled public incidents stubbed and nothing else, the adopted clock, enrichment idempotent across two runs and across an interruption mid-cursor, an unwritten pass repeated harmlessly, deferral while the registries are unpublished, and a ledger with no profile content still serializing byte-identically to format 2 |
+| MCA profession getter audited against the pinned jar | ✅ | `javap` over `mca-neoforge-7.7.36-beta.3+1.21.1.jar`: `public net.minecraft.resources.ResourceLocation getProfessionId()` on `net.conczin.mca.entity.VillagerEntityMCA`. Re-checked on every `check` by `McaBinaryAbiTest` (optional tier) and resolved at runtime by `McaTraitFallbackTest` |
+| Compile-only API jar still links for an outside consumer | ✅ | `verifyApiJar` (68 classes, every export present, no resources) + `verifyApiJarLinks` (a consumer compiled against the api jar **alone**) + `verifyApiJarLinkage` (a 0.5.0-era consumer compiled against the `b70f320` api jar and run against today's classes) |
+| A save from a future format is not rewritten | ✅ | `SavedDataTest` / `GoldenSavedDataTest`: the store latches read-only, `setDirty` is inert, and the original bytes are written back verbatim |
+| Protocol version moved with the wire format | ✅ | `"5"` → `"6"` for 0.6.0's profile subpayload, asserted by nothing automatic — the registrar compares by equality, so the pairing gates in §1 below are the only real check. Note the Forge line went `"4"` → `"5"` for the same release; the two lineages are separate and were never wire-compatible |
 | Production runtime matrix | ⬜ | **this document** |
 
 ### What the automated tests now pre-cover
@@ -74,7 +80,8 @@ step. Record the exact filenames and hashes below.
 
 | Artifact | File | SHA-256 |
 |---|---|---|
-| MCA: Reputation | `mcareputation-0.3.0.jar` | `2f5f8089f0655090cceba6ae6dfe8f8e8a806f1d6d61acb5e9ab5d76eb882d72` |
+| MCA: Reputation | `mcareputation-0.6.0.jar` | `46f9981050a58d7512a3a277fd751163501c1a5444e46016eb1d8f5d9bd9c9b8` |
+| MCA: Reputation API jar | `mcareputation-0.6.0-api.jar` | `4379d6d8a3a5828d0e57018ac952cf6c1d62440f0e646e370d93943fb37e901f` |
 | MCA: Quests | `mcaquests-1.1.0.jar` | (to be recorded) |
 | MCA: Conversations | `mcaconversations-neoforge-2.0.0+1.21.1.jar` | (to be recorded) |
 | MCA Reborn | `mca-neoforge-7.7.36-beta.3+1.21.1.jar` | `de4763d34a41cb84ffa392b87cdb23191beddda2323b56552a1a2fcd7c436fc3` |
@@ -100,6 +107,8 @@ Every row must reach the main menu, load a world, and produce no ERROR attributa
 | 8 | MCA + all three | ⬜ | ⬜ | |
 | 9 | MCA + all three + FTB Quests stack | ⬜ | ⬜ | |
 | 10 | Dedicated server + matching clients for 5–9 | — | ⬜ | |
+| 11 | 0.5.0 dedicated server + **0.4.1** client, and the reverse | — | ⬜ | must be refused at the handshake on `PROTOCOL_VERSION` (`"5"` vs `"4"`), never a join followed by a snapshot decode error |
+| 12 | 0.6.0 dedicated server + **0.5.0** client, and the reverse | — | ⬜ | must be refused at the handshake on `PROTOCOL_VERSION` (`"6"` vs `"5"`). This is the 0.6.0 pairing gate and the one row the profile subpayload makes load-bearing: a 0.5.0 client that completed the handshake would read the new profile panes as the tail of a `SelectedDetail` it thinks it understands |
 
 For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not installed, and confirm no
 `NoClassDefFoundError` anywhere.
@@ -156,6 +165,18 @@ For rows 3, 4 and 7, confirm the log line stating MCA: Reputation is not install
 | Advancement criterion with `mcareputation:standing` predicate | Loot only granted if the predicate condition matches | ⬜ |
 | Advancement fires on `mcareputation:tier_reached` | Advancement grants when a player's tier changes in the specified community | ⬜ |
 | Install into a pre-Reputation Quests world | Eligible players inherit their balance once, as a baseline | ⬜ |
+| **Standing screen: profile header** | Two new lines above the ledger — how well known the player is in the selected village, and what for, in the recognition ladder's own words. Neither appears for a village nobody has interacted with | ⬜ |
+| **Standing screen: Details expansion** | A `Details` button beside the village arrows, collapsed on every open, expanding to at most eight facet rows inside the scrollable list. Keyboard-reachable and narrated; expanding sends no packet | ⬜ |
+| **Standing screen: selection change clears the profile** | Turning a page or selecting another village blanks both profile lines and hides the Details button until the reply lands — never shows the previous village's traits under the new name | ⬜ |
+| **Standing screen: observer pane** | Opened from a villager, the screen also says what *that villager* knows the player for. A villager inside its own rumour delay says it has heard nothing; its pane is never silently the village's wider view | ⬜ |
+| **Profile labels come from the server's pack** | On a dedicated server, edit a facet's `name` in the server's datapack only, `/reload`, and reopen the screen: the client shows the **server's** word, not the one it shipped with | ⬜ |
+| **Repeat credit** | Rescue the same village's villagers repeatedly: the shipped schedule pays 100% / 100% / 50% / 25% / 0% across a 14-day window, and rotating beneficiaries lowers the ceiling rather than resetting the allowance | ⬜ |
+| **Wrongdoing is never discounted** | Repeat an adverse deed: every instance costs its full authored amount, whatever the repetition | ⬜ |
+| **Facet-aware opinion** | Two villagers with identical knowledge but different MCA personalities report different opinions of the same player, within `maxFacetOpinionAdjustment`; what reaches a Conversations Trust/Respect check stays inside ±8 | ⬜ |
+| **Profiles switched off mid-world** | `enableProfiles=false`, `/reload`: the screen's profile lines disappear, the ledger and standing are untouched, and nothing is deleted. Play for several in-game days, switch it back on, `/reload`: no burst of catch-up fading, and `/mcareputation debug profile` shows the frozen interval was not charged | ⬜ |
+| **Legacy enrichment** | On a world upgraded from 0.5.0, `/mcareputation debug profilemigration` reports coverage `migrating` with a cursor, then `partial_legacy` once the periodic sweep finishes. An old rescue then shows recognition and bravery, and an old killing shows recognition and violence but nothing evaluative | ⬜ |
+| **Retention protects profile evidence** | Fill one community's ledger to its cap with records still holding live profile evidence: the next deed is refused with a capacity reason rather than pruning the evidence, and the same ledger prunes and admits again once a lifetime expires | ⬜ |
+| **The four new debug commands** | `debug profile`, `debug credit`, `debug profileincident`, `debug profilemigration` all answer at permission 2 and are refused below it. Running `debug profile` twice in a row must not move any figure it prints — it is an inspecting read | ⬜ |
 | Second login after migration | Nothing is added again | ⬜ |
 | Remove Reputation | Quests reads its mirrored fallback; standing is what it was | ⬜ |
 | Reinstall Reputation | Canonical data resumes; no duplication | ⬜ |
@@ -174,6 +195,7 @@ actually contains, in the presence of vanilla's own chunk upgrade and MCA's own 
 | 2 | Copy the world, then back up the copy separately | ⬜ |
 | 3 | Open the copy in the 1.21.1 / NeoForge instance and let the vanilla world upgrade run | ⬜ |
 | 4 | Reputation saved data loads exactly once, with no "future format" warning and no corruption-containment log line | ⬜ |
+| 4b | The save is now format 3, with pre-upgrade profiled deeds marked for enrichment; after a few minutes of play `/mcareputation debug profilemigration` reports the pass finished and coverage `partial_legacy`. No score, tier, or title moved at any point | ⬜ |
 | 5 | Every score, dimension/village id, title, incident, status, context, witness set, dedupe entry and tier high-water mark matches step 1 | ⬜ |
 | 6 | Trigger one new deed, save, exit **fully**, restart, and confirm both the old and the new state persist | ⬜ |
 | 7 | Rename a village; the cached display name updates while the community identity (and therefore the standing) does not | ⬜ |

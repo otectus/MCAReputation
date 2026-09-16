@@ -5,10 +5,17 @@ package dev.otectus.mcareputation.api;
  *
  * <p>The distinction that matters to a companion is not success versus failure but <b>terminal</b>
  * versus <b>retryable</b>. A terminal outcome is remembered: replaying the same operation key returns
- * the same answer forever, so a producer that crashed before storing our reply can recover it. A
- * retryable outcome is deliberately forgotten, because the condition that caused it — the mod being
- * switched off, a ledger with nothing left to evict — is one an operator can fix, and the delivery
- * should then succeed.
+ * the same answer for as long as the receipt survives, so a producer that crashed before storing our
+ * reply can recover it. A retryable outcome is deliberately forgotten, because the condition that
+ * caused it — the mod being switched off, a ledger with nothing left to evict — is one an operator
+ * can fix, and the delivery should then succeed.
+ *
+ * <p>The replay horizon is <b>bounded</b>, and honestly so. Receipts age out at the configured
+ * retention and the per-player budget evicts the oldest first, so past
+ * {@link McaReputationApi#receiptFloor} an absent receipt is not evidence that the operation never
+ * happened — it is evidence that this store can no longer say. A producer holding an unacknowledged
+ * operation older than the floor must quarantine it for reconciliation rather than retry it under the
+ * same key (§10.6).
  *
  * @since MCA: Reputation 0.4.1
  */
@@ -42,7 +49,10 @@ public enum ReceiptOutcome {
      */
     REFUSED_CAPACITY;
 
-    /** Whether a receipt for this outcome is persisted, and therefore replayable forever. */
+    /**
+     * Whether a receipt for this outcome is persisted, and therefore replayable within the retention
+     * horizon above. Never "forever": see {@link McaReputationApi#receiptFloor}.
+     */
     public boolean isTerminal() {
         return this == APPLIED || this == ACCEPTED_NO_PUBLIC_INCIDENT || this == REFUSED_INVALID;
     }

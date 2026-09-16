@@ -1,0 +1,20 @@
+{
+  "allowed_incidents": [
+    "mcareputation:villager_cured"
+  ],
+  "recognition": {
+    "points": 10,
+    "lifetime_ticks": 1344000,
+    "resolution_mode": "recognition"
+  },
+  "facets": {
+    "mcareputation:compassion": {
+      "points": 10,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    }
+  },
+  "credit_class": "commendable",
+  "credit_policy": "mcareputation:cure_service",
+  "major_evidence": false
+}

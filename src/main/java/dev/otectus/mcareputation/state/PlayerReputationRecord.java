@@ -4,6 +4,7 @@ import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
@@ -329,6 +330,46 @@ public final class PlayerReputationRecord {
                 .isPresent());
     }
 
+    // --- repeat credit ------------------------------------------------------
+
+    /**
+     * The credit window for a {@code player_global} policy: one allowance shared across every
+     * community this player has a record in (§10.2's scope).
+     *
+     * <p>Deliberately <b>stricter than exact</b>. The counters are stored per community, so a global
+     * allowance is read as the sum of them and the operation still consumes in its own community's
+     * tracker. A player who has rescued once in three villages therefore reads as occurrence four
+     * globally, never as occurrence two: a global scope that resolved more generously than a
+     * per-community one would make declaring it an exploit rather than a restriction. The alternative
+     * — a second parallel set of global counters — would be a second growing structure with its own
+     * capacity story for a scope no shipped policy uses.
+     */
+    public CreditWindowTrackers.CreditWindow peekGlobalCreditWindow(ResourceLocation group,
+                                                                    Optional<String> subjectKey,
+                                                                    boolean subjectRequired,
+                                                                    long acceptanceTime) {
+        long groupOrdinal = 0L;
+        long subjectOrdinal = 0L;
+        boolean sawSubject = false;
+        boolean overflow = false;
+        for (CommunityReputationRecord community : communities.values()) {
+            CreditWindowTrackers.CreditWindow window = community.peekCreditWindow(group, subjectKey,
+                    subjectRequired, acceptanceTime);
+            groupOrdinal += window.groupOrdinal();
+            if (window.subjectOrdinal().isPresent()) {
+                sawSubject = true;
+                subjectOrdinal += window.subjectOrdinal().getAsInt();
+            }
+            overflow |= window.capacityOverflow();
+        }
+        int boundedGroup = (int) Math.min(groupOrdinal, CreditWindowTrackers.MAX_OCCURRENCES);
+        java.util.OptionalInt boundedSubject = sawSubject
+                ? java.util.OptionalInt.of((int) Math.min(subjectOrdinal,
+                        CreditWindowTrackers.MAX_OCCURRENCES))
+                : java.util.OptionalInt.empty();
+        return new CreditWindowTrackers.CreditWindow(boundedGroup, boundedSubject, overflow);
+    }
+
     // --- cross-community bounds ---------------------------------------------
 
     public int totalIncidentCount() {
@@ -344,24 +385,38 @@ public final class PlayerReputationRecord {
      * is at the whole-player cap, the next deed is refused with {@code Reason.CAPACITY} rather than the
      * cap being exceeded (§5 F09, D5).
      */
-    public boolean hasEvictableIncident(long gameTime, long receiptHorizonTicks) {
+    public boolean hasEvictableIncident(AdmissionPreflight preflight) {
         for (CommunityReputationRecord community : communities.values()) {
-            if (community.hasEvictableIncident(gameTime, receiptHorizonTicks)) {
+            if (community.hasEvictableIncident(preflight)) {
                 return true;
             }
         }
         return false;
     }
 
+    /** The whole-player sweep at the default receipt horizon, for a caller with no policy snapshot. */
+    public int enforcePlayerIncidentCap(int maxPerPlayer, long gameTime, int minScore, int maxScore) {
+        return enforcePlayerIncidentCap(minScore, maxScore, new AdmissionPreflight(Integer.MAX_VALUE,
+                maxPerPlayer, ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, gameTime,
+                ReputationPolicy.DEFAULT_PROTECT_PROFILE_EVIDENCE));
+    }
+
     /**
      * Enforces the whole-player incident cap (§13.5) by pruning the fullest community first, using the
-     * same priority order and the same fold-into-baseline guarantee as the per-community pass.
+     * same priority order and the same never-drop-live-evidence guarantee as the per-community pass.
      * Iterating fullest-first means a player who is deeply involved in one village does not lose the
      * only two incidents they have somewhere else.
      *
+     * <p>Takes the operation's own {@link AdmissionPreflight}, so the sweep uses the configured
+     * receipt horizon the refusal was decided against. It used to pass the <em>default</em> horizon
+     * down to the per-community pass: on any server that had tuned the setting, the preflight and the
+     * sweep disagreed about which records were evictable, and the cap was exceeded with a warning that
+     * named no actionable cause.
+     *
      * @return how many incidents were pruned; {@code 0} means the store did not change
      */
-    public int enforcePlayerIncidentCap(int maxPerPlayer, long gameTime, int minScore, int maxScore) {
+    public int enforcePlayerIncidentCap(int minScore, int maxScore, AdmissionPreflight preflight) {
+        int maxPerPlayer = preflight.maxIncidentsPerPlayer();
         int total = totalIncidentCount();
         if (total <= maxPerPlayer) {
             return 0;
@@ -374,7 +429,10 @@ public final class PlayerReputationRecord {
                 break;
             }
             int target = Math.max(1, community.incidentCount() - (total - maxPerPlayer));
-            List<IncidentRecord> removed = community.prune(target, gameTime, minScore, maxScore);
+            // The same rules at a tighter per-community cap: the whole-player sweep must not be able
+            // to prune what the per-community refusal would have protected, profile evidence included.
+            List<IncidentRecord> removed = community.prune(minScore, maxScore,
+                    preflight.withCommunityCap(target));
             total -= removed.size();
             prunedTotal += removed.size();
             // A community that yields nothing (everything pinned) must not end the sweep: the

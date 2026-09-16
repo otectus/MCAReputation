@@ -16,6 +16,11 @@ import com.mojang.serialization.JsonOps;
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.ImportResult;
+import dev.otectus.mcareputation.api.McaReputationApi;
+import dev.otectus.mcareputation.api.profile.FacetValue;
+import dev.otectus.mcareputation.api.profile.ProfileCapabilities;
+import dev.otectus.mcareputation.api.profile.ProfileQueryResult;
+import dev.otectus.mcareputation.api.profile.ProfileSnapshot;
 import dev.otectus.mcareputation.api.ReputationIncidentView;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
@@ -24,6 +29,8 @@ import dev.otectus.mcareputation.api.ResolutionResult;
 import dev.otectus.mcareputation.api.CoreIncidentKind;
 import dev.otectus.mcareputation.api.McaReputationApi;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.credit.CreditDecision;
+import dev.otectus.mcareputation.credit.CreditPolicy;
 import dev.otectus.mcareputation.community.CommunityResolver;
 import dev.otectus.mcareputation.compat.McaReflect;
 import dev.otectus.mcareputation.data.ReputationContentValidator;
@@ -33,6 +40,10 @@ import dev.otectus.mcareputation.incident.BuiltinIncidents;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
+import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
+import dev.otectus.mcareputation.profile.VillagerProfileResolver;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
 import dev.otectus.mcareputation.network.SnapshotSelection;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationService;
@@ -41,7 +52,9 @@ import dev.otectus.mcareputation.reputation.ReputationTierSet;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
 import dev.otectus.mcareputation.reputation.TitleService;
 import dev.otectus.mcareputation.reputation.Titles;
+import dev.otectus.mcareputation.state.AdmissionPreflight;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
+import dev.otectus.mcareputation.state.CreditWindowTrackers;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.OperationReceipt;
 import dev.otectus.mcareputation.state.ReputationSavedData;
@@ -114,6 +127,13 @@ public final class ReputationCommand {
 
     /** {@code top} is a scan of every record; the ceiling keeps one command off the chat log. */
     private static final int MAX_TOP_LIMIT = 50;
+
+    /**
+     * Players one {@code debug profilemigration run} may enrich. Bounded for the same reason the
+     * automatic pass is (§19.3): a migration is a budgeted walk over saved records, never a sweep that
+     * holds the server thread for as long as the save is big.
+     */
+    private static final int MAX_MIGRATION_BUDGET = 256;
 
     /** Suggests every community the store knows about, plus {@code here}. */
     private static final SuggestionProvider<CommandSourceStack> COMMUNITY_SUGGESTIONS =
@@ -978,6 +998,39 @@ public final class ReputationCommand {
                                         .executes(ctx -> debugSupersede(ctx,
                                                 EntityArgument.getPlayer(ctx, "player"),
                                                 CommunityArgument.getCommunity(ctx, "community"))))))
+                .then(Commands.literal("profile")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .then(Commands.argument("community", CommunityArgument.community())
+                                        .suggests(COMMUNITY_SUGGESTIONS)
+                                        .executes(ctx -> debugProfile(ctx,
+                                                EntityArgument.getPlayer(ctx, "player"),
+                                                CommunityArgument.getCommunity(ctx, "community"))))))
+                .then(Commands.literal("credit")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .then(Commands.argument("community", CommunityArgument.community())
+                                        .suggests(COMMUNITY_SUGGESTIONS)
+                                        .executes(ctx -> debugCredit(ctx,
+                                                EntityArgument.getPlayer(ctx, "player"),
+                                                CommunityArgument.getCommunity(ctx, "community"))))))
+                .then(Commands.literal("profileincident")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .then(Commands.argument("community", CommunityArgument.community())
+                                        .suggests(COMMUNITY_SUGGESTIONS)
+                                        .then(Commands.argument("incident", UuidArgument.uuid())
+                                                .executes(ctx -> debugProfileIncident(ctx,
+                                                        EntityArgument.getPlayer(ctx, "player"),
+                                                        CommunityArgument.getCommunity(ctx, "community"),
+                                                        UuidArgument.getUuid(ctx, "incident")))))))
+                .then(Commands.literal("profilemigration")
+                        .executes(ctx -> debugProfileMigration(ctx, 0))
+                        // The one mutating diagnostic, and it is explicit about it: an operator asks
+                        // for a bounded number of records to be enriched now rather than waiting for
+                        // the next automatic pass. Budgeted, resumable and idempotent (§19.3).
+                        .then(Commands.literal("run")
+                                .then(Commands.argument("budget", IntegerArgumentType.integer(1,
+                                                MAX_MIGRATION_BUDGET))
+                                        .executes(ctx -> debugProfileMigration(ctx,
+                                                IntegerArgumentType.getInteger(ctx, "budget"))))))
                 .then(Commands.literal("standing")
                         .executes(ctx -> debugStanding(ctx, self(ctx), null))
                         .then(Commands.argument("community", CommunityArgument.community())
@@ -1143,6 +1196,294 @@ public final class ReputationCommand {
         return snapshot.map(ReputationSnapshot::score).orElse(0);
     }
 
+    // ------------------------------------------------------------------
+    // Profile diagnostics (§21.1)
+    // ------------------------------------------------------------------
+
+    /**
+     * Everything the profile pipeline believes about one player in one community (§21.1).
+     *
+     * <p><b>INSPECT, always.</b> Every read below enters the reconciliation gate with
+     * {@code Intent.INSPECT} through {@link McaReputationApi#inspectStoredProfile}: neither clock
+     * advances, no ledger ages, no tracker retires and nothing is marked dirty. A diagnostic that
+     * aged the evidence it was printing would answer a different question every time it was asked,
+     * and the aging it declines to do is still owed to the next real read.
+     *
+     * <p>Printed in the order an operator debugs in: what the feature can do at all, then whether
+     * this combination has an answer, then the two public integers with their raw and clamped forms
+     * beside each other, then the evidence behind them, and last §13.4's bounded explanation — which
+     * facets a neutral observer would weight, by how much, and whether the operator's cap bound the
+     * result.
+     */
+    private static int debugProfile(CommandContext<CommandSourceStack> ctx, ServerPlayer subject,
+                                    String rawCommunity) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        MinecraftServer server = source.getServer();
+        CommunityKey community = resolveCommunity(ctx, rawCommunity);
+        ProfileCapabilities capabilities = McaReputationApi.profileCapabilities(server);
+        ProfileQueryResult<ProfileSnapshot> result =
+                McaReputationApi.inspectStoredProfile(server, subject.getUUID(), community);
+
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.profile.header",
+                subject.getDisplayName(), community.asString(), result.availability().name()), false);
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profile.capabilities", capabilities.schemaVersion(),
+                String.valueOf(capabilities.enabled()), String.valueOf(capabilities.contentPublished()),
+                String.valueOf(capabilities.readOnly()), capabilities.coverage().name())
+                .withStyle(ChatFormatting.DARK_GRAY), false);
+        if (result.value().isEmpty()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profile.unavailable", result.availability().name(),
+                    result.reason().orElse("-")).withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+        ProfileSnapshot snapshot = result.value().get();
+        ReputationPolicy policy = McaReputationConfig.snapshot();
+        Optional<CommunityReputationRecord> record = ReputationSavedData.get(server)
+                .player(subject.getUUID()).flatMap(player -> player.community(community));
+
+        // Raw subunits beside the public integer: §8.3 quantizes and clamps on the way out, so a
+        // value that looks stuck at a cap and one that is genuinely that large are indistinguishable
+        // from the public number alone.
+        long rawRecognition = record.map(CommunityReputationRecord::recognitionSubunits).orElse(0L);
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profile.recognition", snapshot.recognition().value(),
+                policy.recognitionCap(), rawRecognition, snapshot.recognition().evidenceCount(),
+                snapshot.recognition().tierId()), false);
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profile.revisions", snapshot.standingRevision(),
+                snapshot.profileRevision(), snapshot.definitionGeneration(),
+                snapshot.coverage().name()).withStyle(ChatFormatting.DARK_GRAY), false);
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profile.dominant",
+                snapshot.dominantFacets().isEmpty()
+                        ? "-"
+                        : snapshot.dominantFacets().stream().map(ResourceLocation::toString)
+                                .collect(java.util.stream.Collectors.joining(", "))), false);
+        for (FacetValue facet : snapshot.facets()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profile.facet", facet.facet().toString(),
+                    facet.value(), facet.rangeMin() + ".." + facet.rangeMax(),
+                    facet.supportingEvidence(), facet.opposingEvidence(),
+                    String.valueOf(facet.labelEligible())).withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+
+        // Payload origins and the credit decisions frozen onto them: this is where "why is this facet
+        // smaller than the deed that earned it" is answered, and the answer is never recomputed --
+        // it is read from the decision the accepting transaction stored (§9.4).
+        int payloads = 0;
+        int suppressed = 0;
+        java.util.Map<String, Integer> origins = new java.util.TreeMap<>();
+        for (IncidentRecord incident : record.map(CommunityReputationRecord::incidentsNewestFirst)
+                .orElse(List.of())) {
+            Optional<IncidentProfileEvidence> evidence = incident.profileEvidence();
+            if (evidence.isEmpty()) {
+                continue;
+            }
+            payloads++;
+            origins.merge(evidence.get().origin().jsonName(), 1, Integer::sum);
+            if (evidence.get().credit().isSuppressed()) {
+                suppressed++;
+            }
+        }
+        int reportedPayloads = payloads;
+        int reportedSuppressed = suppressed;
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profile.evidence", reportedPayloads,
+                origins.isEmpty() ? "-" : origins.toString(), reportedSuppressed), false);
+
+        // §13.4's bounded explanation, computed for a neutral observer: an operator asking "what are
+        // these facets worth to an opinion" has no villager in hand, and a resolved personality would
+        // make the answer depend on whoever happened to be standing there.
+        VillagerProfileResolver.OpinionAdjustment adjustment = VillagerProfileResolver.facetAdjustment(
+                ProfileRegistryBundle.current(), snapshot.facets(),
+                VillagerProfileResolver.ObserverTraits.NEUTRAL, policy.facetOpinionEnabled(),
+                policy.maxFacetOpinionAdjustment());
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profile.interpretation", adjustment.adjustment(),
+                adjustment.uncapped(), policy.maxFacetOpinionAdjustment(),
+                adjustment.traitBasis().name(), String.valueOf(adjustment.capped())), false);
+        for (VillagerProfileResolver.Contribution contribution : adjustment.contributions()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profile.contribution",
+                    contribution.facet().toString(), contribution.value(), contribution.weightBp(),
+                    String.valueOf(contribution.personalityApplied()))
+                    .withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        return snapshot.recognition().value();
+    }
+
+    /**
+     * The repeat-credit accounting for one player in one community (§10.5, §21.1).
+     *
+     * <p>Answers "why was that service worth less than the last one", which is otherwise invisible:
+     * the decision is taken before anything is written and then frozen onto the deed. Printed are the
+     * stable group and subject window identities, each saturated ordinal against its window, the
+     * nominal allowance the <em>next</em> qualifying operation would draw, and whether §10.5's
+     * conservative overflow decision is in force.
+     *
+     * <p>Reads only: {@link CommunityReputationRecord#peekCreditWindow} creates and moves nothing, so
+     * asking cannot spend an allowance. Nothing here enters the reconciliation gate at all — credit
+     * windows follow world time on their own monotonic contract and are not aged by a read.
+     */
+    private static int debugCredit(CommandContext<CommandSourceStack> ctx, ServerPlayer subject,
+                                   String rawCommunity) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        MinecraftServer server = source.getServer();
+        CommunityKey community = resolveCommunity(ctx, rawCommunity);
+        long gameTime = server.overworld().getGameTime();
+        Optional<CommunityReputationRecord> record = ReputationSavedData.get(server)
+                .player(subject.getUUID()).flatMap(player -> player.community(community));
+        if (record.isEmpty()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.credit.none", subject.getDisplayName(),
+                    community.asString()), false);
+            return 0;
+        }
+        CreditWindowTrackers trackers = record.get().creditTrackers();
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.credit.header",
+                subject.getDisplayName(), community.asString(), trackers.groupCount(),
+                ReputationBounds.MAX_CREDIT_GROUP_TRACKERS, trackers.subjectCount(),
+                ReputationBounds.MAX_CREDIT_SUBJECT_TRACKERS,
+                String.valueOf(McaReputationConfig.repeatCreditEnabled())), false);
+        if (trackers.isOverflowing()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.credit.overflow", trackers.overflowSinceGameTime())
+                    .withStyle(ChatFormatting.YELLOW), false);
+        }
+        trackers.describe().forEach((key, detail) -> source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.credit.tracker", key, detail)
+                .withStyle(ChatFormatting.DARK_GRAY), false));
+
+        ProfileRegistryBundle bundle = ProfileRegistryBundle.current();
+        for (ResourceLocation group : trackers.trackedGroups()) {
+            CreditWindowTrackers.CreditWindow window = record.get()
+                    .peekCreditWindow(group, Optional.empty(), false, gameTime);
+            int nextBp = bundle.creditPolicyForGroup(group)
+                    .map(policy -> policy.bpForOrdinal(window.groupOrdinal()))
+                    .orElse(CreditPolicy.FULL_BP);
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.credit.next", group.toString(),
+                    window.groupOrdinal(), nextBp,
+                    trackers.windowEnd(group).map(String::valueOf).orElse("-"),
+                    String.valueOf(window.capacityOverflow())), false);
+        }
+        if (trackers.isEmpty()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.credit.empty", community.asString())
+                    .withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        return trackers.groupCount();
+    }
+
+    /**
+     * One deed's frozen profile payload, channel by channel (§21.1).
+     *
+     * <p>Four quantities per channel, and they are four different facts: {@code authored} is what the
+     * datapack said the deed was worth, {@code credited} is what repeat credit left of it at
+     * acceptance, {@code current} is what it is worth at this deed's own profile clock, and the
+     * settled figure is what a resolution left behind. Printing fewer of them makes a faded deed and
+     * a discounted one indistinguishable.
+     *
+     * <p>Read from the stored record with no gate entry at all: the payload is exactly the bytes on
+     * disk, which is the only useful thing a diagnostic can say about frozen evidence.
+     */
+    private static int debugProfileIncident(CommandContext<CommandSourceStack> ctx,
+                                            ServerPlayer subject, String rawCommunity, UUID incidentId)
+            throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        CommunityKey community = resolveCommunity(ctx, rawCommunity);
+        Optional<IncidentRecord> maybe = ReputationSavedData.get(source.getServer())
+                .player(subject.getUUID())
+                .flatMap(player -> player.community(community))
+                .flatMap(record -> record.incident(incidentId));
+        if (maybe.isEmpty()) {
+            throw NO_INCIDENT.create();
+        }
+        IncidentRecord incident = maybe.get();
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profileincident.header",
+                incident.id().toString().substring(0, 8), incident.type().toString(),
+                incident.status().jsonName(), String.valueOf(incident.isSuperseded()),
+                incident.profileElapsedTicks(), incident.lastProfileObservedGameTime()), false);
+        Optional<IncidentProfileEvidence> evidence = incident.profileEvidence();
+        if (evidence.isEmpty()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profileincident.none",
+                    incident.id().toString().substring(0, 8)).withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+        IncidentProfileEvidence payload = evidence.get();
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profileincident.payload", payload.schemaVersion(),
+                payload.origin().jsonName(), payload.profileId().toString(),
+                Long.toHexString(payload.ruleFingerprint()), payload.contentGeneration(),
+                payload.profileRevision()), false);
+        for (IncidentProfileEvidence.Channel channel : payload.channels()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profileincident.channel", channel.channelName(),
+                    channel.authored(), channel.credited(), channel.current(),
+                    channel.mode().jsonName()).withStyle(ChatFormatting.DARK_GRAY), false);
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profileincident.lifecycle", channel.lifetime(),
+                    channel.decayStep(), channel.agedAt(incident.profileElapsedTicks()))
+                    .withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        CreditDecision credit = payload.credit();
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profileincident.credit",
+                credit.group().map(ResourceLocation::toString).orElse("-"),
+                credit.subjectRole().orElse("-"), credit.groupOrdinal(), credit.subjectOrdinal(),
+                credit.groupBp(), credit.subjectBp(), credit.effectiveBp(),
+                credit.reason().jsonName()), false);
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profileincident.supersede",
+                incident.supersededBy().map(id -> id.toString().substring(0, 8)).orElse("-"),
+                incident.storyRevision(), incident.baseDelta(), incident.settledDelta(),
+                incident.currentContribution()).withStyle(ChatFormatting.DARK_GRAY), false);
+        return payload.channels().size();
+    }
+
+    /**
+     * How far the §19 profile migration has got, and optionally advancing it (§21.1).
+     *
+     * <p>Coverage is the load-bearing line: {@code PARTIAL_LEGACY} stays partial for good once any
+     * legacy stub or quarantined payload exists, because §19.2's enrichment is deliberately
+     * conservative and "the pass finished" is not "the history is complete". An absence gate keeps
+     * respecting that difference, and an operator reading this should too.
+     *
+     * <p>{@code run <budget>} is the one mutating branch here. It is idempotent by construction —
+     * enrichment only ever upgrades an unenriched stub — so an interrupted pass simply runs again,
+     * and it awards no standing, titles or rewards (§19.3).
+     */
+    private static int debugProfileMigration(CommandContext<CommandSourceStack> ctx, int budget) {
+        CommandSourceStack source = ctx.getSource();
+        ReputationSavedData data = ReputationSavedData.get(source.getServer());
+        int quarantined = SaveQuarantine.profilePayloadCount();
+        int enriched = 0;
+        if (budget > 0) {
+            enriched = data.advanceProfileMigration(budget);
+            int applied = enriched;
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profilemigration.ran", budget, applied), true);
+        }
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profilemigration.header",
+                data.profileMigrationState().report(quarantined)), false);
+        source.sendSuccess(() -> Component.translatable(
+                "mcareputation.command.debug.profilemigration.coverage",
+                data.profileCoverage().jsonName(), quarantined, SaveQuarantine.size(),
+                String.valueOf(data.isReadOnly()), data.loadedVersion(),
+                ReputationSavedData.FORMAT_VERSION)
+                .withStyle(data.isReadOnly() ? ChatFormatting.RED : ChatFormatting.DARK_GRAY), false);
+        if (!data.profileMigrationState().pending()) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.profilemigration.settled")
+                    .withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        return budget > 0 ? enriched : 1;
+    }
+
     /**
      * Receipt coverage and ledger capacity for one player (D5).
      *
@@ -1158,6 +1499,9 @@ public final class ReputationCommand {
         long gameTime = server.overworld().getGameTime();
         long horizon = McaReputationConfig.receiptRetentionTicks();
         int maxIncidents = McaReputationConfig.maxIncidentsPerCommunity();
+        // The same bundle the transaction decides with, so the diagnostic cannot answer a question the
+        // refusal never asked: one cap, one horizon, one evaluation time.
+        AdmissionPreflight preflight = AdmissionPreflight.ofLoose(maxIncidents, gameTime, horizon);
         Optional<PlayerReputationRecord> player =
                 ReputationSavedData.get(server).player(subject.getUUID());
 
@@ -1176,8 +1520,8 @@ public final class ReputationCommand {
                 continue;
             }
             reported++;
-            int evictable = record.evictableIncidentCount(gameTime, horizon);
-            boolean canAdmit = record.canAdmit(maxIncidents, gameTime, horizon);
+            int evictable = record.evictableIncidentCount(preflight);
+            boolean canAdmit = record.canAdmit(preflight);
             source.sendSuccess(() -> Component.translatable(
                     "mcareputation.command.debug.receipts.community",
                     record.key().asString(), record.incidentCount(), maxIncidents, evictable,

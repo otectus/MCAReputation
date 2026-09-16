@@ -2,9 +2,12 @@
 
 ## If you are upgrading from 0.2.0 (Forge 1.20.1) to 0.3.0 (NeoForge 1.21.1)
 
-World data and structure are unchanged. The same `mcareputation.dat` file loads identically; the NBT
-schema was format 1 at the time of the 0.3.0 port and is loader-neutral — it later moved to format 2,
-identically on both builds. See "Save format 1 → 2" below. Config keys and defaults are unchanged.
+World data and structure are unchanged. The same `mcareputation.dat` file loads identically; at 0.3.0
+the NBT schema was still format 1. (0.5.0 moves it to format 2 and 0.6.0 to format 3 — see *Save
+format 1 → 2* and *Save format 2 → 3* below, both of which apply whichever loader you came from, and
+both of which a format-1 file goes through in order, in one load.) Config keys and defaults are
+unchanged apart from the two 0.5.0 additions and the eight 0.6.0 `[profiles]` keys listed in
+CONFIG.md.
 
 What you must update:
 
@@ -12,9 +15,12 @@ What you must update:
   NeoForge.
 - **The optional companions**, if installed, must likewise be their 1.21.1 NeoForge builds. A Forge
   1.20.1 companion jar is simply not seen by the loader.
-- **Bridges and add-ons that call this mod's API** must be recompiled. The API version is now `2`.
-  Versions built against `1` will fail with `NoSuchMethodError` when they try to call a 0.3.0 method.
-  See [API.md](API.md).
+- **Bridges and add-ons that call this mod's API** must be recompiled. The API version is `2`, and
+  neither 0.5.0 nor 0.6.0 moves it — everything both releases add is additive, including 0.6.0's
+  whole `api.profile` surface. Versions built against `1` will fail with `NoSuchMethodError` when
+  they try to call a 0.3.0 method. Note that `1` is the *Forge* line's number for the same feature
+  set; the two loaders' API versions are separate lineages and a Forge-built bridge does not link
+  here whatever the number says. See [API.md](API.md).
 
 After the upgrade, trigger one new deed, save, exit fully, and restart. Old and new state should both
 be there.
@@ -29,13 +35,17 @@ mod can undo, so treat the upgraded copy as a new artifact rather than an edit.
 
 What this mod guarantees across that move:
 
-- The saved-data schema is **loader-neutral** — the same version, in the same `mcareputation.dat` in
-  the overworld's data storage, on both builds. Moving the world across loaders is not itself a format
-  conversion: there is no loader-specific step, nothing to run, and no window in which data is
-  half-migrated. (The schema itself has since moved from format 1 to format 2 — see "Save format 1 → 2"
-  below — but that change applies equally regardless of which loader made the file.)
+- The saved-data format is **the same number on both loaders**, still `mcareputation.dat` in the
+  overworld's data storage, and the bytes are identical: a format-1 file written on 1.20.1 loads here,
+  a format-2 file written by the Forge 0.5.0 build loads here, and a format-3 file written by the
+  Forge 0.6.0 build loads here with nothing left to migrate. Crossing loaders is never itself a
+  conversion step. Arriving from a build older than 0.6.0 does run the in-place migrations described
+  below, on either loader, exactly once each and in order.
 - Every score, baseline, incident (with its status, context, witnesses and dedupe key), village and
   global title, tier high-water mark, legacy-import marker, and cached village name survives exactly.
+  At format 3 that extends to the profile layer: every frozen evidence payload with its exact
+  subunits, both aging clocks, the repeat-credit counters with their watermarks, and an unfinished
+  enrichment cursor.
 - Community identity stays dimension-aware, so village 3 in the Overworld and village 3 in the Nether
   remain two different places with two different reputations, as they always were.
 - Every config key, default, and filename is unchanged: your existing `mcareputation-common.toml` and
@@ -132,6 +142,105 @@ build and hoping.
 - A ledger that is completely full and has nothing left evictable now refuses the next deed outright
   instead of silently dropping older history to make room; `/mcareputation debug receipts` explains why.
 
+---
+
+## Save format 2 → 3
+
+0.6.0 adds public profiles, and profiles are the first thing this mod stores that is not a number: one
+frozen evidence payload per accepted deed, a second aging clock per incident, bounded repeat-credit
+counters per community, and a migration cursor. A world last opened by 0.5.0 (on either loader) has a
+format-2 file, and this build migrates it in place, once, before anything else touches the store. A
+format-1 file goes through **both** steps in order, in that one load: the 1 → 2 receipt recovery and
+supersede adoption happen first, and 2 → 3 then walks over their result.
+
+### What the structural migration does
+
+- Every retained **public** incident whose definition names a `social_profile` gets an *unenriched
+  stub*: a marker that says "this deed has social meaning that has not been reconstructed", carrying
+  no quantities at all, and its profile clock starts at the age the scalar record already had.
+- Nothing else. No score, tier, title, receipt, or revision moves; no facet or recognition value is
+  invented. Reading a missing field as "no social meaning" would mislabel every pre-upgrade rescue as
+  unremarkable, and reading it as a configured profile would award quantities nobody earned — so the
+  migration says neither, and marks the gap instead.
+- A record with no profile payload still serializes to the **byte-identical** player subtree format 2
+  produced. Every new field is written only when it carries information, which is what lets an
+  existing world load unchanged.
+
+The structural half is deterministic and idempotent. The file is saved back as format 3 on the next
+write.
+
+### Legacy enrichment: what the stubs become
+
+The stubs cannot be filled in at load time, because what they need — the facet and profile content —
+comes from the datapack reload, which may not have published yet. So enrichment is a separate,
+**resumable and budgeted** pass: eight players at a time from the periodic reconciliation sweep, which
+defers entirely while the registries are empty. On a long-running world it finishes within a few
+minutes of play and you will not notice it running.
+
+What it will reconstruct is narrow, deliberately, and in two ways:
+
+- **Only the built-in deed types**, named by a frozen manifest. A pack that repointed
+  `villager_rescued` at a lavish custom profile cannot retroactively award the difference; a custom
+  or generic deed stays explicitly unenriched forever.
+- **Only the recognition and historical channels.** An old killing contributes the recognition and
+  the violence it factually demonstrated, and nothing about culpability or remorse — those are
+  evaluative judgements, and nobody was there to make them.
+
+Credit is 100%, the repeat-credit counters stay empty, and no standing, title, receipt, or revision
+moves. Correctness does not depend on the cursor reaching disk: enrichment only ever upgrades a stub,
+so a pass whose progress was not saved is simply performed again.
+
+### Why history reads as incomplete afterwards
+
+Until the pass finishes, a profile's *coverage* reports `MIGRATING`; afterwards — and for any world
+that ever had legacy history or a quarantined payload — it reports `PARTIAL_LEGACY`, permanently. Only
+a world created on 0.6.0 or later reports `COMPLETE_SINCE_RECORD_START`.
+
+That is not pessimism, it is the honest answer: a conservative pass reconstructed some of your history
+and declined to invent the rest, so a datapack gate that asks *"has this player never done X"* keeps
+respecting the gap rather than answering from an assumption. The Standing screen says "recognition
+history is incomplete" rather than "nobody knows you", because a missing import hides evidence, and
+reading that gap as absence is wrong in the one direction that flatters a stranger.
+
+### Turning profiles off
+
+`enableProfiles=false` is not a delete and not a rollback. Stored payloads are retained, their profile
+clock **freezes**, and profile queries report themselves disabled. Turning it back on resumes where it
+stopped rather than paying out the disabled interval as a burst of catch-up fading — the freeze
+intervals are tracked so an unobserved disabled period and an observed one produce the same answer.
+Scalar standing continues under its own rules throughout, and repeat-credit accounting still advances
+on each accepted deed, so the switch is never a way to reset an allowance.
+
+### Backing up and rolling back
+
+Back up `<world>/data/mcareputation.dat` before upgrading, as for any format bump. After a save has
+been written as format 3, an older build reads the fields it recognises and ignores the profile
+subtrees — it will not crash, but a subsequent save from that older build **drops them**, and the
+evidence is not recoverable except from the backup. The supported rollback is restoring the
+pre-upgrade backup.
+
+A file from a format *newer* than this build's is still handled the way *A file from a newer format*
+describes above: latched read-only, loaded into nothing, migrated and enriched not at all, and handed
+back verbatim including keys this build has never heard of.
+
+### What changes on the ground
+
+- Villagers can now say what they know you **for**, not only how much they like you, and the Standing
+  screen has two new header lines plus a **Details** expansion for it.
+- A villager's opinion of you can shift by up to `maxFacetOpinionAdjustment` (25 by default) based on
+  the facets that villager personally knows you for. What leaves this mod for a Conversations
+  Trust/Respect check is still bounded at ±8, unchanged — that is a different quantity in different
+  units, and a saturated facet term can move you to a different rung but never add a second bias
+  beside that rung's own.
+- Repeating the same service in one village is worth progressively less: the shipped policies pay
+  100% / 100% / 50% / 25% / 0% over 14 in-game days for a rescue, with a second ceiling per
+  beneficiary. Wrongdoing is never discounted.
+- A record still holding live profile evidence is no longer pruned to make room. A ledger with nothing
+  else evictable refuses the next deed instead; every authored lifetime is finite, so the pressure is
+  temporary.
+- `/mcareputation debug profile`, `debug credit`, `debug profileincident`, and `debug profilemigration`
+  are new, all at permission level 2. The last one is the only one that can mutate anything, and only
+  with an explicit `run <budget>`.
 ---
 
 ## If you are starting a new world

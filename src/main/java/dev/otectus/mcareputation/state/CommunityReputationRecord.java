@@ -16,6 +16,8 @@ import net.minecraft.nbt.StringTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 
+import org.jetbrains.annotations.Nullable;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -38,9 +40,11 @@ import java.util.UUID;
  * <p>{@link #score} is a <b>cache</b>. §13.4 is explicit that a corrupted cached score must never
  * become authoritative, so {@link #recomputeScore} can rebuild it from the baseline and the ledger at
  * any moment, and {@link #load} does exactly that on every world load rather than trusting the number
- * it just read. That is also what makes pruning safe: dropping an incident that still carries weight
- * would silently change the score, so {@link #prune} folds any remaining contribution into the
- * baseline first and the invariant holds across the operation.
+ * it just read. Pruning is safe for a stricter reason than it once was: {@link #prune} only ever drops
+ * records that already carry no weight, so the invariant holds without the baseline fold the older
+ * policy relied on. A full ledger in which everything still carries weight refuses the next deed
+ * instead ({@link #canAdmit}); folding live weight to satisfy a display cap preserved today's number
+ * while silently changing tomorrow's decay, and §2.3 withdrew it.
  *
  * <p>{@code baseline} is standing that did not come from a deed in this ledger: an administrator's
  * {@code /mcareputation set}, or a legacy Quests balance imported by migration (§32.2). Keeping it
@@ -57,6 +61,13 @@ public final class CommunityReputationRecord {
     private final Map<ResourceLocation, String> tierHighWater = new LinkedHashMap<>();
     private final Set<ResourceLocation> titles = new LinkedHashSet<>();
 
+    /**
+     * Repeat-credit accounting (§10.5). Policy state, not standing: it lives here because the
+     * allowance a shipped policy shares is per player per community, and it is deliberately not
+     * rebuilt from the ledger or the receipts, both of which expire on their own schedules.
+     */
+    private final CreditWindowTrackers credit = CreditWindowTrackers.empty();
+
     private CommunityMetadata metadata = CommunityMetadata.EMPTY;
     private int baseline;
     private int score;
@@ -64,6 +75,8 @@ public final class CommunityReputationRecord {
     // Bumped by the service on every real score change, so a consumer can tell one change from a
     // repeat of the same one. Persisted since format 2, or a restart would replay old revisions.
     private long revision;
+    // The profile channel's counter. Not persisted; see profileRevision().
+    private long profileRevision;
 
     public CommunityReputationRecord(CommunityKey key) {
         this.key = key;
@@ -103,8 +116,39 @@ public final class CommunityReputationRecord {
         return ++revision;
     }
 
+    /**
+     * The profile channel's own change counter (§15's three revisions).
+     *
+     * <p>Separate from {@link #revision()} because the two invalidate different caches: profile
+     * evidence fades on its own authored lifetimes, so a village can change what it is able to say
+     * about a player on a day the score, the tier and the standing revision all stand still. Bumping
+     * the standing revision for that would invalidate every standing cache in the world on a day
+     * nothing about standing happened.
+     *
+     * <p><b>In memory only</b>, deliberately: persisting it would add a field to a save layout this
+     * version does not change, and a restart is already an invalidation boundary for a consumer that
+     * caches profile-dependent state — §15 asks consumers to re-evaluate at an interaction boundary
+     * rather than to trust a number across a session.
+     */
+    public long profileRevision() {
+        return profileRevision;
+    }
+
+    /** @return the new profile revision. Called by the gate and the service after a real change. */
+    public long bumpProfileRevision() {
+        return ++profileRevision;
+    }
+
+    /**
+     * Whether this record holds nothing worth saving.
+     *
+     * <p>The credit trackers count. A record whose only content is a live anti-farm counter must be
+     * written, or a restart would drop the counter and hand back the allowance it had spent — the
+     * eviction exploit of §10.5 arriving through the save path instead of through a cap sweep.
+     */
     public boolean isEmpty() {
-        return baseline == 0 && incidents.isEmpty() && titles.isEmpty() && tierHighWater.isEmpty();
+        return baseline == 0 && incidents.isEmpty() && titles.isEmpty() && tierHighWater.isEmpty()
+                && credit.isEmpty();
     }
 
     /** Chronological view, oldest first. Unmodifiable. */
@@ -167,6 +211,36 @@ public final class CommunityReputationRecord {
         if (ladder != null && tierId != null) {
             tierHighWater.put(ladder, tierId);
         }
+    }
+
+    // --- repeat credit ------------------------------------------------------
+
+    /**
+     * The repeat-credit counters for this player in this community (§10.5).
+     *
+     * <p>Exposed rather than wrapped because the two callers want different halves of it: the staged
+     * transaction reserves and consumes an allowance, and the capacity diagnostic reads the window
+     * identities. Neither is allowed to decide a <em>percentage</em> — that is {@code CreditResolver}
+     * against the frozen {@code CreditPolicy}, and keeping the decision out of here is what stops a
+     * schedule from being reimplemented next to the counters it reads.
+     */
+    public CreditWindowTrackers creditTrackers() {
+        return credit;
+    }
+
+    /**
+     * Where an operation would land in its credit window, creating nothing (I04).
+     *
+     * <p>This is the read a staged operation takes <em>before</em> anything is written, so a refusal
+     * cannot have spent an allowance. {@link CreditWindowTrackers#consume} is the matching write, and
+     * the two agree by construction: both ignore trackers whose window has already ended at the same
+     * evaluation time.
+     */
+    public CreditWindowTrackers.CreditWindow peekCreditWindow(ResourceLocation group,
+                                                              Optional<String> subjectKey,
+                                                              boolean subjectRequired,
+                                                              long acceptanceTime) {
+        return credit.peek(group, subjectKey, subjectRequired, acceptanceTime);
     }
 
     // --- score --------------------------------------------------------------
@@ -271,6 +345,140 @@ public final class CommunityReputationRecord {
         }
     }
 
+    // --- the profile channel (§12.2) ----------------------------------------
+
+    /**
+     * What one profile pass over this ledger did.
+     *
+     * <p>The two recognition sums are here rather than recomputed by the caller because only this
+     * pass can see both sides of it: recognition fades on the deeds' own lifetimes, so the value
+     * before the pass no longer exists once the pass has run. §15's profile-only change event needs
+     * the transition, and a caller folding the ledger afterwards could only ever report the new value
+     * twice.
+     *
+     * @param magnitudeDelta      change in total profile subunit magnitude across every channel
+     * @param clockMoved          whether any record's profile observation clock advanced
+     * @param recognitionBefore   the ledger's recognition subunits before the pass
+     * @param recognitionAfter    the same sum after it
+     */
+    public record ProfileReconcileResult(long magnitudeDelta, boolean clockMoved,
+                                         long recognitionBefore, long recognitionAfter) {
+
+        /** Whether anything persisted moved, which is what decides {@code setDirty}. */
+        public boolean moved() {
+            return magnitudeDelta != 0L || clockMoved;
+        }
+
+        /** Whether profile evidence actually changed value, as opposed to only its clock advancing. */
+        public boolean unitsMoved() {
+            return magnitudeDelta != 0L;
+        }
+    }
+
+    /**
+     * Ages every profile payload in this ledger and settles it, charging only the active ticks
+     * (§12.2).
+     *
+     * <p>Separate from {@link #reconcile} rather than folded into it, because the two channels freeze
+     * independently: profiles may be switched off while scalar standing keeps ageing, and the gate has
+     * to be able to say "age one, not the other" without a second policy appearing inside this class.
+     *
+     * <p>Records with no profile payload are skipped entirely — they have no profile channel, and
+     * moving a clock they never use would start writing a field the format-2 ledger did not have,
+     * which is precisely the byte-identity the golden fixtures check.
+     *
+     * @param freezeLog the bounded policy epochs (§12.2), or {@code null} to charge the whole interval
+     */
+    public ProfileReconcileResult reconcileProfiles(long gameTime,
+                                                    @Nullable ProfileFreezeLog freezeLog) {
+        long delta = 0L;
+        boolean clockMoved = false;
+        long recognitionBefore = recognitionSubunits();
+        for (IncidentRecord incident : incidents.values()) {
+            if (!incident.hasProfileEvidence()) {
+                continue;
+            }
+            long observed = incident.lastProfileObservedGameTime();
+            long frozen = freezeLog == null ? 0L : freezeLog.frozenTicksBetween(observed, gameTime);
+            delta += incident.reconcileProfile(gameTime, frozen);
+            if (incident.lastProfileObservedGameTime() != observed) {
+                clockMoved = true;
+            }
+        }
+        return new ProfileReconcileResult(delta, clockMoved, recognitionBefore, recognitionSubunits());
+    }
+
+    /**
+     * This ledger's recognition contribution, in subunits (§7.1).
+     *
+     * <p>Exactly the summation the public read model performs, including the two exclusions: a folded
+     * record's weight was absorbed by its successor and a disproven one evidences nothing, though both
+     * keep their frozen units on disk. Two different answers to "how well known is this player" would
+     * be worse than none.
+     */
+    public long recognitionSubunits() {
+        long total = 0L;
+        for (IncidentRecord incident : incidents.values()) {
+            if (incident.isSuperseded() || incident.status() == IncidentStatus.DISPROVEN) {
+                continue;
+            }
+            Optional<dev.otectus.mcareputation.profile.IncidentProfileEvidence> evidence =
+                    incident.profileEvidence();
+            if (evidence.isEmpty()) {
+                continue;
+            }
+            for (var channel : evidence.get().channels()) {
+                if (channel.isRecognition()) {
+                    total = dev.otectus.mcareputation.profile.ProfileMath.add(total, channel.current());
+                }
+            }
+        }
+        return total;
+    }
+
+    /**
+     * The profile half of a freeze: advance the observation clock of every payload without ageing
+     * anything (§12.2, §20).
+     *
+     * <p>The exact analogue of {@link #freezeTo} for the second channel, and the gate uses it for the
+     * one half of the freeze decision the epoch log deliberately does not track: per-community decay
+     * immunity. Skipping the interval as it passes is what makes lifting the freeze cost no catch-up
+     * for every interval a query observed, which is exactly the guarantee the scalar channel offers
+     * for the same flag.
+     */
+    public ProfileReconcileResult freezeProfilesTo(long gameTime) {
+        boolean clockMoved = false;
+        for (IncidentRecord incident : incidents.values()) {
+            if (!incident.hasProfileEvidence()) {
+                continue;
+            }
+            long observed = incident.lastProfileObservedGameTime();
+            incident.skipProfileTo(gameTime);
+            if (incident.lastProfileObservedGameTime() != observed) {
+                clockMoved = true;
+            }
+        }
+        // Nothing aged, so the recognition sum is the same on both sides by construction; reading it
+        // once and reporting it twice is the honest way to say that.
+        long recognition = recognitionSubunits();
+        return new ProfileReconcileResult(0L, clockMoved, recognition, recognition);
+    }
+
+    /**
+     * Retires every credit tracker whose window has ended at this evaluation time (§10.5).
+     *
+     * <p>Called from the reconciliation gate, so the counters are cleaned on the same schedule as
+     * everything else rather than only when the next deed happens to arrive. It cannot free a slot
+     * that still restricts an operation — {@link CreditWindowTrackers#dropExpired} is the only removal
+     * path and it measures each window from its own monotonic watermark — so this is cleanup, never
+     * the eviction exploit that would hand back a spent allowance.
+     *
+     * @return how many trackers were removed
+     */
+    public int dropExpiredCreditTrackers(long gameTime) {
+        return credit.dropExpired(gameTime);
+    }
+
     /**
      * Rebuilds the cached score and nothing else. The reconciliation gate needs the bounds re-applied
      * after a freeze or a config change without ageing a single contribution.
@@ -282,20 +490,33 @@ public final class CommunityReputationRecord {
     /**
      * Whether this record may be dropped to make room (§5 F09).
      *
-     * <p>Three things are not evictable at any cap. <b>Pinned</b> history, as before. Anything that
+     * <p>Four things are not evictable at any cap. <b>Pinned</b> history, as before. Anything that
      * still <b>contributes</b>, because folding live weight into the baseline preserves today's number
      * while silently changing tomorrow's - the fold does not decay, so the trajectory, the per-villager
      * opinion and the amends that were still available all move. And a recent <b>open negative</b>
      * record, which is the case a player can still make right and a producer may still hold a receipt
-     * against; it becomes evictable once it has aged past the receipt horizon.
+     * against; it becomes evictable once it has aged past the receipt horizon. And, since profiles,
+     * anything holding <b>live profile subunits</b>, which stay future-relevant after the scalar
+     * contribution has decayed to zero (§12.3).
+     *
+     * <p>Read at {@link AdmissionPreflight#evaluationTime()} and nowhere else. The age comparison is
+     * the reason that matters: asked twice at two clock readings, the same ledger gives two answers,
+     * and a refusal that disagrees with the eviction pass that follows it is how a cap gets exceeded.
      */
-    private boolean evictable(IncidentRecord incident, long gameTime, long receiptHorizonTicks) {
+    private boolean evictable(IncidentRecord incident, AdmissionPreflight preflight) {
         if (incident.pinned() || incident.contributes()) {
+            return false;
+        }
+        // Four, since profiles: live profile subunits are future-relevant evidence even when the
+        // scalar contribution has decayed to nothing and the displayed facet value clamps to zero
+        // (§12.3, I06). Dropping such a record keeps today's number and quietly changes what the
+        // village is able to say about the player, and what a later opposing deed is weighed against.
+        if (preflight.protectsLiveProfileEvidence() && incident.hasLiveProfileEvidence()) {
             return false;
         }
         boolean open = incident.status() == IncidentStatus.ACTIVE && !incident.isSuperseded();
         return !(open && incident.baseDelta() < 0
-                && incident.ageTicks(gameTime) < receiptHorizonTicks);
+                && incident.ageTicks(preflight.evaluationTime()) < preflight.receiptHorizonTicks());
     }
 
     /**
@@ -303,19 +524,25 @@ public final class CommunityReputationRecord {
      * something in the ledger is evictable. When this is false the deed is refused with
      * {@code Reason.CAPACITY} <em>before</em> anything is written (D5), rather than the cap being
      * quietly exceeded and live history evicted to pay for it.
+     *
+     * <p>Answer this <em>after</em> the operation's reconciliation pass, never before. Eligibility is
+     * a function of age, so a ledger full of contributions that decay to zero at the evaluation time
+     * is admissible - and a preflight that runs first sees them still live and refuses every deed,
+     * permanently, because nothing in the refusal path ever reaches reconciliation to age them
+     * (§3.2, §11.1 step 4).
      */
-    public boolean canAdmit(int maxIncidents, long gameTime, long receiptHorizonTicks) {
-        if (incidents.size() < maxIncidents) {
+    public boolean canAdmit(AdmissionPreflight preflight) {
+        if (incidents.size() < preflight.maxIncidentsPerCommunity()) {
             return true;
         }
-        return hasEvictableIncident(gameTime, receiptHorizonTicks);
+        return hasEvictableIncident(preflight);
     }
 
     /** How many records could be dropped to make room; what the capacity diagnostic reports (D5). */
-    public int evictableIncidentCount(long gameTime, long receiptHorizonTicks) {
+    public int evictableIncidentCount(AdmissionPreflight preflight) {
         int count = 0;
         for (IncidentRecord incident : incidents.values()) {
-            if (evictable(incident, gameTime, receiptHorizonTicks)) {
+            if (evictable(incident, preflight)) {
                 count++;
             }
         }
@@ -323,9 +550,9 @@ public final class CommunityReputationRecord {
     }
 
     /** Whether anything in this ledger could be dropped at all. */
-    public boolean hasEvictableIncident(long gameTime, long receiptHorizonTicks) {
+    public boolean hasEvictableIncident(AdmissionPreflight preflight) {
         for (IncidentRecord incident : incidents.values()) {
-            if (evictable(incident, gameTime, receiptHorizonTicks)) {
+            if (evictable(incident, preflight)) {
                 return true;
             }
         }
@@ -334,17 +561,21 @@ public final class CommunityReputationRecord {
 
     /** The cap sweep at the default receipt horizon. */
     public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore) {
-        return prune(maxIncidents, gameTime, minScore, maxScore,
-                ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS);
+        return prune(minScore, maxScore, AdmissionPreflight.ofLoose(maxIncidents, gameTime,
+                ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS));
     }
 
     /**
      * Enforces the per-community incident cap in the priority order of §13.5.
      *
      * <p>The ordering is the whole point: history is discarded in the order it stops mattering.
-     * Anything still carrying weight has that weight folded into the baseline first, so the player's
-     * score is bit-for-bit unchanged by pruning — losing the <em>explanation</em> for standing is
-     * acceptable when the ledger is full, silently losing the standing itself is not.
+     * <b>Nothing live is dropped at all.</b> {@link #evictable} refuses any record that still
+     * contributes, so the four passes below choose only between records already worth zero and the
+     * baseline fold is a belt-and-braces guard that cannot fire — the earlier policy of folding live
+     * weight to satisfy a display cap is what §2.3 withdrew, because it preserved today's number while
+     * changing tomorrow's decay, speaker knowledge and resolution options. A ledger with nothing
+     * evictable is refused admission instead (see {@link #canAdmit}); losing the <em>explanation</em>
+     * for standing is acceptable when the ledger is full, losing the evidence is not.
      *
      * <p>Pinned incidents are never dropped. If a ledger somehow consists entirely of pinned entries
      * the cap is exceeded rather than violated, and the situation is logged; only an administrator
@@ -352,8 +583,9 @@ public final class CommunityReputationRecord {
      *
      * @return the incidents that were removed, oldest first
      */
-    public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore,
-                                      long receiptHorizonTicks) {
+    public List<IncidentRecord> prune(int minScore, int maxScore, AdmissionPreflight preflight) {
+        int maxIncidents = preflight.maxIncidentsPerCommunity();
+        long gameTime = preflight.evaluationTime();
         List<IncidentRecord> removed = new ArrayList<>();
         if (incidents.size() <= maxIncidents) {
             return removed;
@@ -380,7 +612,7 @@ public final class CommunityReputationRecord {
                 if (incidents.size() <= maxIncidents) {
                     break;
                 }
-                if (!evictable(candidate, gameTime, receiptHorizonTicks) || !pass.test(candidate)) {
+                if (!evictable(candidate, preflight) || !pass.test(candidate)) {
                     continue;
                 }
                 // Retained weight can no longer reach this point - evictable() rejects anything that
@@ -449,6 +681,12 @@ public final class CommunityReputationRecord {
             titles.forEach(title -> list.add(StringTag.valueOf(title.toString())));
             tag.put("titles", list);
         }
+        // Format 3, written only when something is tracked, so a ledger that has never seen a
+        // credited deed is byte-identical to what format 2 produced.
+        CompoundTag creditTag = credit.save();
+        if (!creditTag.isEmpty()) {
+            tag.put("credit", creditTag);
+        }
         return tag;
     }
 
@@ -475,11 +713,17 @@ public final class CommunityReputationRecord {
         record.lastReconciledGameTime = tag.getLong("reconciled");
         record.revision = tag.getLong("revision");
 
+        // §19.4: a malformed profile payload is quarantined and its scalar incident is kept. The path
+        // names the incident so an operator can find it; the reason comes from the reader.
+        IncidentRecord.QuarantineSink payloadSink = (incidentId, reason, payload) ->
+                SaveQuarantine.holdProfilePayload("community/" + record.key.asString() + "/incidents/"
+                        + incidentId + "/profile", reason, payload);
+
         ListTag incidentList = tag.getList("incidents", Tag.TAG_COMPOUND);
         for (int i = 0; i < incidentList.size(); i++) {
             CompoundTag entry = incidentList.getCompound(i);
             try {
-                IncidentRecord.load(entry).ifPresentOrElse(
+                IncidentRecord.load(entry, payloadSink).ifPresentOrElse(
                         record::addIncident,
                         () -> {
                             McaReputation.LOGGER.debug(
@@ -506,6 +750,8 @@ public final class CommunityReputationRecord {
                 record.tierHighWater.put(ladder, hw.getString(ladderId));
             }
         }
+
+        record.credit.absorb(CreditWindowTrackers.load(tag.getCompound("credit")));
 
         ListTag titleList = tag.getList("titles", Tag.TAG_STRING);
         for (int i = 0; i < titleList.size() && record.titles.size() < ReputationBounds.MAX_TITLES; i++) {

@@ -58,6 +58,10 @@ class ConfigParityTest {
             "witnesses.enableVillagerOpinion",
             "witnesses.opinionHearsayPercent",
             "witnesses.opinionInvolvedPercent",
+            "profiles.enableProfiles",
+            "profiles.enableRepeatCredit",
+            "profiles.enableFacetOpinion",
+            "profiles.maxFacetOpinionAdjustment",
             "limits.maxIncidentsPerCommunity",
             "limits.maxIncidentsPerPlayer",
             "limits.receiptRetentionTicks",
@@ -83,7 +87,11 @@ class ConfigParityTest {
             "display.mergeChangeNotifications",
             "display.showExactScore",
             "display.showIncidentDeltas",
-            "display.showVillagerOpinion");
+            "display.showVillagerOpinion",
+            "profiles.showRecognition",
+            "profiles.showKnownFor",
+            "profiles.showObserverProfile",
+            "profiles.showExactProfileValues");
 
     private static List<String> pathsOf(ModConfigSpec spec) {
         List<String> paths = new ArrayList<>();

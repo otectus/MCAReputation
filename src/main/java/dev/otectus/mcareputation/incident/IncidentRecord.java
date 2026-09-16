@@ -1,6 +1,9 @@
 package dev.otectus.mcareputation.incident;
 
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.profile.IncidentProfileDefinition;
+import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
+import dev.otectus.mcareputation.profile.ProfileMath;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationMath;
 import net.minecraft.nbt.CompoundTag;
@@ -49,6 +52,16 @@ import java.util.UUID;
  * than by {@code now - created}. {@link #reconcile} advances it by the <em>positive</em> difference
  * since the last reconciliation and ignores anything else, so {@code /time set} into the past adds
  * nothing and can never hand back contribution the player already lost (§15.1, §33 rule 13).
+ *
+ * <h2>Two clocks, not one</h2>
+ *
+ * <p>{@link #profileElapsedTicks()} is a second bounded elapsed counter for the profile channel
+ * (§12.2). It exists because the two channels can be frozen independently: profiles may be switched
+ * off while scalar standing keeps ageing, and reusing one clock for both would pay out the disabled
+ * interval as catch-up the moment the feature came back. Both clocks are monotonic, both are
+ * persisted, and neither may be advanced outside {@code ReconciliationService} — this class stores
+ * the profile clock and deliberately offers no method that moves it, so the gate stays the only way
+ * a ledger can age.
  */
 public final class IncidentRecord {
 
@@ -82,6 +95,16 @@ public final class IncidentRecord {
     private long updatedGameTime;
     private long decayElapsedTicks;
     private long lastReconciledGameTime;
+    /**
+     * The profile channel's own elapsed counter (§12.2). Persisted; advanced only through the
+     * reconciliation gate, which is why nothing in this class writes it after construction.
+     */
+    private long profileElapsedTicks;
+    /** When the profile channel was last observed, the profile half of {@code reconciled}. */
+    private long lastProfileObservedGameTime;
+    /** The frozen §9.4 payload, or {@code null} for a deed with no social meaning. */
+    @Nullable
+    private IncidentProfileEvidence profileEvidence;
     private boolean pinned;
     private boolean superseded;
     @Nullable
@@ -111,6 +134,9 @@ public final class IncidentRecord {
         this.updatedGameTime = createdGameTime;
         this.decayElapsedTicks = 0L;
         this.lastReconciledGameTime = createdGameTime;
+        this.profileElapsedTicks = 0L;
+        this.lastProfileObservedGameTime = createdGameTime;
+        this.profileEvidence = null;
         this.pinned = false;
         this.superseded = false;
         this.supersededBy = null;
@@ -224,6 +250,107 @@ public final class IncidentRecord {
 
     public long decayElapsedTicks() {
         return decayElapsedTicks;
+    }
+
+    /** The profile channel's elapsed age in ticks (§12.2). Monotonic, bounded, and not {@code now - created}. */
+    public long profileElapsedTicks() {
+        return profileElapsedTicks;
+    }
+
+    /** When the profile channel was last observed; equal to {@link #createdGameTime()} until it is. */
+    public long lastProfileObservedGameTime() {
+        return lastProfileObservedGameTime;
+    }
+
+    /** The frozen §9.4 profile evidence, when this deed has any. */
+    public Optional<IncidentProfileEvidence> profileEvidence() {
+        return Optional.ofNullable(profileEvidence);
+    }
+
+    public boolean hasProfileEvidence() {
+        return profileEvidence != null;
+    }
+
+    /**
+     * Whether this deed's profile evidence still counts toward a public profile.
+     *
+     * <p>Derived, never stored: a superseded record's weight was absorbed by its successor (§11.3)
+     * and a disproven one contributes nothing at all (§12.1), but in both cases the frozen units stay
+     * on disk. Zeroing them in place would make a refused supersession unable to restore the record
+     * exactly, and §9.4 keeps stored units through a definition being removed for the same reason.
+     */
+    public boolean profileContributes() {
+        return profileEvidence != null
+                && !superseded
+                && status != IncidentStatus.DISPROVEN
+                && profileEvidence.hasCurrentSubunits();
+    }
+
+    /**
+     * Whether this record still holds live profile subunits, which is what makes it unprunable
+     * (§12.3, I06).
+     *
+     * <p>Deliberately not "does its public facet value round to something": §8.3 keeps {@code
+     * rawFacet} meaningful for retention even when the displayed integer clamps or truncates to zero,
+     * because a later opposing deed needs the evidence that produced it. Capacity cleanup that
+     * consulted the display would discard exactly the records whose evidence is still in play.
+     */
+    public boolean hasLiveProfileEvidence() {
+        return profileContributes() && profileCurrentMagnitude() > 0L;
+    }
+
+    /** The summed magnitude of every profile channel's current contribution, in subunits. */
+    public long profileCurrentMagnitude() {
+        return profileEvidence == null ? 0L : profileEvidence.currentMagnitude();
+    }
+
+    /**
+     * Attaches the frozen payload the accepting transaction computed (§9.4).
+     *
+     * <p>Whole-payload assignment, because the payload is immutable: staging, commit and rollback all
+     * move one reference, which is what lets {@link #snapshotLifecycle()} restore it exactly.
+     */
+    public void attachProfileEvidence(@Nullable IncidentProfileEvidence evidence) {
+        this.profileEvidence = evidence;
+    }
+
+    /**
+     * Starts the profile clock at an age the scalar channel has already established.
+     *
+     * <p>Used twice, both times at a point where no profile interval has been observed yet: when a
+     * backdated deed is accepted, so the arriving profile contribution is aged exactly as its scalar
+     * contribution was (§12.2's "one policy for the former, used identically"), and when the v2 to v3
+     * migration adopts a pre-upgrade record, where the scalar elapsed age is the only interval that
+     * was ever actually observed. Guessing anything else would either fabricate an unobserved freeze
+     * or hand a decade-old deed a fresh lifetime.
+     */
+    public void initializeProfileClock(long elapsedTicks, long observedGameTime) {
+        this.profileElapsedTicks = boundProfileElapsed(elapsedTicks);
+        this.lastProfileObservedGameTime = observedGameTime;
+    }
+
+    /**
+     * Adopts the profile clock for a record that predates the profile channel: the v2 to v3 migration
+     * calls this and nothing else does.
+     *
+     * <p>The scalar elapsed age is the only interval that was ever actually <em>observed</em> for this
+     * record, so it is the only defensible starting point. Starting the profile clock at zero instead
+     * would hand a ten-year-old killing a brand new lifetime, and reconstructing {@code now - created}
+     * would bank every interval in which decay was frozen — §12.2 forbids guessing an unobserved
+     * freeze in either direction.
+     */
+    public void adoptLegacyProfileClock() {
+        this.profileElapsedTicks = boundProfileElapsed(decayElapsedTicks);
+        this.lastProfileObservedGameTime = lastReconciledGameTime;
+    }
+
+    /**
+     * The profile elapsed counter is bounded as well as monotonic: past the longest authorable
+     * lifetime every contribution is already spent, so letting the counter grow with playtime would
+     * store an ever-larger number that can never change an answer (§34, I13).
+     */
+    private static long boundProfileElapsed(long candidate) {
+        return Math.max(0L, Math.min(candidate, ProfileMath.MAX_LIFETIME_TICKS));
     }
 
     public boolean pinned() {
@@ -391,6 +518,117 @@ public final class IncidentRecord {
         }
     }
 
+    // --- the profile channel (second clock, §12.2) --------------------------
+
+    /**
+     * Brings the profile evidence up to date for {@code gameTime}, charging only the ticks that were
+     * not frozen (§12.2).
+     *
+     * <p>Called from {@code ReconciliationService} and nowhere else. The second clock exists because
+     * profiles can be switched off while scalar standing keeps ageing, so one clock would pay the
+     * disabled interval out as catch-up the moment they came back on. {@code frozenTicks} is how many
+     * of the ticks since this record was last observed a bounded policy epoch says were frozen —
+     * which is what makes "no catch-up" true even for an interval no query observed.
+     *
+     * @param frozenTicks ticks in {@code (lastProfileObservedGameTime, gameTime]} that must not age
+     *                    the profile channel; clamped into the interval
+     * @return the change in this record's total profile magnitude ({@code new - old}, so never
+     *         positive in practice); {@code 0} when nothing moved
+     */
+    public long reconcileProfile(long gameTime, long frozenTicks) {
+        if (superseded) {
+            // Terminal, exactly as the scalar channel treats it: a folded record contributes nothing
+            // by derivation (profileContributes()), so there is nothing left to age and its clock
+            // stays where the fold left it.
+            return 0L;
+        }
+        if (gameTime > lastProfileObservedGameTime) {
+            long interval = gameTime - lastProfileObservedGameTime;
+            long frozen = Math.max(0L, Math.min(frozenTicks, interval));
+            profileElapsedTicks = boundProfileElapsed(profileElapsedTicks + (interval - frozen));
+            lastProfileObservedGameTime = gameTime;
+        }
+        return settleProfileEvidence();
+    }
+
+    /**
+     * Advances the profile observation clock without ageing anything: the per-record half of a profile
+     * freeze, and the exact analogue of {@link #skipDecayTo}.
+     *
+     * <p>Forward only, and it moves {@code lastProfileObservedGameTime} alone. The skipped interval was
+     * never counted, so switching profiles back on cannot repay it.
+     */
+    public void skipProfileTo(long gameTime) {
+        if (gameTime > lastProfileObservedGameTime) {
+            lastProfileObservedGameTime = gameTime;
+        }
+    }
+
+    /**
+     * Recomputes every profile channel at the age the clock already holds, applying §12.1's
+     * resolution modes for the record's current status.
+     *
+     * <p>Two callers: profile reconciliation, immediately after it moves the clock, and
+     * {@link #resolve}, which moves the status instead. Settlement is not ageing, so a transition
+     * settles the evidence whether or not profile aging is currently frozen — refusing to record that
+     * an apology happened until a config switch is flipped back would make the switch a way to keep a
+     * wrong at full magnitude.
+     *
+     * @return the change in total profile magnitude; {@code 0} when nothing moved
+     */
+    public long settleProfileEvidence() {
+        if (profileEvidence == null) {
+            return 0L;
+        }
+        long before = profileEvidence.currentMagnitude();
+        IncidentProfileEvidence settled =
+                profileEvidence.settledAt(profileElapsedTicks, this::settlementBasisPoints);
+        if (settled == profileEvidence) {
+            return 0L;
+        }
+        profileEvidence = settled;
+        return settled.currentMagnitude() - before;
+    }
+
+    /**
+     * §12.1's table, per channel: what multiplier this record's status leaves on one frozen channel.
+     *
+     * <ul>
+     *   <li>{@code recognition} — no moral reduction at all. Becoming known for something is not
+     *       undone by apologising for it (§7.3); it fades on its own authored lifetime.</li>
+     *   <li>{@code historical} — retains the authored evidence for the same reason: the bravery or
+     *       the violence was actually demonstrated, whatever happened afterwards.</li>
+     *   <li>{@code evaluative} — applies the frozen, explicitly authored multipliers, which the codec
+     *       and the load path both validate as non-increasing. Because {@link IncidentStatus} only
+     *       ever transitions to a strictly stronger status and the multipliers never increase along
+     *       that progression, settlement is monotonic for every transition order without storing a
+     *       settlement state of its own.</li>
+     * </ul>
+     *
+     * <p>{@code DISPROVEN} is zero in every mode: a deed shown never to have happened supplies no
+     * evidence of anything, including notoriety. {@code EXPIRED} is bookkeeping rather than a
+     * resolution ({@link IncidentStatus#isResolved()}), so it settles nothing and leaves the channel
+     * to its ordinary fading.
+     */
+    private int settlementBasisPoints(IncidentProfileEvidence.Channel channel) {
+        if (status == IncidentStatus.DISPROVEN) {
+            return 0;
+        }
+        if (!status.isResolved() || channel == null) {
+            return ProfileMath.FULL_BP;
+        }
+        if (channel.mode() != IncidentProfileDefinition.ResolutionMode.EVALUATIVE) {
+            return ProfileMath.FULL_BP;
+        }
+        IncidentProfileDefinition.ResolutionMultipliers bp = channel.resolution();
+        return switch (status) {
+            case APOLOGIZED -> bp.apologizedBp();
+            case ATONED -> bp.atonedBp();
+            case FORGIVEN -> bp.forgivenBp();
+            default -> ProfileMath.FULL_BP;
+        };
+    }
+
     /**
      * Applies a resolution.
      *
@@ -424,6 +662,11 @@ public final class IncidentRecord {
         // below the resolved value, keep the smaller magnitude.
         int decayed = decay == null ? settledDelta : decay.contributionAt(settledDelta, decayElapsedTicks);
         currentContribution = towardZeroMin(decayed, before);
+        // The profile channel settles in the same mutation, at its own age and under its own
+        // per-channel modes (§12.1). Separately from the scalar multiplier on purpose: running every
+        // facet through the scalar penalty is what §12.1 forbids, because an apology does not undo
+        // the violence a killing demonstrated or the fame it earned.
+        settleProfileEvidence();
         touch(gameTime);
         return Optional.of(currentContribution - before);
     }
@@ -515,6 +758,11 @@ public final class IncidentRecord {
      * is recorded so the pair totals the killing's target, and when the killing then turns out to
      * carry no public weight — refused, duplicate, or retained unwitnessed — the assault's already
      * witnessed penalty must come back rather than being silently refunded.
+     *
+     * <p>Approximate by construction: it restores the two scalars and clears the terminal flags, but
+     * it <em>advances</em> the story revision and the update clock rather than putting them back.
+     * Prefer {@link #snapshotLifecycle()} and {@link #restoreLifecycle} on any path that must be able
+     * to claim nothing was written; this overload stays for the one-field callers that predate it.
      */
     public void restoreContribution(int settledDelta, int currentContribution, long gameTime) {
         this.settledDelta = settledDelta;
@@ -524,6 +772,68 @@ public final class IncidentRecord {
         this.storyRevision++;
         context.remove(BuiltinIncidents.CONTEXT_SUPERSEDED_BY);
         touch(gameTime);
+    }
+
+    /**
+     * Every mutable field a staged supersession can move, captured before it moves (§11.3).
+     *
+     * <p>A refused successor must leave the precursor <em>exactly</em> as it was — not approximately,
+     * and not "the score came back". A rollback that bumps the story revision tells every consumer
+     * keyed on that revision that the narrative changed, so an attempted-and-refused replacement
+     * becomes gossip; one that touches the update clock makes a refused operation visible in the
+     * ledger's own timestamps.
+     *
+     * <p>The component list is the contract. When a later phase adds profile evidence, a credit
+     * reservation or a second elapsed clock to this class, it must appear here too or the rollback
+     * silently stops being complete — {@code SupersedeLifecycleTest} pins the count to make that a
+     * test failure rather than a discovery in production.
+     *
+     * @param supersededByContext the {@code superseded_by} context entry as it was.
+     *                            {@link #linkSuccessor} writes one for readers older than the typed
+     *                            field, so a rollback that blindly removed the key would also erase
+     *                            the entry a legacy record already carried on its own.
+     */
+    public record LifecycleSnapshot(IncidentStatus status, int settledDelta, int currentContribution,
+                                    long updatedGameTime, long decayElapsedTicks,
+                                    long lastReconciledGameTime, boolean pinned, boolean superseded,
+                                    @Nullable UUID supersededBy, long storyRevision,
+                                    Optional<String> supersededByContext,
+                                    long profileElapsedTicks, long lastProfileObservedGameTime,
+                                    @Nullable IncidentProfileEvidence profileEvidence) {
+    }
+
+    /** Captures {@link LifecycleSnapshot} from this record's current state. */
+    public LifecycleSnapshot snapshotLifecycle() {
+        return new LifecycleSnapshot(status, settledDelta, currentContribution, updatedGameTime,
+                decayElapsedTicks, lastReconciledGameTime, pinned, superseded, supersededBy,
+                storyRevision, context(BuiltinIncidents.CONTEXT_SUPERSEDED_BY),
+                // The payload is immutable, so one reference is the whole profile rollback: a staged
+                // supersession that replaces it and is then refused puts the previous evidence back
+                // byte for byte rather than approximately (§11.3).
+                profileElapsedTicks, lastProfileObservedGameTime, profileEvidence);
+    }
+
+    /** Puts back exactly what {@link #snapshotLifecycle()} captured. Writes nothing else. */
+    public void restoreLifecycle(LifecycleSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        this.status = snapshot.status();
+        this.settledDelta = snapshot.settledDelta();
+        this.currentContribution = snapshot.currentContribution();
+        this.updatedGameTime = snapshot.updatedGameTime();
+        this.decayElapsedTicks = snapshot.decayElapsedTicks();
+        this.lastReconciledGameTime = snapshot.lastReconciledGameTime();
+        this.pinned = snapshot.pinned();
+        this.superseded = snapshot.superseded();
+        this.supersededBy = snapshot.supersededBy();
+        this.storyRevision = snapshot.storyRevision();
+        this.profileElapsedTicks = boundProfileElapsed(snapshot.profileElapsedTicks());
+        this.lastProfileObservedGameTime = snapshot.lastProfileObservedGameTime();
+        this.profileEvidence = snapshot.profileEvidence();
+        snapshot.supersededByContext().ifPresentOrElse(
+                value -> context.put(BuiltinIncidents.CONTEXT_SUPERSEDED_BY, value),
+                () -> context.remove(BuiltinIncidents.CONTEXT_SUPERSEDED_BY));
     }
 
     /**
@@ -595,6 +905,18 @@ public final class IncidentRecord {
         if (storyRevision != 0L) {
             tag.putLong("storyRevision", storyRevision);
         }
+        // Format 3. All three are written only when they carry information, so a ledger with no
+        // profile content is byte-identical to what format 2 produced — which is what lets the
+        // format-2 golden fixture keep proving the scalar layout has not moved.
+        if (profileElapsedTicks != 0L) {
+            tag.putLong("profileElapsed", profileElapsedTicks);
+        }
+        if (lastProfileObservedGameTime != createdGameTime) {
+            tag.putLong("profileObserved", lastProfileObservedGameTime);
+        }
+        if (profileEvidence != null) {
+            tag.put("profile", profileEvidence.save());
+        }
 
         if (!subjects.isEmpty()) {
             ListTag subjectList = new ListTag();
@@ -615,12 +937,41 @@ public final class IncidentRecord {
     }
 
     /**
+     * Where a load hands back a subtree it could not use, without this package having to know what
+     * the store does with it.
+     *
+     * <p>{@code state.SaveQuarantine} is the production sink. It lives in the package that owns the
+     * save file, and {@code state} already depends on {@code incident}; calling it from here directly
+     * would close that into a cycle. A one-method sink keeps the dependency pointing one way and
+     * keeps {@code IncidentRecord.load} testable with no store at all.
+     */
+    public interface QuarantineSink {
+
+        /** Never throws: failing to record a diagnostic must not fail a world load. */
+        void hold(String path, String reason, CompoundTag tag);
+
+        /** The sink for a caller that has nowhere to put a rejected subtree. */
+        QuarantineSink IGNORE = (path, reason, tag) -> {
+        };
+    }
+
+    /** As {@link #load(CompoundTag, QuarantineSink)}, discarding any rejected subtree. */
+    public static Optional<IncidentRecord> load(CompoundTag tag) {
+        return load(tag, QuarantineSink.IGNORE);
+    }
+
+    /**
      * Reads one record. Returns empty — never throws — when the entry is unusable, because §13.6
      * requires a malformed incident to be skipped without discarding its siblings. Individual soft
      * fields (status, visibility, severity, subjects, witnesses) degrade to safe values instead of
      * failing the whole record; only a missing identity is fatal to it.
+     *
+     * <p>A malformed <b>profile payload</b> is the same kind of soft failure, and §19.4 is explicit
+     * about it: the payload is handed to {@code quarantine} and the scalar incident is kept. The deed
+     * happened either way, its standing contribution is unaffected, and the missing payload makes
+     * profile coverage incomplete rather than proving the player has no adverse evidence (I08).
      */
-    public static Optional<IncidentRecord> load(CompoundTag tag) {
+    public static Optional<IncidentRecord> load(CompoundTag tag, QuarantineSink quarantine) {
         if (tag == null || !tag.hasUUID("id") || !tag.hasUUID("player")) {
             return Optional.empty();
         }
@@ -682,6 +1033,24 @@ public final class IncidentRecord {
         CompoundTag contextTag = tag.getCompound("context");
         for (String key : contextTag.getAllKeys()) {
             record.putContext(key, contextTag.getString(key));
+        }
+
+        // Format 3. Absent reads as "no profile interval has been observed", which is what a record
+        // written before the second clock existed actually means; the v2 to v3 migration is what
+        // decides where a pre-upgrade record's profile clock starts, not this line.
+        record.profileElapsedTicks = boundProfileElapsed(tag.getLong("profileElapsed"));
+        record.lastProfileObservedGameTime = tag.contains("profileObserved")
+                ? tag.getLong("profileObserved")
+                : record.createdGameTime;
+        if (tag.contains("profile", Tag.TAG_COMPOUND)) {
+            CompoundTag payload = tag.getCompound("profile");
+            Optional<IncidentProfileEvidence> evidence = IncidentProfileEvidence.load(payload);
+            if (evidence.isPresent()) {
+                record.profileEvidence = evidence.get();
+            } else {
+                quarantine.hold(record.id.toString(),
+                        "malformed profile evidence payload; the scalar incident was kept", payload);
+            }
         }
         return Optional.of(record);
     }

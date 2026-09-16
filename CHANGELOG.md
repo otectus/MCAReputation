@@ -5,6 +5,225 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — unreleased
+
+**Carries the upstream Forge 0.6.0 feature set to Minecraft 1.21.1 / NeoForge.** Standing answers how
+much a village likes you. This release adds the other half: what it knows you **for**, and how widely.
+The two are separate quantities on separate clocks, authored in separate datapack files, and stored in
+separate channels — because a player can be famous for the wrong things, or quietly well-regarded and
+recognised by nobody, and one number cannot say both.
+
+The second theme is that a service repeated is worth less than the first. Wrongdoing is not: a second
+assault costs exactly what the first one did, structurally rather than by a caller remembering to check.
+
+| Mod | Version |
+|---|---|
+| Minecraft | `1.21.1` (metadata range `[1.21.1,1.21.2)`) |
+| NeoForge | `21.1.249+` (metadata range `[21.1.249,21.2)`) |
+| Java | `21` |
+| MCA Reborn | `7.7.x` (metadata range `[7.7,8)`) — built and verified against `7.7.36-beta.3+1.21.1` |
+| MCA: Quests | `1.1.0+` (optional, requires API version 2) |
+| MCA: Conversations | `2.0.0+` (optional, requires API version 2) |
+| MCA: Crime | `0.1.0+` (optional) |
+
+**Numbers that moved:** the network protocol goes `"5"` → `"6"`, because the snapshot reply now carries
+a profile subpayload and a request stamp; a client and server must run matching versions of this mod.
+The Forge line goes `"4"` → `"5"` for the same release — **the two channels are separate lineages and
+have never been wire-compatible, so the numbers are not a comparison.** The save format goes `2` → `3`,
+the same number and the same bytes as the Forge build, and a world still crosses between the two
+loaders at the same format number. `McaReputationApi.getApiVersion()` is unchanged at `2`: everything
+below is additive, including the whole `api.profile` surface, and the companions' NeoForge branches
+gate on `2`. Forge's API version is `1` for this same surface, for the reason the 0.5.0 entry gives —
+the `api.event` types here extend `net.neoforged.bus.api.Event`.
+
+### Added
+
+- **Public profiles.** A village now tracks two things beside your score: **recognition** — how widely
+  known you are there, on its own `0 … 1000` ladder from unknown through noticed, recognized,
+  well_known and renowned to famous — and **facets**, the traits it knows you for. Seven ship:
+  bravery, compassion, generosity, lawfulness, mercy, reliability, violence. Both fade on lifetimes
+  the datapack authors per contribution (56 in-game days for recognition, 28 for a facet, as shipped)
+  and both are independent of standing's own decay policy, so a deed can stop counting against your
+  score long before it stops being what you are known for.
+
+- **The evidence is frozen when the deed is accepted.** Every accepted deed carries an immutable
+  payload: the authored quantities, the credit percentage it was actually awarded at, the lifetime,
+  the decay step, the resolution mode and its multipliers, and a fingerprint of the rules used. A
+  datapack edit changes what *future* deeds are worth and never rewrites what a player already did.
+  Values are stored in fixed point — one authored point is 10 000 subunits — so a contribution
+  credited at 25% survives as a quarter point rather than truncating to a public zero before it is
+  summed.
+
+- **Resolution modes, per channel.** Recognition and historical evidence ignore an apology, an
+  atonement, and forgiveness entirely: being known for something is not undone by apologising for it,
+  and the violence a killing demonstrated still happened. Only evaluative evidence settles, at the
+  multipliers frozen onto the deed. A disproven deed is zero in every mode. The progression is
+  monotonic by construction, so a rewound clock cannot resurrect anything either.
+
+- **Repeat credit.** A `credit_policies` datapack file states, as explicit percentages, what the
+  first, second, third … qualifying service in a window is worth. The six shipped policies run over
+  14 in-game days with a zero tail, so no shipped deed pays forever; a rescue pays
+  100% / 100% / 50% / 25% / 0%, with a second ceiling per beneficiary so rotating who you help lowers
+  the ceiling rather than resetting the allowance. Only a profile authored `commendable` may carry a
+  policy at all: adverse and mixed deeds get full accountability. The counters are bounded (64 groups
+  and 128 subjects per community) and at capacity they refuse conservatively and evict nothing —
+  dropping anti-farm state and then granting full credit is the exploit itself.
+
+- **A villager's opinion now reads what it knows you for.** The facets a specific villager has
+  actually learned contribute one bounded term to that villager's opinion of you — the pack's own
+  `opinion_weight_bp` first, then the operator's `maxFacetOpinionAdjustment` ceiling (25 by default)
+  over their sum. A pack cannot out-author the operator, and the operator cannot make a facet matter
+  that its pack weighted at zero. What leaves this mod for a Conversations Trust/Respect check is
+  still bounded at ±8, unchanged: that is a different quantity in different units, and a saturated
+  facet term can move a villager to a different rung but never add a second bias beside that rung's
+  own. An MCA personality this build can read adjusts the interpretation; one it cannot read uses the
+  authored default, which is what makes the fallback neutral rather than flattering.
+
+- **Knowledge filtering, per villager.** A speaker-scoped profile answer is filtered *per incident*,
+  before anything is summed, by the same awareness rules the ledger already used — never as a
+  coefficient over the village's total, because the shape of that total is itself evidence of events
+  the speaker may not have learned. A villager who knows nothing has an empty profile, which is a
+  valid answer and is never replaced by the village's wider view.
+
+- **Standing screen: two profile lines and a Details expansion.** How well known you are in the
+  selected village, and what for, above the ledger; a `Details` button — a real, keyboard-reachable,
+  narrated button — expands up to eight facet rows with the evidence counts for and against each,
+  inside the scrollable list rather than the fixed header. It is collapsed every time the screen
+  opens, and expanding it sends nothing: the details arrived with the standing. Opened from a
+  villager, the screen also says what *that villager* knows you for. Five states render distinctly —
+  unreadable store, read-only store, migrating, incomplete legacy history, and genuine stranger — and
+  an incomplete import reads as "recognition history is incomplete", never as "nobody knows you". No
+  colour-only meaning: a facet's direction is the pack's own word plus an explicit "in your favour" /
+  "against you" phrase. No new texture and no new GUI sprite.
+
+- **Eight new config keys**, four server and four client, documented in
+  [CONFIG.md](CONFIG.md): `[profiles] enableProfiles`, `enableRepeatCredit`, `enableFacetOpinion`,
+  `maxFacetOpinionAdjustment` on the server, and `showRecognition`, `showKnownFor`,
+  `showObserverProfile`, `showExactProfileValues` on the client. The split is deliberate: a client
+  preference must never be able to change what the server records.
+
+- **Four new datapack directories** — `facets`, `recognition_tiers`, `incident_profiles`,
+  `credit_policies` — plus a `social_profile` field on an incident. See [DATAPACK.md](DATAPACK.md).
+  These four are read by a duplicate-key-rejecting parser, unlike the three older directories which
+  keep Gson's lenient behaviour so packs that load today keep loading: `{"points": 8, "points": 80}`
+  resolves to `80` without a word in ordinary Gson, and for a quantity that is frozen onto player
+  records forever there is nothing left to recover after the fact.
+
+- **The public profile API** — `api.profile`, twelve immutable types and eight operations on
+  `McaReputationApi`, plus `ReputationProfileChangedEvent` on the game bus. An unavailable answer is a
+  real answer and says which kind it is: disabled, unpublished content, unresolvable target, migrating
+  store, read-only store, or incomplete legacy history. An authored predicate fails **closed** on an
+  unknown facet or tier id, treats unobserved as *not* negative evidence by default, and answers
+  `UNRESOLVED` rather than `false` for an invalid query so a pack's own fallback runs instead of a
+  silently closed gate.
+
+- **Four new debug subcommands**, all at permission level 2:
+  `/mcareputation debug profile <player> <community>` (capabilities, availability, raw subunits beside
+  the public integer, per-facet evidence, payload origins, suppressed credit decisions, and the
+  bounded credit explanation), `debug credit <player> <community>` (the windows, peeked and not
+  consumed), `debug profileincident <player> <community> <incident>` (all four channel quantities, so
+  a faded deed and a discounted one are distinguishable), and `debug profilemigration [run <budget>]`
+  (coverage and quarantine; the one mutating branch is the explicit `run`). `debug profile` enters the
+  reconciliation gate with an inspecting intent, so printing a diagnostic cannot age the evidence it
+  is printing.
+
+### Changed
+
+- **Network protocol version bumped to 6.** A 0.5.x client cannot join a 0.6.0 server or vice versa.
+  The payload registrar compares the version string by equality, which is what makes appending fields
+  safe *within* a version and a bump mandatory across one.
+
+- **Save format bumped to 3, migrating automatically on first load.** Every retained public incident
+  whose definition names a profile gets an unenriched stub and starts its profile clock; nothing else
+  moves. A ledger with no profile content still serializes to the byte-identical player subtrees
+  format 2 produced, which is what lets an existing world load unchanged. `migrateFormat()` now runs
+  its steps in order from the version each upgrades, so a format-1 file still goes through v1 → v2's
+  receipt recovery and supersession adoption on its way to v3 — in one load. See
+  [MIGRATION.md](MIGRATION.md).
+
+- **Legacy enrichment ships, and it is deliberately narrow.** The stubs are filled in by a resumable,
+  budgeted pass — eight players at a time from the existing periodic sweep, deferring entirely while
+  the datapack registries are unpublished — because the content it needs comes from the reload, which
+  may not have happened at load time. Only the built-in deed types are reconstructed, named by a
+  frozen manifest, so a pack that repointed `villager_rescued` at a lavish custom profile cannot
+  retroactively award the difference; and only the recognition and historical channels, so an old
+  killing contributes the recognition and violence it factually demonstrated and nothing about
+  culpability or remorse. Credit is 100%, the counters stay empty, and no standing, title, receipt or
+  revision moves. Coverage is reported honestly afterwards: a finished conservative pass is *partial*
+  history, not complete history, and an absence gate keeps respecting that.
+
+- **Profile aging has its own clock, and only the reconciliation gate moves it.** Profiles can be
+  frozen while standing keeps ageing, so one clock would pay a disabled interval out as a burst of
+  catch-up fading. Per-community decay immunity is persisted state the gate can see at any later read
+  and is skipped exactly as the scalar channel skips it. The global switches are the half no record
+  can observe for itself, so they are recorded as bounded freeze epochs at the transition — which is
+  what makes an interval nobody looked at and an interval somebody looked at halfway through produce
+  the same answer.
+
+- **Retention protects the evidence, not the integer.** Neither cap path will prune a record still
+  holding live profile subunits. A ledger with nothing else evictable refuses the next deed instead;
+  every authored lifetime is finite, so the pressure is temporary and the same ledger prunes and
+  admits again once the evidence is spent.
+
+- **`ReputationPolicy` now reads the profile switches from the config** rather than carrying their
+  documented defaults, so an operator switching profiles off changes behaviour rather than only
+  CONFIG.md. `recognitionCap`, `facetPointCap` and `protectProfileEvidence` stay constants on purpose:
+  the first two are the units the stored subunits are interpreted in, and lowering either would
+  reinterpret evidence a player already earned.
+
+- **Overlapping core-incident authority claims are reported once per kind, at registration** rather
+  than from inside the damage event, which fires for every point of damage dealt anywhere.
+
+### Platform
+
+The Forge 0.6.0 sources were re-expressed for this loader rather than applied as a patch; the
+behaviour is the same and the on-disk save bytes are identical, but the following are written
+differently here.
+
+- The new `[profiles]` config blocks are `ModConfigSpec`, and `ReputationConfigLifecycle` reports the
+  profile-policy transition from `ModConfigEvent.Reloading` on the injected mod bus. `ConfigParityTest`
+  pins all eight new keys.
+- The profile subpayload travels as `StreamCodec`s over `RegistryFriendlyByteBuf`, with
+  `ComponentSerialization.STREAM_CODEC` for the authored labels rather than 1.20.1's
+  `FriendlyByteBuf.writeComponent`. Every list — including the community, title and incident lists
+  that predate this release — goes through this branch's own bounded reader, which refuses a claimed
+  length *before* allocating. The byte-budget measurement in `network/SnapshotCodec` uses a scratch
+  `RegistryFriendlyByteBuf` over the destination's own `RegistryAccess`, so what is measured is the
+  bytes that will actually travel; a plain scratch buffer would throw on the first component instead
+  of measuring it.
+- `SnapshotCodec` exists on the Forge side because `ReputationNetwork`'s static initialiser built a
+  `SimpleChannel`; that hazard does not exist here, where registration happens inside
+  `ReputationNetwork.register` and the outer class holds no channel. The file is kept for the byte
+  budget's own sake and to keep the two branches file-for-file comparable, and its javadoc says so
+  rather than repeating a reason that is not true here.
+- Forge's P7 reached the client packet path through `DistExecutor`, which NeoForge removed. The client
+  profile state goes through this branch's existing `ClientPacketHandler.Sink` seam;
+  `DedicatedServerClassloadTest` and `ClientPacketSinkTest` still assert that nothing under
+  `network/` names a client type.
+- The screen changes land on this branch's 1.21 GUI-sprite-based panel (`GuiTextures.well`,
+  `GuiPalette`) rather than Forge's blit-based one. As on Forge, no new texture or sprite was needed —
+  text and an existing `Button` only — so `GuiSpriteMetadataTest` needed nothing new.
+- MCA's `VillagerEntityMCA#getProfessionId()` is resolved on `McaReflect`'s existing descriptor-driven
+  audited surface, as a second **optional** tier: `AUDITED_OPTIONAL_MEMBERS`, reported by
+  `missingOptional()` and one startup WARN, with availability still decided by the required list
+  alone. It was audited with `javap` against the artifact `mca_jar_sha256` pins — `public
+  net.minecraft.resources.ResourceLocation getProfessionId()` — and `McaBinaryAbiTest` now re-checks
+  the optional tier against that jar on every `check`, while `McaTraitFallbackTest` resolves it at
+  runtime against the real MCA on the test classpath.
+- `verifyApiJarLinks` and `verifyApiJarLinkage` were ported to ModDevGradle on the Java 21 toolchain.
+  The linkage baseline is **`b70f320`, this line's own 0.5.0 port** — not the Forge release the
+  feature set came from, because a Forge-era api jar does not link here at all and would fail the
+  fixture for a reason that has nothing to do with 0.6.0 compatibility. Nothing is reobfuscated:
+  ModDevGradle compiles against Mojang names with Parchment parameters and its jar output is already
+  the distributable artifact, so the baseline classes and today's name the same Minecraft members.
+- `check_mod.py` remains unusable on this branch (it is Forge-1.20.1-shaped); `LangParityTest`,
+  `GuiSpriteMetadataTest` and `ContentValidationTest` cover what it would have checked, and
+  `ProfileContentValidationTest` adds the same for the four new directories.
+- The golden `mcareputation-format-3-1.20.1.nbt` fixture is a **byte-for-byte copy of the Forge
+  file**, not a local regeneration, and `GoldenSavedDataCompatibilityTest` pins its SHA-256 so it
+  cannot quietly become one. The provider-neutral `savePayload`/`loadPayload` split is what lets it be
+  read directly.
+
 ## [0.5.0] — unreleased
 
 There was no 0.4.1 release; the API-jar work below shipped as part of this one instead, alongside a

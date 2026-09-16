@@ -448,6 +448,211 @@ tasks.register('verifyApiJar') {
     }
 }
 
+/**
+ * Spec 21.2's two API-artifact fixtures.
+ *
+ * `verifyApiJar` asserts the shape of the artifact: which entries are in it, and that it carries no
+ * resources. What it cannot do is notice that an exported signature mentions a type that is NOT
+ * exported - when this project compiles itself the whole implementation is on the classpath, so the
+ * gap only appears in a consumer's build. These two tasks close that, from both directions:
+ *
+ *  - `verifyApiJarLinks` compiles an outside-style consumer against the produced api jar ALONE plus
+ *    the ordinary NeoForge/Minecraft compile environment. A new signature naming an internal
+ *    tracker, policy or mutable record fails here.
+ *  - `verifyApiJarLinkage` compiles a consumer against the FROZEN api jar of the previous release and
+ *    runs it against the current implementation classes, so a moved record component or a widened
+ *    parameter shows up as the NoSuchMethodError a companion would have suffered.
+ *
+ * The baseline jar is rebuilt from the frozen release commit rather than vendored or taken from
+ * build/libs: a checked-in binary would be a second copy of an artifact git already holds, and
+ * build/libs is overwritten by the current apiJar.
+ *
+ * On this branch the baseline is `b70f320`, the pushed NeoForge 0.5.0 port this branch is based
+ * on - NOT the Forge release the feature set came from. A Forge api jar does not link here at all
+ * (the `api.event` types extend `net.neoforged.bus.api.Event`, which is why `API_VERSION` is 2 here
+ * and 1 there), so compiling a Forge-era consumer against this implementation would fail for a
+ * reason that has nothing to do with 0.6.0 compatibility.
+ *
+ * Nothing here is remapped. ModDevGradle compiles against Mojang mappings with Parchment parameter
+ * names and its jar output is already the distributable artifact, so the baseline classes and the
+ * current ones name the same Minecraft members and `verifyApiJarLinkage` is a real linkage check
+ * rather than a mapping comparison.
+ */
+def apiBaselineRef = project.findProperty('apiBaselineRef') ?: 'b70f320'
+def apiBaselineDir = layout.buildDirectory.dir('apiBaseline')
+
+tasks.register('apiBaselineSources') {
+    description = "Extracts the ${apiBaselineRef} main sources for the API linkage fixture."
+    outputs.dir(apiBaselineDir.map { it.dir('tree') })
+    outputs.upToDateWhen { apiBaselineDir.get().dir('tree/src/main/java').asFile.isDirectory() }
+    onlyIf {
+        def probe = new ProcessBuilder('git', 'cat-file', '-e', "${apiBaselineRef}^{commit}")
+                .directory(projectDir)
+                .redirectErrorStream(true)
+        probe.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+        boolean present = probe.start().waitFor() == 0
+        if (!present) {
+            logger.lifecycle("apiBaselineSources: commit ${apiBaselineRef} is not in this repository; "
+                    + "the API linkage fixture is skipped (override with -PapiBaselineRef=<ref>).")
+        }
+        present
+    }
+    doLast {
+        def tree = apiBaselineDir.get().dir('tree').asFile
+        tree.deleteDir()
+        tree.mkdirs()
+        def archive = new File(apiBaselineDir.get().asFile, 'baseline-src.tar')
+        def export = new ProcessBuilder('git', 'archive', '--format=tar', "${apiBaselineRef}",
+                'src/main/java').directory(projectDir)
+        export.redirectOutput(archive)
+        export.redirectErrorStream(false)
+        if (export.start().waitFor() != 0) {
+            throw new GradleException("git archive ${apiBaselineRef} failed")
+        }
+        def extract = new ProcessBuilder('tar', '-xf', archive.absolutePath, '-C', tree.absolutePath)
+                .inheritIO()
+        if (extract.start().waitFor() != 0) {
+            throw new GradleException("extracting the ${apiBaselineRef} sources failed")
+        }
+    }
+}
+
+tasks.register('compileApiBaseline', JavaCompile) {
+    description = "Compiles the ${apiBaselineRef} sources so its API jar can be rebuilt exactly."
+    dependsOn 'apiBaselineSources'
+    onlyIf { tasks.named('apiBaselineSources').get().didWork || source.files.size() > 0 }
+    source = fileTree(apiBaselineDir.map { it.dir('tree/src/main/java') }) {
+        include '**/*.java'
+    }
+    classpath = sourceSets.main.compileClasspath
+    destinationDirectory = apiBaselineDir.map { it.dir('classes') }
+    options.encoding = 'UTF-8'
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.register('apiBaselineJar', Jar) {
+    description = "The ${apiBaselineRef} compile-only API jar, rebuilt from that commit's sources."
+    dependsOn 'compileApiBaseline'
+    // Skipped rather than empty when the baseline commit is unavailable: an empty api jar would make
+    // the linkage fixture fail with a compile error that says nothing about compatibility.
+    onlyIf {
+        def classes = apiBaselineDir.get().dir('classes').asFile
+        classes.isDirectory() && !fileTree(classes).matching { include '**/*.class' }.isEmpty()
+    }
+    archiveBaseName = "${mod_id}-baseline"
+    archiveClassifier = 'api'
+    destinationDirectory = apiBaselineDir
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from(apiBaselineDir.map { it.dir('classes') }) {
+        include apiExports
+    }
+}
+
+/**
+ * The outside-consumer compile: the api jar alone, plus Forge and Minecraft. Deliberately not a
+ * source set of its own - a source set would put the project's own classes on its compile classpath,
+ * which is exactly the leniency this fixture exists to remove.
+ */
+tasks.register('compileApiJarFixture', JavaCompile) {
+    description = 'Compiles a sample consumer against the produced API jar alone.'
+    dependsOn 'apiJar'
+    source = fileTree('src/apiFixture/java') {
+        include '**/*.java'
+    }
+    classpath = objects.fileCollection().from(
+            tasks.named('apiJar', Jar).flatMap { it.archiveFile },
+            sourceSets.main.compileClasspath)
+    destinationDirectory = layout.buildDirectory.dir('apiFixture/classes')
+    options.encoding = 'UTF-8'
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.register('verifyApiJarLinks') {
+    description = 'Fails when an exported API signature references a type the API jar does not carry.'
+    dependsOn 'compileApiJarFixture'
+    doLast {
+        def classes = layout.buildDirectory.dir('apiFixture/classes').get().asFile
+        def compiled = classes.isDirectory() ? fileTree(classes).matching { include '**/*.class' } : files()
+        if (compiled.isEmpty()) {
+            throw new GradleException('verifyApiJarLinks compiled nothing; the fixture source is missing.')
+        }
+        logger.lifecycle("verifyApiJarLinks: the sample consumer compiles against "
+                + "${tasks.named('apiJar', Jar).get().archiveFile.get().asFile.name} alone "
+                + "(${compiled.files.size()} classes).")
+    }
+}
+
+tasks.register('compileApiLinkageFixture', JavaCompile) {
+    description = "Compiles a ${apiBaselineRef}-era consumer against that release's API jar."
+    dependsOn 'apiBaselineJar'
+    // Gated on the artifact rather than on whether the jar task did work, so an incremental build
+    // that finds the baseline jar up to date still recompiles a changed fixture against it.
+    onlyIf {
+        def jar = tasks.named('apiBaselineJar', Jar).get().archiveFile.get().asFile
+        boolean usable = false
+        if (jar.isFile()) {
+            new java.util.zip.ZipFile(jar).withCloseable { zip ->
+                usable = zip.entries().any { it.name.endsWith('.class') }
+            }
+        }
+        if (!usable) {
+            logger.lifecycle("compileApiLinkageFixture: no usable ${apiBaselineRef} API jar; "
+                    + "the binary-linkage fixture is skipped.")
+        }
+        usable
+    }
+    source = fileTree('src/apiLinkage/java') {
+        include '**/*.java'
+    }
+    classpath = objects.fileCollection().from(
+            tasks.named('apiBaselineJar', Jar).flatMap { it.archiveFile },
+            sourceSets.main.compileClasspath)
+    destinationDirectory = layout.buildDirectory.dir('apiLinkage/classes')
+    options.encoding = 'UTF-8'
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.register('verifyApiJarLinkage', JavaExec) {
+    description = "Runs the ${apiBaselineRef}-compiled consumer against the current implementation."
+    dependsOn 'compileApiLinkageFixture', 'classes'
+    onlyIf {
+        def classes = layout.buildDirectory.dir('apiLinkage/classes').get().asFile
+        boolean compiled = classes.isDirectory()
+                && !fileTree(classes).matching { include '**/*.class' }.isEmpty()
+        if (!compiled) {
+            logger.lifecycle('verifyApiJarLinkage: no baseline-compiled fixture; skipped.')
+        }
+        compiled
+    }
+    // The previous release's call sites, resolved against today's classes. No api jar on this
+    // classpath: the point is that the implementation still satisfies what that jar promised.
+    classpath = objects.fileCollection().from(
+            layout.buildDirectory.dir('apiLinkage/classes'),
+            sourceSets.main.output,
+            sourceSets.main.runtimeClasspath)
+    mainClass = 'dev.otectus.mcareputation.fixture.LegacyApiConsumer'
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.named('verifyApiJar').configure {
+    finalizedBy 'verifyApiJarLinks', 'verifyApiJarLinkage'
+}
+
+tasks.named('check').configure {
+    dependsOn 'verifyApiJarLinks'
+    dependsOn 'verifyApiJarLinkage'
+}
+
 tasks.named('build').configure {
     dependsOn 'verifyApiJar'
+    dependsOn 'verifyApiJarLinks'
+    dependsOn 'verifyApiJarLinkage'
 }

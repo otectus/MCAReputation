@@ -2,6 +2,7 @@ package dev.otectus.mcareputation.reputation;
 
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.TestFixtures;
+import dev.otectus.mcareputation.api.ChangeCause;
 import dev.otectus.mcareputation.api.ImportResult;
 import dev.otectus.mcareputation.api.LegacyImportRequest;
 import dev.otectus.mcareputation.api.ReputationMirror;
@@ -315,7 +316,12 @@ class ReputationServiceTest {
 
         assertFalse(result.applied());
         assertEquals(ReputationResult.Reason.UNWITNESSED, result.reason());
-        assertEquals(0, home().incidentCount(), "not retained means no record at all");
+        // Not merely "no incident": no ledger either. The refusal is decided before the transaction
+        // creates anything, so a deed nobody saw does not leave behind the record it would have been
+        // written to (I04). This used to create an empty player and community record on the way to
+        // refusing.
+        assertTrue(ctx.data.player(TestFixtures.PLAYER_A).isEmpty(),
+                "not retained means no record at all");
         assertTrue(ctx.posted.isEmpty());
     }
 
@@ -609,5 +615,84 @@ class ReputationServiceTest {
     void anUnknownIncidentTypeIsRefused() {
         ReputationResult result = record(null, Set.of(), 0L);
         assertEquals(ReputationResult.Reason.UNKNOWN_INCIDENT, result.reason());
+    }
+
+    // ------------------------------------------------------------------
+    // §11.1 — one evaluation time, and the quiet aging that precedes admission
+    // ------------------------------------------------------------------
+
+    /**
+     * I09: the whole operation is evaluated at one server-supplied time.
+     *
+     * <p>Now that reconciliation, the admission decision, the arriving deed's initial aging and the
+     * cap sweep all read the same value, there is no way for them to disagree about what time it is —
+     * and the cheapest way to keep it that way is to count the reads.
+     */
+    @Test
+    void onePlainRecordReadsTheClockExactlyOnce() {
+        define(-8, IncidentVisibility.VILLAGE, DecayPolicy.NONE);
+        int[] reads = {0};
+        ctx.clock = () -> {
+            reads[0]++;
+            return 5 * DAY;
+        };
+
+        assertTrue(ReputationService.recordWith(ctx, request(null, Set.of(), 5 * DAY)).applied());
+
+        assertEquals(1, reads[0], "one operation, one evaluation time");
+    }
+
+    /**
+     * Aging now happens before the admission decision, which means a deed can be preceded by a quiet
+     * decay publication. The two must stay distinguishable: reconciling elapsed time is not reapplying
+     * the deed (I02), so the decay envelope is quiet and the deed's is not.
+     */
+    @Test
+    void theAgingThatPrecedesADeedIsPublishedQuietlyAndSeparately() {
+        define(-40, IncidentVisibility.VILLAGE, DecayPolicy.linearToZero(0L, 2));
+        assertTrue(record(null, Set.of(), 0L).applied());
+        assertEquals(-40, home().score());
+        List<String> trace = new ArrayList<>();
+        registerTraceMirror(trace);
+        List<ChangeCause> causes = new ArrayList<>();
+        ReputationService.registerMirror(recordingCauses(causes));
+        ctx.posted.clear();
+
+        // Five days later: ten points of the old beating have faded, and a new deed lands.
+        assertTrue(record(null, Set.of(), 5 * DAY).applied());
+
+        assertEquals(List.of(ChangeCause.DECAY, ChangeCause.DEED), causes,
+                "the elapsed time is reported first, quietly, and the deed on its own terms");
+        assertTrue(causes.size() == 2);
+        assertEquals(-70, home().score(), "-40 faded to -30, plus the new -40");
+    }
+
+    private ReputationMirror recordingCauses(List<ChangeCause> causes) {
+        ReputationMirror mirror = new ReputationMirror() {
+            @Override
+            public void mirrorStanding(dev.otectus.mcareputation.api.StandingChange change) {
+                causes.add(change.cause());
+            }
+
+            @Override
+            public void mirrorScore(UUID player, CommunityKey community, int score,
+                                    ResourceLocation ladder, String highWaterTierId) {
+            }
+
+            @Override
+            public void mirrorVillageTitle(UUID player, CommunityKey community, ResourceLocation title) {
+            }
+
+            @Override
+            public void mirrorGlobalTitle(UUID player, ResourceLocation title) {
+            }
+
+            @Override
+            public String mirrorName() {
+                return "cause-trace";
+            }
+        };
+        registeredMirrors.add(mirror);
+        return mirror;
     }
 }

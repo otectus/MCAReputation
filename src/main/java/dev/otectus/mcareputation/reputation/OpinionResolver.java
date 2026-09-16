@@ -1,10 +1,15 @@
 package dev.otectus.mcareputation.reputation;
 
 import dev.otectus.mcareputation.api.VillagerOpinion.OpinionBasis;
+import dev.otectus.mcareputation.api.profile.VillagerProfileSnapshot;
 import dev.otectus.mcareputation.incident.AwarenessResolver;
 import dev.otectus.mcareputation.incident.IncidentRecord;
+import dev.otectus.mcareputation.profile.ProfileMath;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
+import dev.otectus.mcareputation.profile.VillagerProfileResolver;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 
+import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -107,6 +112,97 @@ public final class OpinionResolver {
         }
         return new Opinion(ReputationMath.totalScore(baseline, contributions, minScore, maxScore),
                 basis, known);
+    }
+
+    // ------------------------------------------------------------------
+    // The facet-aware fold (§13.2)
+    // ------------------------------------------------------------------
+
+    /**
+     * One villager's view with §13.2's facet term folded in, reported in its parts.
+     *
+     * @param base            the existing knowledge-filtered standing opinion, unchanged
+     * @param facetAdjustment the capped facet term actually applied
+     * @param score           {@code base + facetAdjustment}, clamped to the score window
+     * @param traitBasis      how the interpretation weights were arrived at
+     * @param aggregate       the knowledge-filtered profile the term was read from, so a caller that
+     *                        needs both does not fold the ledger twice
+     */
+    public record ProfiledOpinion(Opinion base, int facetAdjustment, int score,
+                                  VillagerProfileSnapshot.TraitBasis traitBasis,
+                                  ProfileAggregator.Aggregate aggregate) {
+
+        public OpinionBasis basis() {
+            return base.basis();
+        }
+
+        public int knownIncidents() {
+            return base.knownIncidents();
+        }
+    }
+
+    /**
+     * The same fold, plus the facet interpretation this observer applies to what they know.
+     *
+     * <p><b>Filter first, then aggregate, then interpret.</b> Both halves read the same ledger
+     * through the same {@link AwarenessResolver} decision, per incident, before anything is summed:
+     * the profile half goes through {@link ProfileAggregator#speaker}, which §13.1 requires instead of
+     * scaling the community vector by a hearsay coefficient. Interpretation happens last, on evidence
+     * that already survived the filter, so a personality can never reveal a deed its owner never
+     * learned.
+     *
+     * <p><b>Identical to {@link #resolve} whenever there is nothing new to say.</b> With no profile
+     * evidence, no published content, or {@code facetOpinionEnabled} off, the adjustment is zero and
+     * {@code score} equals the base score exactly — the 0.4.x answer, to the integer.
+     *
+     * <p>The ledger must already have been reconciled through {@link ReconciliationService}; like
+     * {@link ProfileAggregator}, this moves no clock and ages nothing.
+     */
+    public static ProfiledOpinion resolveProfiled(@Nullable ReputationPolicy policy,
+                                                  CommunityReputationRecord record,
+                                                  @Nullable ProfileRegistryBundle bundle, UUID villager,
+                                                  boolean resident, long gameTime,
+                                                  @Nullable VillagerProfileResolver.ObserverTraits traits) {
+        ReputationPolicy rules = policy == null ? ReputationPolicy.defaults() : policy;
+        Opinion base = resolve(record, villager, resident, gameTime, rules.minRumorDelayTicks(),
+                rules.maxRumorDelayTicks(), rules.opinionHearsayPercent(),
+                rules.opinionInvolvedPercent(), rules.minimumScore(), rules.maximumScore());
+        ProfileRegistryBundle content = bundle == null ? ProfileRegistryBundle.EMPTY : bundle;
+        ProfileAggregator.Aggregate aggregate = ProfileAggregator.speaker(rules, record, content,
+                villager, resident, gameTime);
+        VillagerProfileResolver.OpinionAdjustment adjustment = VillagerProfileResolver.facetAdjustment(
+                content, aggregate.facets(), traits, rules.facetOpinionEnabled(),
+                rules.maxFacetOpinionAdjustment());
+        int score = ProfileMath.clamp(base.score() + adjustment.adjustment(), rules.minimumScore(),
+                rules.maximumScore());
+        return new ProfiledOpinion(base, adjustment.adjustment(), score, adjustment.traitBasis(),
+                aggregate);
+    }
+
+    /**
+     * §13.2's <b>final external contribution</b>: what a villager's view of a player is worth to an
+     * outside Trust/Respect check, and the one place the two numbers in §13.2 are reconciled.
+     *
+     * <p>They are not the same quantity. {@code maxFacetOpinionAdjustment} (25 by default) bounds the
+     * facet term in <em>opinion points</em>, on the same ladder as standing — it decides how far
+     * facets may move this villager's opinion. The <b>±8</b> limit is in <em>check-bias units</em> and
+     * bounds what leaves this mod: the resolved opinion picks a rung on the ladder, and that rung's
+     * authored bias is the single term a consumer adds to its own check.
+     *
+     * <p>That is why nothing here sums two biases. The facet term is already inside {@code score},
+     * so a larger facet contribution can only move the villager to a different rung; it can never add
+     * a second bonus beside the rung's own (R04). The clamp is therefore an invariant restated rather
+     * than a correction — {@link ReputationTier#biasFor} clamps identically — and it holds for the
+     * maximal facet term as surely as for a zero one.
+     */
+    public static int externalCheckBias(@Nullable ReputationTierSet ladder, int opinionScore,
+                                        String axis) {
+        if (ladder == null) {
+            return 0;
+        }
+        int bias = ladder.tierFor(opinionScore).biasFor(axis);
+        return ProfileMath.clamp(bias, -ReputationTier.BIAS_SHIPPED_LIMIT,
+                ReputationTier.BIAS_SHIPPED_LIMIT);
     }
 
     /** The stronger of two bases, in the declared order {@code INVOLVED > WITNESSED > HEARSAY > NONE}. */

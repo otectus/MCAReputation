@@ -18,5 +18,6 @@
   },
   "pinned": false,
   "retain_unwitnessed": true,
-  "max_override_abs": 60
+  "max_override_abs": 60,
+  "social_profile": "mcareputation:killed_villager"
 }

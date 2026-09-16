@@ -15,10 +15,18 @@
 Three kinds of definition, all reloaded by `/reload`:
 
 ```
-data/<namespace>/mcareputation/incidents/**/*.json          what a deed is and what it is worth
+data/<namespace>/mcareputation/incidents/**/*.json           what a deed is and what it is worth
 data/<namespace>/mcareputation/reputation_tiers/**/*.json    the named bands standing falls into
 data/<namespace>/mcareputation/titles/**/*.json              earned badges
+data/<namespace>/mcareputation/facets/**/*.json              the axes a village can know you on
+data/<namespace>/mcareputation/recognition_tiers/**/*.json   the how-well-known ladder
+data/<namespace>/mcareputation/incident_profiles/**/*.json   what a deed demonstrates about you
+data/<namespace>/mcareputation/credit_policies/**/*.json     how repeated services are credited
 ```
+
+The last four are new in 0.6.0 and are what *public profiles* are authored from. They are reloaded by
+the same `/reload` as the first three, and validated together: a facet a profile references has to
+exist, and a profile an incident references has to allow it.
 
 For backwards compatibility, tier and title definitions are **also** read from
 `data/<namespace>/mcaquests/reputation_tiers/` and `data/<namespace>/mcaquests/titles/`, so a pack
@@ -68,6 +76,7 @@ than a partial one. `/mcareputation validate` reports everything at once, naming
 | `retain_unwitnessed` | bool | | Keep an unwitnessed instance as hidden, zero-contribution history instead of discarding it. |
 | `max_override_abs` | int | | Ceiling on a caller-supplied delta. Default `100`. |
 | `allow_private_score` | bool | | **Development only.** No shipped pack may use it; validation reports it. |
+| `social_profile` | resource location | | Which *incident profile* this deed demonstrates (0.6.0). Absent means the deed carries no recognition and no facet evidence at all — **never** a severity-derived default, because severity describes impact and impact is not publicity. |
 
 ### Visibility
 
@@ -187,6 +196,190 @@ The four newest incidents — `villager_rescued`, `villager_cured`, `raid_repell
 `player_killed_in_village` — are core incident kinds. Another mod can claim any of them through the
 authority mechanism in `api/CoreIncidentKind.java` and provide its own deeds instead. Pack authors
 can override their JSON definitions exactly as they can for `villager_killed`.
+
+---
+
+## Public profiles (0.6.0)
+
+Standing answers *how much a village likes you*. A public profile answers the other question: **what
+it knows you for**, and **how widely**. The two are separate on purpose — a player can be famous for
+violence and disliked for it, or quietly well-regarded and recognised by nobody — so they are authored
+in separate files, stored in separate channels, and fade on separate clocks.
+
+Four directories, and one new field on an incident:
+
+- **`facets/`** — the axes. One file per trait a village can know you on.
+- **`recognition_tiers/`** — the *how widely known* ladder. Not the standing ladder.
+- **`incident_profiles/`** — what one kind of deed demonstrates, in recognition and facet points.
+- **`credit_policies/`** — how a repeated service is credited less than the first one.
+- **`social_profile`** on an incident — which profile that deed attaches to.
+
+### The evidence is frozen when the deed is accepted
+
+This is the rule everything else follows from. When a deed is accepted, the authored quantities below
+are **copied onto that record** — points, lifetime, decay step, resolution mode and multipliers, and
+the credit percentage it was actually awarded at. Editing a pack changes what *future* deeds are
+worth; it never rewrites what a player already did. That also means an authoring mistake outlives the
+edit that fixes it, so the validator below is strict, and a duplicate JSON key in one of these four
+directories is a hard error rather than Gson's silent last-one-wins.
+
+Points are stored in fixed point: one authored point is 10 000 internal subunits, so a contribution
+credited at 25% survives as a quarter point rather than truncating to a public zero before it is
+summed.
+
+### `facets/`
+
+```json
+{
+  "name": { "translate": "mypack.facet.diligence" },
+  "description": { "translate": "mypack.facet.diligence.description" },
+  "range": { "min": 0, "max": 100 },
+  "positive_label": { "translate": "mypack.facet.diligence.diligent" },
+  "display_order": 20,
+  "label_min_magnitude": 10,
+  "label_min_evidence": 2,
+  "opinion_weight_bp": 3000,
+  "personality_overrides": { "odd": 500 }
+}
+```
+
+| Field | Required | Meaning |
+|---|:---:|---|
+| `name` | ✔ | The axis, as a player sees it. |
+| `description` | | Shown in diagnostics. |
+| `range` | ✔ | `min`/`max`, inside ±100 and **containing zero** (and not `0..0`). This is what decides whether zero means *balanced* or *no evidence*. |
+| `positive_label` | ✔ | The word a positive value earns — the pack's own word, not a computed one. |
+| `negative_label` | | **Required for a bipolar facet** (`min` below zero) and **forbidden for a unipolar one**. An unproven bravery is not cowardice, so a facet that cannot go negative may not author a negative word for it. |
+| `display_order` | | Tiebreak when two facets are equally dominant. Lower first. |
+| `label_min_magnitude` | | How much value a label needs before it is claimed. Default `10`. |
+| `label_min_evidence` | | How many distinct credited deeds a label needs. Default `2`, so one incident does not define a player — unless that incident is authored `major_evidence`. |
+| `opinion_weight_bp` | | This facet's contribution to a villager's opinion, in basis points of its display value, within ±20000. `0` (the default) means the facet is described but never liked or disliked. |
+| `personality_overrides` | | Per-MCA-personality weight, keyed by the bare lowercase personality id (`odd`, `upbeat`). Applies only when the villager's personality actually resolved; an unread personality uses the authored default, which is what makes the fallback neutral rather than flattering. |
+
+A facet's value is bounded at ±100 for display. The **raw** total is kept beyond that, because a
+record still holding live evidence is never pruned to make room, and a later opposing deed has to have
+something to push against.
+
+Shipped: `bravery`, `compassion`, `generosity`, `lawfulness`, `mercy`, `reliability`, `violence`.
+
+### `recognition_tiers/`
+
+```json
+{
+  "tiers": [
+    { "id": "unknown",  "threshold": 0,  "name": { "translate": "mypack.recognition.unknown" } },
+    { "id": "noticed",  "threshold": 5,  "name": { "translate": "mypack.recognition.noticed" } },
+    { "id": "renowned", "threshold": 90, "name": { "translate": "mypack.recognition.renowned" } }
+  ]
+}
+```
+
+The same shape as a standing ladder and a completely different quantity. Recognition runs `0 … 1000`
+and has **no negative half**: being widely known for something terrible is a high recognition value,
+not a low one. Thresholds must ascend strictly and the lowest must be `0`, so there is always a tier a
+brand-new player falls into. Removing the pack does not make everyone tierless — there is a built-in
+fallback ladder behind it.
+
+Shipped: `mcareputation:default`, six rungs — unknown / noticed / recognized / well_known / renowned /
+famous at 0 / 5 / 15 / 40 / 90 / 180.
+
+### `incident_profiles/`
+
+```json
+{
+  "allowed_incidents": ["mypack:rescued_traveller"],
+  "recognition": { "points": 6, "lifetime_ticks": 1344000, "resolution_mode": "recognition" },
+  "facets": {
+    "mcareputation:bravery":    { "points": 8,  "lifetime_ticks": 672000, "resolution_mode": "historical" },
+    "mcareputation:compassion": { "points": 5,  "lifetime_ticks": 672000, "resolution_mode": "historical" }
+  },
+  "credit_class": "commendable",
+  "credit_policy": "mypack:rescue_service",
+  "major_evidence": false,
+  "decay_step_ticks": 24000
+}
+```
+
+| Field | Required | Meaning |
+|---|:---:|---|
+| `allowed_incidents` | | Which incident ids may attach to this profile, up to 32. An empty list allows any. A producer that asks for a profile not on the list is warned and falls back to the incident's own — asking for the wrong rules is not a reason to record the encounter as unremarkable. |
+| `recognition` | | A contribution on the recognition channel: how widely this deed identifies the player. |
+| `facets` | | Up to **8** entries, keyed by facet id. A value may be negative on a bipolar facet. |
+| `credit_class` | | `commendable`, `adverse`, `mixed`, or `neutral` (default). **Only `commendable` may carry a credit policy** — a second assault is not cheaper than the first, and a deed that mixes praise and blame is not discounted either. |
+| `credit_policy` | | The repeat-credit policy id, for a `commendable` profile only. |
+| `major_evidence` | | One deed of this kind is enough to earn a facet label on its own, bypassing `label_min_evidence`. Use for the genuinely defining. |
+| `decay_step_ticks` | | Quantization step for the fade, default one in-game day (`24000`). |
+
+A **contribution** (`recognition` and each `facets` entry) is:
+
+| Field | Required | Meaning |
+|---|:---:|---|
+| `points` | ✔ | Authored magnitude, within ±100. |
+| `lifetime_ticks` | ✔ | How long it takes to fade to nothing: finite, `24000 … 100000000`. There is no "never fades" here — a village's memory of what you are known for is not permanent. |
+| `resolution_mode` | | `recognition`, `historical` (default), or `evaluative`. |
+| `resolution_bp` | | For `evaluative` only: `apologized`/`atoned`/`forgiven`/`disproven` in basis points, default `7500`/`2500`/`0`/`0`. Must be non-increasing along that progression, and `disproven` is always effectively zero. |
+
+**Resolution modes are the interesting field.** `recognition` and `historical` ignore an apology,
+atonement, or forgiveness completely: being known for something is not undone by apologising for it,
+and the violence a killing demonstrated still happened. Only `evaluative` settles — that is the
+channel for *how a wrong reflects on you now*. `disproven` is zero in every mode, because a deed that
+did not happen demonstrates nothing.
+
+The fade is linear over a quantized age: `remaining = max(0, lifetime − floor(age / step) × step) /
+lifetime`, applied to the credited amount. An authored 8 on a 28-day lifetime, 14 days old, is exactly
+4 — and it is independent of the scalar standing decay policy, which is the whole point of a second
+channel.
+
+Shipped: nine profiles, attached by `social_profile` to the five core deeds and the two promise
+outcomes. Apology and restitution deliberately attach nothing; zero is already what an incident with
+no profile contributes, and repairing the deed it refers to is a resolution, not a new virtue.
+
+### `credit_policies/`
+
+```json
+{
+  "group": "mypack:rescue_service",
+  "window_ticks": 336000,
+  "credit_schedule_bp": [10000, 10000, 5000, 2500, 0],
+  "tail_bp": 0,
+  "scope": "player_community",
+  "subject_limit": {
+    "role": "beneficiary",
+    "credit_schedule_bp": [10000, 5000, 0],
+    "tail_bp": 0
+  }
+}
+```
+
+| Field | Required | Meaning |
+|---|:---:|---|
+| `group` | ✔ | The allowance's identity. Two profiles naming the same group share one allowance; two files that disagree about one group are a validation error. |
+| `window_ticks` | ✔ | How long one allowance lasts. An active window keeps the duration it started with, so editing this on reload changes the *next* window rather than the one running. |
+| `credit_schedule_bp` | ✔ | The percentage, in basis points, for the 1st, 2nd, 3rd … qualifying deed in the window. Up to 32 entries, and **non-increasing**: a schedule that rose again would restore full credit to a player who simply kept going. |
+| `tail_bp` | | What every occurrence past the schedule is worth. Default `0`, and it may not exceed the last scheduled entry. |
+| `scope` | | `player_community` (default) or `player_global`. Global is *stricter*, never more generous — it reads as the sum of the per-community counters, because a wider scope that resolved more generously would make declaring it the exploit. |
+| `subject_limit` | | A **second ceiling** on one named participant, never a parallel allowance: the effective percentage is `min(group, subject)`. Rotating beneficiaries resets the ceiling, not the allowance. `role` is the subject role to count, e.g. `beneficiary`. |
+
+Credit only ever *reduces*. A non-positive contribution is returned unchanged whatever the schedule
+says, structurally rather than by a caller remembering to check, so no policy and no authoring mistake
+can make wrongdoing cheaper through repetition.
+
+The counters are bounded — 64 groups and 128 subjects per community — and at capacity they record a
+conservative refusal and evict nothing. Dropping anti-farm state and then granting full credit is the
+exploit itself, whether a cap sweep or a save file does it.
+
+Shipped: six policies, every one with a zero tail, so no shipped deed pays forever. The adverse
+profiles carry no policy at all.
+
+### What the screen shows
+
+Two header lines by default — how well known the player is in the selected village, and what for —
+plus a **Details** button that expands up to eight facet rows inside the scrollable list. A villager
+the screen was opened from gets its own line for what *that villager* knows the player for, which is
+filtered by what that villager has actually learned and is never quietly replaced by the village's
+wider view. Every label crosses the wire already resolved, so a dedicated-server client shows the
+pack the world is running rather than the one it shipped with. All four lines have client-side
+switches in `CONFIG.md`.
 
 ---
 
@@ -421,3 +614,16 @@ validate them in a development world.
 - biases beyond the shipped ±8 limit
 - incidents that can have no observable effect at all
 - pinned incidents that also set a retention window
+- a facet value outside its own facet's authored range, or with the wrong sign for it
+- a unipolar facet authoring a negative label, or a bipolar one omitting it
+- a recognition ladder whose thresholds do not ascend, or whose floor is not `0`
+- a credit schedule that rises again, or a tail above its last entry
+- two credit policy files that disagree about one `group`
+- a `social_profile`, facet, or `credit_policy` reference that does not resolve
+- a repeat-credit policy on a profile that is not `commendable`
+- a duplicate key in any `facets`, `recognition_tiers`, `incident_profiles`, or `credit_policies` file
+
+The last group is stricter than the three older directories, which keep Gson's lenient behaviour so
+packs that load today keep loading. These four are read by a duplicate-rejecting parser because their
+values are frozen onto player records: `{"points": 8, "points": 80}` resolves to `80` without a word
+in ordinary Gson, and after the fact there is nothing left to recover.

@@ -93,6 +93,50 @@ class McaBinaryAbiTest {
     }
 
     /**
+     * The audited-but-<b>optional</b> surface, against the same jar.
+     *
+     * <p>"Optional" describes what {@code McaReflect} does when a member is gone - degrade the
+     * interpretation, never switch the integration off - not whether the pin was audited. The pin is
+     * exact, so a member missing from it is a stale audit rather than a supported configuration, and
+     * saying so here is what keeps 13.2's neutral fallback an intentional path instead of the one
+     * that is always taken.
+     */
+    @Test
+    void everyAuditedOptionalMemberExistsInTheResolvedMcaJarToo() throws Exception {
+        List<String> problems = new ArrayList<>();
+        try (URLClassLoader loader = loader(jar())) {
+            for (McaReflect.Member member : McaReflect.AUDITED_OPTIONAL_MEMBERS) {
+                String owner = ROOT + "." + member.ownerSuffix();
+                Class<?> type;
+                try {
+                    type = Class.forName(owner, false, loader);
+                } catch (Throwable t) {
+                    problems.add("class " + owner + " missing: " + t);
+                    continue;
+                }
+                Method resolved;
+                try {
+                    resolved = type.getMethod(member.name(), member.params());
+                } catch (Throwable t) {
+                    problems.add(member.describe(ROOT) + " missing: " + t);
+                    continue;
+                }
+                if (!Modifier.isPublic(resolved.getModifiers())) {
+                    problems.add(member.describe(ROOT) + " is not public");
+                }
+                if (Modifier.isStatic(resolved.getModifiers()) != member.isStatic()) {
+                    problems.add(member.describe(ROOT) + " is "
+                            + (member.isStatic() ? "an instance method, but the table says static"
+                            : "static, but the table says an instance method"));
+                }
+            }
+        }
+        assertTrue(problems.isEmpty(), () -> "the audited-but-optional MCA surface does not match the "
+                + "pinned jar; villager interpretation would silently fall back to neutral:\n  "
+                + String.join("\n  ", problems));
+    }
+
+    /**
      * The audit is only worth anything against the jar it was performed on, so the pin is checked by
      * digest, not by file name. Skipped until {@code mca_jar_sha256} is filled in.
      */

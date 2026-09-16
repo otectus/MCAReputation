@@ -1,0 +1,64 @@
+{
+  "tiers": [
+    {
+      "id": "unknown",
+      "threshold": 0,
+      "name": {
+        "translate": "mcareputation.recognition.unknown"
+      },
+      "description": {
+        "translate": "mcareputation.recognition.unknown.description"
+      }
+    },
+    {
+      "id": "noticed",
+      "threshold": 5,
+      "name": {
+        "translate": "mcareputation.recognition.noticed"
+      },
+      "description": {
+        "translate": "mcareputation.recognition.noticed.description"
+      }
+    },
+    {
+      "id": "recognized",
+      "threshold": 15,
+      "name": {
+        "translate": "mcareputation.recognition.recognized"
+      },
+      "description": {
+        "translate": "mcareputation.recognition.recognized.description"
+      }
+    },
+    {
+      "id": "well_known",
+      "threshold": 40,
+      "name": {
+        "translate": "mcareputation.recognition.well_known"
+      },
+      "description": {
+        "translate": "mcareputation.recognition.well_known.description"
+      }
+    },
+    {
+      "id": "renowned",
+      "threshold": 90,
+      "name": {
+        "translate": "mcareputation.recognition.renowned"
+      },
+      "description": {
+        "translate": "mcareputation.recognition.renowned.description"
+      }
+    },
+    {
+      "id": "famous",
+      "threshold": 180,
+      "name": {
+        "translate": "mcareputation.recognition.famous"
+      },
+      "description": {
+        "translate": "mcareputation.recognition.famous.description"
+      }
+    }
+  ]
+}

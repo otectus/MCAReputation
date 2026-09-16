@@ -102,6 +102,10 @@ public final class McaReputationConfig {
         public final ModConfigSpec.BooleanValue strictJsonValidation;
         public final ModConfigSpec.EnumValue<ReputationPolicy.UndeclaredAuthorityMode>
                 coreAuthorityUndeclaredKinds;
+        public final ModConfigSpec.BooleanValue enableProfiles;
+        public final ModConfigSpec.BooleanValue enableRepeatCredit;
+        public final ModConfigSpec.BooleanValue enableFacetOpinion;
+        public final ModConfigSpec.IntValue maxFacetOpinionAdjustment;
         public final ModConfigSpec.BooleanValue enableQuestsIntegration;
         public final ModConfigSpec.BooleanValue enableConversationsIntegration;
         public final ModConfigSpec.BooleanValue enableCrimeIntegration;
@@ -224,6 +228,35 @@ public final class McaReputationConfig {
                     .defineInRange("opinionInvolvedPercent", 150, 100, 300);
             builder.pop();
 
+            builder.comment("Public profiles: what a village knows a player for, and how repeated",
+                            "services are credited (spec 20). Tuning lives in datapacks, not here —",
+                            "these four settings switch behaviour and bound it, nothing more.")
+                    .push("profiles");
+            enableProfiles = builder
+                    .comment("Enables new profile evidence creation and profile queries. When false,",
+                            "existing payloads are retained, their profile-aging clock freezes, and",
+                            "profiles report themselves disabled; scalar standing continues under its",
+                            "own rules. Nothing is deleted either way.")
+                    .define("enableProfiles", ReputationPolicy.DEFAULT_PROFILES_ENABLED);
+            enableRepeatCredit = builder
+                    .comment("Enables reward scaling for repeated services. When false, future qualified",
+                            "awards take 100% of their authored value, but accepted operations still",
+                            "advance the bounded accounting for the current window — an explicit operator",
+                            "bypass, never a rewrite of a decision already recorded on a deed.")
+                    .define("enableRepeatCredit", ReputationPolicy.DEFAULT_REPEAT_CREDIT_ENABLED);
+            enableFacetOpinion = builder
+                    .comment("Enables the bounded facet contribution to a villager's opinion. This is an",
+                            "adjustment to an opinion this mod resolves, never a write to MCA's own",
+                            "hearts, warmth, familiarity, fear, or legal state.")
+                    .define("enableFacetOpinion", ReputationPolicy.DEFAULT_FACET_OPINION_ENABLED);
+            maxFacetOpinionAdjustment = builder
+                    .comment("Clamps the combined facet interpretation, in opinion points. A pack's own",
+                            "authored weights apply first; this is the operator's ceiling over their sum.")
+                    .defineInRange("maxFacetOpinionAdjustment",
+                            ReputationPolicy.DEFAULT_MAX_FACET_OPINION_ADJUSTMENT, 0,
+                            ReputationPolicy.MAX_FACET_OPINION_ADJUSTMENT_LIMIT);
+            builder.pop();
+
             builder.comment("Storage bounds. These may only tighten the hard caps in the source.").push("limits");
             maxIncidentsPerCommunity = builder
                     .comment("Incidents retained for one player in one community.")
@@ -320,6 +353,10 @@ public final class McaReputationConfig {
         public final ModConfigSpec.BooleanValue mergeChangeNotifications;
         public final ModConfigSpec.BooleanValue showExactScore;
         public final ModConfigSpec.BooleanValue showIncidentDeltas;
+        public final ModConfigSpec.BooleanValue showRecognition;
+        public final ModConfigSpec.BooleanValue showKnownFor;
+        public final ModConfigSpec.BooleanValue showObserverProfile;
+        public final ModConfigSpec.BooleanValue showExactProfileValues;
 
         Client(ModConfigSpec.Builder builder) {
             builder.comment("MCA: Reputation — client presentation.",
@@ -352,6 +389,26 @@ public final class McaReputationConfig {
                             "personally makes of you beneath the village's own view.")
                     .define("showVillagerOpinion", true);
             builder.pop();
+
+            builder.comment("What the standing screen says about your public profile. Presentation only:",
+                            "the server records and interprets the same evidence whatever is hidden here.")
+                    .push("profiles");
+            showRecognition = builder
+                    .comment("Show how widely known you are in the selected village.")
+                    .define("showRecognition", true);
+            showKnownFor = builder
+                    .comment("Show the traits the village would describe you by.")
+                    .define("showKnownFor", true);
+            showObserverProfile = builder
+                    .comment("When the screen was opened from a villager, show what that villager",
+                            "personally knows you for beneath the village's own view.")
+                    .define("showObserverProfile", true);
+            showExactProfileValues = builder
+                    .comment("Show the numbers behind recognition and each trait. Off by default, and",
+                            "separate from showExactScore: the scalar score and the profile values are",
+                            "different quantities and a player may reasonably want one without the other.")
+                    .define("showExactProfileValues", false);
+            builder.pop();
         }
     }
 
@@ -376,6 +433,10 @@ public final class McaReputationConfig {
         public static volatile Boolean questsIntegration;
         public static volatile Boolean conversationsIntegration;
         public static volatile Boolean crimeIntegration;
+        public static volatile Boolean profiles;
+        public static volatile Boolean repeatCredit;
+        public static volatile Boolean facetOpinion;
+        public static volatile Integer maxFacetOpinionAdjustment;
 
         private TestOverrides() {
         }
@@ -390,6 +451,10 @@ public final class McaReputationConfig {
             questsIntegration = null;
             conversationsIntegration = null;
             crimeIntegration = null;
+            profiles = null;
+            repeatCredit = null;
+            facetOpinion = null;
+            maxFacetOpinionAdjustment = null;
         }
     }
 
@@ -615,6 +680,44 @@ public final class McaReputationConfig {
         return read(COMMON.enableCrimeIntegration::get, true);
     }
 
+    /**
+     * §20: whether profile evidence is created and profile questions are answered at all.
+     *
+     * <p>False retains every stored payload and freezes the profile clock; it is not a delete and not
+     * a reason to restore unlimited positive standing.
+     */
+    public static boolean profilesEnabled() {
+        if (TestOverrides.profiles != null) {
+            return TestOverrides.profiles;
+        }
+        return read(COMMON.enableProfiles::get, ReputationPolicy.DEFAULT_PROFILES_ENABLED);
+    }
+
+    /** §20: whether repeated services are discounted. Off is a bypass, never a historical rewrite. */
+    public static boolean repeatCreditEnabled() {
+        if (TestOverrides.repeatCredit != null) {
+            return TestOverrides.repeatCredit;
+        }
+        return read(COMMON.enableRepeatCredit::get, ReputationPolicy.DEFAULT_REPEAT_CREDIT_ENABLED);
+    }
+
+    /** §20: whether known facets contribute their one bounded term to a villager's opinion. */
+    public static boolean facetOpinionEnabled() {
+        if (TestOverrides.facetOpinion != null) {
+            return TestOverrides.facetOpinion;
+        }
+        return read(COMMON.enableFacetOpinion::get, ReputationPolicy.DEFAULT_FACET_OPINION_ENABLED);
+    }
+
+    /** §20's operator ceiling on the combined facet adjustment, in opinion points. Clamped 0..100. */
+    public static int maxFacetOpinionAdjustment() {
+        int value = TestOverrides.maxFacetOpinionAdjustment != null
+                ? TestOverrides.maxFacetOpinionAdjustment
+                : read(COMMON.maxFacetOpinionAdjustment::get,
+                        ReputationPolicy.DEFAULT_MAX_FACET_OPINION_ADJUSTMENT);
+        return Math.max(0, Math.min(ReputationPolicy.MAX_FACET_OPINION_ADJUSTMENT_LIMIT, value));
+    }
+
     public static ReputationPolicy.UndeclaredAuthorityMode coreAuthorityUndeclaredKinds() {
         return read(COMMON.coreAuthorityUndeclaredKinds::get,
                 ReputationPolicy.DEFAULT_UNDECLARED_AUTHORITY_MODE);
@@ -663,5 +766,30 @@ public final class McaReputationConfig {
 
     public static boolean showVillagerOpinion() {
         return read(CLIENT.showVillagerOpinion::get, true);
+    }
+
+    /** Presentation: whether the screen says how widely known the player is (§20). */
+    public static boolean showRecognition() {
+        return read(CLIENT.showRecognition::get, true);
+    }
+
+    /** Presentation: whether the screen names the traits the village knows the player for (§20). */
+    public static boolean showKnownFor() {
+        return read(CLIENT.showKnownFor::get, true);
+    }
+
+    /** Presentation: whether one villager's own view of the player is drawn (§20). */
+    public static boolean showObserverProfile() {
+        return read(CLIENT.showObserverProfile::get, true);
+    }
+
+    /**
+     * Presentation: whether recognition and facet magnitudes are shown as numbers (§20).
+     *
+     * <p>Off by default and deliberately independent of {@link #showExactScore()}: standing points
+     * and profile points are different quantities on different scales.
+     */
+    public static boolean showExactProfileValues() {
+        return read(CLIENT.showExactProfileValues::get, false);
     }
 }

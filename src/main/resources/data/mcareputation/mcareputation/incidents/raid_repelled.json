@@ -15,5 +15,6 @@
     "with": ["player", "subject"]
   },
   "pinned": false,
-  "max_override_abs": 40
+  "max_override_abs": 40,
+  "social_profile": "mcareputation:repelled_raid"
 }

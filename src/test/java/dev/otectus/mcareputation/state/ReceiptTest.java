@@ -9,18 +9,29 @@ import dev.otectus.mcareputation.api.ReceiptView;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.credit.CreditDecision;
 import dev.otectus.mcareputation.incident.DecayPolicy;
 import dev.otectus.mcareputation.incident.IncidentDefinition;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentSeverity;
+import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
+import dev.otectus.mcareputation.api.ResolutionResult;
+import dev.otectus.mcareputation.api.SupersedeSpec;
+import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
+import dev.otectus.mcareputation.profile.ProfileMath;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
+import dev.otectus.mcareputation.api.event.ReputationIncidentCreatedEvent;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
+import net.minecraft.nbt.CompoundTag;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.TestDeliverySeam;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -36,7 +47,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * T04, T10 and T11: exactly-once delivery across a restart, read-only lookups that change nothing at
- * all, and the two backpressure budgets (§5 F03, §5 F09).
+ * all, and the two backpressure budgets (§5 F03, §5 F09) — plus the transaction contract of §11.1:
+ * what an observer can see at each stage boundary, and what a failure at each boundary leaves behind.
  */
 class ReceiptTest {
 
@@ -61,8 +73,21 @@ class ReceiptTest {
     }
 
     private static void define(int delta, IncidentVisibility visibility) {
+        define(delta, visibility, DecayPolicy.NONE);
+    }
+
+    private static void define(int delta, IncidentVisibility visibility, DecayPolicy decay) {
         IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
-                TestFixtures.definition(delta, visibility, DecayPolicy.NONE)));
+                TestFixtures.definition(delta, visibility, decay)));
+    }
+
+    /** A store latched read-only the only way production can latch one: a file from a later format. */
+    private static ReputationSavedData futureFormatStore() {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("version", ReputationSavedData.FORMAT_VERSION + 1);
+        ReputationSavedData store = ReputationSavedData.loadPayload(tag);
+        assertTrue(store.isReadOnly(), "the fixture has to actually be read-only");
+        return store;
     }
 
     private static ReputationRequest request(String dedupeKey, Set<UUID> witnesses, long gameTime) {
@@ -327,5 +352,434 @@ class ReceiptTest {
         DeliveryOutcome replay = seam.deliver(IncidentDelivery.of(
                 request(null, Set.of(), 1000L), NAMESPACE, KEY));
         assertEquals(ReceiptOutcome.DUPLICATE, replay.outcome());
+    }
+
+    // ------------------------------------------------------------------
+    // §11.1 — what an observer sees at each stage boundary
+    // ------------------------------------------------------------------
+
+    /**
+     * The headline of §3.2: the receipt is filed <em>before</em> anything is published.
+     *
+     * <p>The keyed path used to publish from inside the record transaction and append the receipt
+     * afterwards. Between those two moments the operation was accepted and unrecorded, so a
+     * synchronous consumer reacting to our own event saw a deed with no receipt behind it — and if it
+     * responded by re-delivering the same operation, as a producer retrying an apparently unfinished
+     * hand-over does, it was answered by the ordinary acceptance path and got a second deed for one
+     * event. There is no such window now, and the re-entrant delivery is a duplicate.
+     */
+    @Test
+    void aSynchronousListenerSeesTheReceiptAndCannotReplayTheOperationIntoASecondDeed() {
+        List<Boolean> receiptVisible = new ArrayList<>();
+        List<ReceiptOutcome> reentrant = new ArrayList<>();
+        seam.listener(event -> {
+            if (!(event instanceof ReputationIncidentCreatedEvent) || !reentrant.isEmpty()) {
+                return;
+            }
+            receiptVisible.add(seam.findReceipt(NAMESPACE, TestFixtures.PLAYER_A, HOME, KEY).isPresent());
+            reentrant.add(seam.deliver(delivery(KEY, 1000L)).outcome());
+        });
+
+        DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+        assertEquals(ReceiptOutcome.APPLIED, outcome.outcome());
+        assertEquals(List.of(Boolean.TRUE), receiptVisible,
+                "the receipt has to be in the store before the event that announces the deed");
+        assertEquals(List.of(ReceiptOutcome.DUPLICATE), reentrant,
+                "a re-entrant delivery of the same operation is a replay, not a second award");
+        assertEquals(1, home().incidentCount(), "one logical outcome, one canonical deed");
+        assertEquals(-8, home().score());
+        assertEquals(1, seam.store().player(TestFixtures.PLAYER_A).orElseThrow().receiptCount());
+    }
+
+    /**
+     * A profiled deed commits its frozen evidence and its credit reservation inside the <em>same</em>
+     * accepted operation, and the receipt still lands before the publication (§9.4, §11.1 steps 7-9).
+     *
+     * <p>Three things are being held together here, and the order of all three is the point. The
+     * payload and the counter move with the incident and the score, so a listener cannot observe a
+     * deed whose accounting is half done; the receipt is already in the store when the event fires,
+     * so a re-entrant retry is a duplicate rather than a second award; and the re-entrant duplicate
+     * consumes no further allowance, so the second occurrence of the schedule is still available to
+     * the next genuinely different deed (I02).
+     */
+    @Test
+    void aProfiledDeliveryFreezesItsEvidenceAndConsumesItsCreditInTheAcceptedOperation() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.VILLAGE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        try {
+            List<Boolean> receiptVisible = new ArrayList<>();
+            List<Boolean> evidenceVisible = new ArrayList<>();
+            List<ReceiptOutcome> reentrant = new ArrayList<>();
+            seam.listener(event -> {
+                if (!(event instanceof ReputationIncidentCreatedEvent) || !reentrant.isEmpty()) {
+                    return;
+                }
+                receiptVisible.add(
+                        seam.findReceipt(NAMESPACE, TestFixtures.PLAYER_A, HOME, KEY).isPresent());
+                evidenceVisible.add(home().incidents().stream()
+                        .allMatch(IncidentRecord::hasProfileEvidence));
+                reentrant.add(seam.deliver(delivery(KEY, 1000L)).outcome());
+            });
+
+            DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+            assertEquals(ReceiptOutcome.APPLIED, outcome.outcome());
+            assertEquals(List.of(Boolean.TRUE), receiptVisible,
+                    "the receipt is filed before the deed is announced");
+            assertEquals(List.of(Boolean.TRUE), evidenceVisible,
+                    "and the frozen payload is already attached when the announcement goes out");
+            assertEquals(List.of(ReceiptOutcome.DUPLICATE), reentrant);
+            seam.listener(null);
+
+            IncidentRecord incident = home().incidents().iterator().next();
+            IncidentProfileEvidence evidence = incident.profileEvidence().orElseThrow();
+            assertEquals(IncidentProfileEvidence.Origin.LIVE, evidence.origin());
+            assertEquals(TestFixtures.PROFILE, evidence.profileId());
+            assertEquals(ProfileMath.subunits(6), evidence.recognition().orElseThrow().credited(),
+                    "first occurrence, full credit");
+            assertEquals(ProfileMath.subunits(8),
+                    evidence.facet(TestFixtures.FACET).orElseThrow().credited());
+            assertEquals(CreditDecision.Reason.FULL_CREDIT, evidence.credit().reason());
+            assertEquals(0, evidence.credit().groupOrdinal());
+            assertTrue(incident.profileContributes());
+            assertEquals(0L, incident.profileElapsedTicks(), "a live deed arrives unaged");
+
+            // One allowance consumed, by the accepted operation and not by the replay.
+            assertEquals(1, home().creditTrackers().groupCount());
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal());
+
+            // And it survives the restart, payload and counter together.
+            seam.reload();
+            IncidentRecord reloaded = home().incidents().iterator().next();
+            assertEquals(evidence, reloaded.profileEvidence().orElseThrow());
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal());
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * A second, genuinely different deed takes the next place in the schedule; a private one takes no
+     * public allowance at all and carries no payload (I03, §23.1's private-event fixture).
+     */
+    @Test
+    void aPrivateProfiledDeedConsumesNoPublicAllowanceAndCarriesNoEvidence() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.PRIVATE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        try {
+            DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+            assertEquals(ReceiptOutcome.ACCEPTED_NO_PUBLIC_INCIDENT, outcome.outcome());
+            IncidentRecord incident = home().incidents().iterator().next();
+            assertFalse(incident.hasProfileEvidence(),
+                    "a private deed has an authored profile and no public evidence");
+            assertEquals(0, home().creditTrackers().groupCount(),
+                    "and it spends nothing a public deed would have needed");
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * With profiles switched off, the deed is marked as having happened while they were off — and the
+     * repeat-credit window still advances (§19.1, §20).
+     *
+     * <p>Both halves matter. The distinct marker is what stops a later migration from treating this
+     * record as pre-upgrade history it could enrich: nothing was observed about it that a manifest
+     * could honestly reconstruct. And the counter still moving is what stops the switch from being a
+     * farming tool — turning profiles off, collecting, and turning them back on must not hand back an
+     * allowance, because repeat accounting is not profile display.
+     */
+    @Test
+    void aDeedAcceptedWhileProfilesAreOffIsMarkedAsSuchAndStillAdvancesTheWindow() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.VILLAGE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        seam.policy(ReputationPolicy.defaults().withProfilesEnabled(false));
+        try {
+            assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome());
+
+            IncidentProfileEvidence evidence = home().incidents().iterator().next()
+                    .profileEvidence().orElseThrow();
+            assertEquals(IncidentProfileEvidence.Origin.DISABLED_AT_OCCURRENCE, evidence.origin());
+            assertTrue(evidence.channels().isEmpty(), "nothing was computed, so nothing is claimed");
+            assertFalse(evidence.isEnrichmentCandidate(),
+                    "and it must never be mistaken for pre-upgrade history");
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal(),
+                    "the window advanced: switching profiles off is not a way to reset an allowance");
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * With repeat credit switched off, the award keeps its whole authored value and says why — and the
+     * window still advances, for the same reason as above (§20).
+     */
+    @Test
+    void aDeedAcceptedWhileRepeatCreditIsOffTakesFullValueAndStillAdvancesTheWindow() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.VILLAGE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        seam.policy(ReputationPolicy.defaults().withRepeatCreditEnabled(false));
+        try {
+            assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome());
+
+            IncidentProfileEvidence evidence = home().incidents().iterator().next()
+                    .profileEvidence().orElseThrow();
+            assertEquals(IncidentProfileEvidence.Origin.LIVE, evidence.origin());
+            assertEquals(CreditDecision.Reason.CREDIT_DISABLED, evidence.credit().reason());
+            assertTrue(evidence.credit().isFullCredit());
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal());
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /** The publication boundary: a broken listener cannot un-consume a committed operation. */
+    @Test
+    void aListenerThatThrowsAfterTheCommitCannotUnconsumeTheOperation() {
+        seam.listener(event -> {
+            throw new TestDeliverySeam.InjectedFailure("listener");
+        });
+
+        DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+        assertEquals(ReceiptOutcome.APPLIED, outcome.outcome());
+        assertTrue(outcome.receipt().isPresent(), "the receipt was already filed when the listener ran");
+        assertEquals(1, home().incidentCount());
+
+        seam.listener(null);
+        assertEquals(ReceiptOutcome.DUPLICATE, seam.deliver(delivery(KEY, 1000L)).outcome(),
+                "consumed once, and it stays consumed");
+        assertEquals(1, home().incidentCount());
+    }
+
+    /**
+     * The preflight boundary: a failure while the operation is still being staged leaves nothing at
+     * all — which is the only condition under which the contained-failure log line may honestly claim
+     * nothing was written.
+     *
+     * <p>The clock is the earliest thing the transaction touches; read two is the one inside the
+     * commit, after validation and the definition lookup.
+     */
+    @Test
+    void aFailureWhileStagingLeavesNoLedgerNoReceiptAndNoEvent() {
+        seam.failClockRead(2);
+
+        DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+        assertEquals(ReceiptOutcome.REFUSED_INVALID, outcome.outcome());
+        assertEquals(ReputationResult.Reason.ERROR, outcome.result().reason());
+        assertTrue(outcome.receipt().isEmpty(),
+                "a contained internal failure is the one refusal a producer may retry");
+        assertEquals(0, seam.store().playerCount());
+        assertEquals(0, seam.postedCount());
+        assertFalse(seam.store().isDirty());
+
+        seam.failClockRead(-1);
+        assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome(),
+                "and the retry succeeds exactly once");
+        assertEquals(1, home().incidentCount());
+    }
+
+    /**
+     * The mutation boundary. Everything that can fail now happens before the first write, so the last
+     * fallible call in the commit — the online-player lookup for the stored name — is the tightest
+     * available injection point: it throws with the admission decision already made and not one field
+     * of the ledger touched.
+     */
+    @Test
+    void aFailureAtTheLastReadBeforeTheWriteLeavesTheLedgerUntouched() {
+        assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery("first", 1000L)).outcome());
+        int score = home().score();
+        long revision = home().revision();
+        seam.clearPosted();
+        seam.failOnlinePlayerLookup(true);
+
+        DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+        assertEquals(ReceiptOutcome.REFUSED_INVALID, outcome.outcome());
+        assertEquals(ReputationResult.Reason.ERROR, outcome.result().reason());
+        assertTrue(outcome.receipt().isEmpty());
+        assertEquals(1, home().incidentCount(), "no partial deed");
+        assertEquals(score, home().score());
+        assertEquals(revision, home().revision(), "and no standing revision for a change that failed");
+        assertEquals(1, seam.store().player(TestFixtures.PLAYER_A).orElseThrow().receiptCount());
+        assertEquals(0, seam.postedCount());
+
+        seam.failOnlinePlayerLookup(false);
+        assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome());
+        assertEquals(2, home().incidentCount());
+    }
+
+    // ------------------------------------------------------------------
+    // I14 — a read-only store refuses, it does not pretend
+    // ------------------------------------------------------------------
+
+    /**
+     * Every write path this transaction owns refuses on a store latched read-only by a future save
+     * format, rather than applying the change in memory and losing it at restart.
+     *
+     * <p>The old behaviour was documented as a feature: "every mutation is still accepted by the API
+     * and simply never persisted". It is the one outcome no consumer can recover from — the toast
+     * fires, a producer files the returned incident id as proof of settlement, and the whole
+     * transaction is gone on the next restart with nobody having seen an error.
+     */
+    @Test
+    void aReadOnlyStoreRefusesEveryWritePathInsteadOfLosingItAtRestart() {
+        seam.store(futureFormatStore());
+
+        DeliveryOutcome keyed = seam.deliver(delivery(KEY, 1000L));
+        assertEquals(ReceiptOutcome.REFUSED_DISABLED, keyed.outcome(), "retryable, not terminal");
+        assertEquals(ReputationResult.Reason.DISABLED, keyed.result().reason());
+        assertTrue(keyed.receipt().isEmpty());
+
+        ReputationResult unkeyed = seam.record(request(null, Set.of(TestFixtures.VILLAGER_1), 1000L));
+        assertFalse(unkeyed.applied());
+        assertEquals(ReputationResult.Reason.DISABLED, unkeyed.reason());
+
+        ReputationResult superseding = seam.recordSuperseding(
+                request(null, Set.of(TestFixtures.VILLAGER_1), 1000L),
+                SupersedeSpec.of(UUID.randomUUID(), 200L, false));
+        assertFalse(superseding.applied());
+        assertEquals(ReputationResult.Reason.DISABLED, superseding.reason());
+
+        UUID unknownIncident = UUID.randomUUID();
+        assertEquals(ResolutionResult.Reason.DISABLED,
+                seam.resolve(TestFixtures.PLAYER_A, HOME, unknownIncident, IncidentStatus.APOLOGIZED,
+                        TestFixtures.SOURCE).reason(),
+                "and read-only is reported before not-found, because the store cannot answer either");
+        assertEquals(ResolutionResult.Reason.DISABLED,
+                seam.resolveBound(TestFixtures.PLAYER_A, HOME, unknownIncident,
+                        IncidentStatus.APOLOGIZED, TestFixtures.SOURCE, "bound:1").reason());
+
+        assertEquals(0, seam.store().playerCount(), "nothing was created on the way to refusing");
+        assertFalse(seam.store().isDirty());
+        assertEquals(0, seam.postedCount());
+    }
+
+    // ------------------------------------------------------------------
+    // §3.2 — admission is decided against the reconciled ledger
+    // ------------------------------------------------------------------
+
+    /**
+     * A ledger whose entries become evictable at {@code now} must not stay full forever.
+     *
+     * <p>Eligibility to evict is a function of age: a record is evictable once it has stopped
+     * contributing and has aged past the receipt horizon. Admission used to be checked before the
+     * transaction's reconciliation pass, so a ledger of contributions that had in fact decayed to
+     * nothing still looked live, the deed was refused — and because the refusal returned without
+     * reconciling, the next deed was refused too. Permanently, with no way out but an admin command.
+     *
+     * <p>The same delivery, the same ledger: refused at a clock where nothing has aged out, admitted
+     * at a clock where it has.
+     */
+    @Test
+    void admissionIsDecidedAfterAgingSoAFullLedgerRecoversOnItsOwn() {
+        // Two points a day to zero: eight points of assault is spent after four days.
+        define(-8, IncidentVisibility.VILLAGE, DecayPolicy.linearToZero(0L, 2));
+        int cap = McaReputationConfig.maxIncidentsPerCommunity();
+        PlayerReputationRecord player = seam.store().getOrCreatePlayer(TestFixtures.PLAYER_A);
+        CommunityReputationRecord community = player.getOrCreate(HOME);
+        for (int i = 0; i < cap; i++) {
+            community.addIncident(IncidentRecord.create(UUID.randomUUID(), TestFixtures.ASSAULT,
+                    TestFixtures.PLAYER_A, HOME, 0L, TestFixtures.SOURCE, Optional.empty(), -8,
+                    IncidentVisibility.VILLAGE, IncidentSeverity.MODERATE, List.of()));
+        }
+        community.recomputeScore(MIN, MAX);
+        assertEquals(cap, community.incidentCount());
+
+        // Two days in: every entry still carries weight, so nothing may be evicted and the refusal is
+        // the honest answer.
+        seam.gameTime(2 * DecayPolicy.TICKS_PER_DAY);
+        assertEquals(ReceiptOutcome.REFUSED_CAPACITY, seam.deliver(delivery("early", 0L)).outcome());
+        assertEquals(cap, community.incidentCount(), "no partial commit");
+
+        // Past the decay and past the receipt horizon, the same ledger has room.
+        seam.gameTime(ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS + DecayPolicy.TICKS_PER_DAY);
+        DeliveryOutcome late = seam.deliver(delivery("late", seam.gameTime()));
+
+        assertEquals(ReceiptOutcome.APPLIED, late.outcome(),
+                "aged-out history is evictable, and the deed that arrives now gets its place");
+        assertEquals(cap, community.incidentCount(), "the cap is still the cap");
+        assertTrue(community.incident(late.result().incidentId().orElseThrow()).isPresent());
+        assertEquals(-8, community.score(), "the spent history contributes nothing to the new total");
+    }
+
+    /**
+     * The other direction: aging is what creates room, so a community where aging is switched off
+     * stays full. A freeze must not be a back door that evicts protected history to make space.
+     */
+    @Test
+    void aFrozenCommunityStaysFullBecauseNothingAges() {
+        define(-8, IncidentVisibility.VILLAGE, DecayPolicy.linearToZero(0L, 2));
+        int cap = McaReputationConfig.maxIncidentsPerCommunity();
+        PlayerReputationRecord player = seam.store().getOrCreatePlayer(TestFixtures.PLAYER_A);
+        CommunityReputationRecord community = player.getOrCreate(HOME);
+        for (int i = 0; i < cap; i++) {
+            community.addIncident(IncidentRecord.create(UUID.randomUUID(), TestFixtures.ASSAULT,
+                    TestFixtures.PLAYER_A, HOME, 0L, TestFixtures.SOURCE, Optional.empty(), -8,
+                    IncidentVisibility.VILLAGE, IncidentSeverity.MODERATE, List.of()));
+        }
+        community.recomputeScore(MIN, MAX);
+        int score = community.score();
+        seam.store().setDecayImmune(HOME, true);
+
+        seam.gameTime(ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS + DecayPolicy.TICKS_PER_DAY);
+        DeliveryOutcome outcome = seam.deliver(delivery("late", seam.gameTime()));
+
+        assertEquals(ReceiptOutcome.REFUSED_CAPACITY, outcome.outcome());
+        assertEquals(cap, community.incidentCount());
+        assertEquals(score, community.score(), "a protected ledger is not aged to make room");
+        assertTrue(outcome.receipt().isEmpty(), "and the refusal stays retryable");
+    }
+
+    // ------------------------------------------------------------------
+    // §10.6 — the replay horizon is bounded, and says so
+    // ------------------------------------------------------------------
+
+    /**
+     * Beyond the retained receipt, an absent receipt is not proof that the operation never happened —
+     * it is proof that this store can no longer say. The published floor is what tells a producer to
+     * quarantine an old unacknowledged operation instead of retrying it under the same key.
+     */
+    @Test
+    void anOperationBeyondTheReceiptBudgetIsNoLongerAnswerableAsAReplay() {
+        assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome());
+        PlayerReputationRecord player = seam.store().player(TestFixtures.PLAYER_A).orElseThrow();
+        for (int i = 0; i < ReputationBounds.MAX_RECEIPTS_PER_PLAYER; i++) {
+            player.recordReceipt(new OperationReceipt(NAMESPACE, TestFixtures.PLAYER_A, HOME,
+                    "later:" + i, ReceiptOutcome.APPLIED, Optional.of(UUID.randomUUID()),
+                    2000L + i, 2000L + i));
+        }
+
+        assertTrue(seam.findReceipt(NAMESPACE, TestFixtures.PLAYER_A, HOME, KEY).isEmpty(),
+                "the oldest receipt is what the newest cost");
+        assertTrue(player.receiptFloor().orElseThrow() > 1000L,
+                "the floor is above our occurrence, which is how a producer knows to quarantine");
+
+        seam.gameTime(3000L);
+        DeliveryOutcome replay = seam.deliver(delivery(KEY, 1000L));
+
+        assertEquals(ReceiptOutcome.APPLIED, replay.outcome(),
+                "honest rather than exactly-once: past the floor this store cannot recognise the retry");
+        assertEquals(2, home().incidentCount(),
+                "which is precisely why the documented guarantee is a bounded recovery window");
     }
 }

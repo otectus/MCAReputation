@@ -2,7 +2,9 @@ package dev.otectus.mcareputation.event;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.reputation.ReconciliationService;
 import dev.otectus.mcareputation.reputation.ReputationPolicy;
+import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.server.MinecraftServer;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.config.ModConfig;
@@ -24,6 +26,12 @@ import net.neoforged.neoforge.server.ServerLifecycleHooks;
  * tell "this just changed" from "this was always so", and the whole point of the work below is that it
  * runs on the <em>transition</em>: a feature that has just been switched off has adornments left on
  * screen that nothing else will ever take down.
+ *
+ * <p>Since 0.6.0 the same argument carries {@code enableProfiles}. {@link #latch()} rereads the whole
+ * policy — which now includes §20's profile switches — and the reload, not the next query, is what
+ * records that a disabled interval was disabled. That ordering matters: {@code latch()} runs first so
+ * the transition is reported against the policy that is now in force, and a record nobody reads during
+ * the disabled interval still loses only the ticks the freeze log says were active (§12.2).
  */
 public final class ReputationConfigLifecycle {
 
@@ -68,6 +76,17 @@ public final class ReputationConfigLifecycle {
             return; // no world; there is nothing on screen to clean up
         }
         server.execute(() -> {
+            try {
+                // §12.2: the profile-aging transition has to be captured when it happens. A record
+                // nobody reads during a disabled interval cannot tell afterwards whether the interval
+                // counted, so the reload — not the next query — is what records that it did not.
+                ReconciliationService.observeProfilePolicy(policy, ReputationSavedData.get(server),
+                        server.overworld().getGameTime());
+            } catch (Throwable t) {
+                McaReputation.LOGGER.warn("[MCA: Reputation] could not record the reloaded profile "
+                        + "policy transition; profile aging falls back to what the next read observes",
+                        t);
+            }
             try {
                 StandingDisplay.applyConfigChange(server, scoreboardWas, tabListWas);
             } catch (Throwable t) {

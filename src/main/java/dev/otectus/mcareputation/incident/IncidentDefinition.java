@@ -4,6 +4,7 @@ import com.mojang.serialization.Codec;
 import com.mojang.serialization.DataResult;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import dev.otectus.mcareputation.util.StrictCodecs;
 import net.minecraft.network.chat.ComponentSerialization;
 
@@ -41,7 +42,8 @@ public record IncidentDefinition(
         boolean pinned,
         Optional<Integer> maxOverrideAbs,
         boolean retainUnwitnessed,
-        boolean allowPrivateScore) {
+        boolean allowPrivateScore,
+        Optional<ResourceLocation> socialProfile) {
 
     /** §16: caller-override types must define safe maximums; this is the default when unstated. */
     public static final int DEFAULT_MAX_OVERRIDE_ABS = 100;
@@ -55,6 +57,14 @@ public record IncidentDefinition(
 
     public static final int MAX_TAGS = 16;
     public static final int MAX_TAG_LENGTH = 48;
+
+    /**
+     * Structural ceiling on the length of a {@code social_profile} reference (§9.6: "reject malformed
+     * resource IDs"). {@link ResourceLocation} itself bounds the character set but not the length, and
+     * this id is copied into the frozen profile evidence on every accepted deed, so an unbounded one
+     * would be an unbounded per-incident string in the save file.
+     */
+    public static final int MAX_SOCIAL_PROFILE_ID_LENGTH = 256;
 
     public static final Codec<IncidentDefinition> CODEC = RecordCodecBuilder
             .<IncidentDefinition>create(instance -> instance.group(
@@ -85,7 +95,13 @@ public record IncidentDefinition(
                     StrictCodecs.strictOptional(Codec.BOOL, "retain_unwitnessed", false)
                             .forGetter(IncidentDefinition::retainUnwitnessed),
                     StrictCodecs.strictOptional(Codec.BOOL, "allow_private_score", false)
-                            .forGetter(IncidentDefinition::allowPrivateScore)
+                            .forGetter(IncidentDefinition::allowPrivateScore),
+                    // §9.1: the one optional reference that attaches a social profile to this deed.
+                    // Absent means no new recognition and no facet evidence — never a severity-derived
+                    // default (§7.1). The referenced profile is resolved by the reload's
+                    // cross-validation, not here: a definition must stay parse-safe on its own.
+                    StrictCodecs.strictOptional(ResourceLocation.CODEC, "social_profile")
+                            .forGetter(IncidentDefinition::socialProfile)
             ).apply(instance, IncidentDefinition::new))
             .flatXmap(IncidentDefinition::validate, IncidentDefinition::validate);
 
@@ -101,6 +117,30 @@ public record IncidentDefinition(
         gossip = gossip == null ? GossipSpec.NONE : gossip;
         retentionTicks = retentionTicks == null ? Optional.<Long>empty() : retentionTicks;
         maxOverrideAbs = maxOverrideAbs == null ? Optional.<Integer>empty() : maxOverrideAbs;
+        socialProfile = socialProfile == null ? Optional.<ResourceLocation>empty() : socialProfile;
+    }
+
+    /**
+     * The pre-0.6.0 shape, kept so every existing caller and test compiles unchanged (§9.1: "preserve
+     * old construction paths where practical with a delegating constructor"). A definition built this
+     * way carries no social profile, which is exactly the documented default for a definition that
+     * does not mention one.
+     */
+    public IncidentDefinition(Component display, int defaultDelta, IncidentVisibility visibility,
+                              IncidentSeverity severity, List<String> tags,
+                              Optional<Long> retentionTicks, DecayPolicy decay,
+                              ResolutionPolicy resolution, GossipSpec gossip, boolean pinned,
+                              Optional<Integer> maxOverrideAbs, boolean retainUnwitnessed,
+                              boolean allowPrivateScore) {
+        this(display, defaultDelta, visibility, severity, tags, retentionTicks, decay, resolution,
+                gossip, pinned, maxOverrideAbs, retainUnwitnessed, allowPrivateScore, Optional.empty());
+    }
+
+    /** This definition with its social profile replaced; used by the reload's lenient sanitisation. */
+    public IncidentDefinition withSocialProfile(Optional<ResourceLocation> profile) {
+        return new IncidentDefinition(display, defaultDelta, visibility, severity, tags, retentionTicks,
+                decay, resolution, gossip, pinned, maxOverrideAbs, retainUnwitnessed, allowPrivateScore,
+                profile);
     }
 
     private static DataResult<IncidentDefinition> validate(IncidentDefinition def) {
@@ -125,6 +165,17 @@ public record IncidentDefinition(
         }
         if (def.retentionTicks.isPresent() && def.retentionTicks.get() < 0L) {
             return DataResult.error(() -> "retention_ticks must be >= 0, got " + def.retentionTicks.get());
+        }
+        if (def.socialProfile.isPresent()) {
+            String reference = def.socialProfile.get().toString();
+            if (reference.length() > MAX_SOCIAL_PROFILE_ID_LENGTH) {
+                return DataResult.error(() -> "social_profile id must be at most "
+                        + MAX_SOCIAL_PROFILE_ID_LENGTH + " characters, got " + reference.length());
+            }
+            // Whether the referenced profile exists is a cross-registry question and belongs to the
+            // reload's validation pass, which sees all four new registries at once (§9.6). A
+            // definition must stay parse-safe on its own: rejecting it here would mean a pack could
+            // not be loaded in any order that did not put profiles first.
         }
         return DataResult.success(def);
     }
@@ -163,7 +214,7 @@ public record IncidentDefinition(
      * The stored record keeps its own delta, status, and contribution; only presentation degrades, so
      * removing a pack never silently changes anybody's score.
      */
-    public static IncidentDefinition unknown(net.minecraft.resources.ResourceLocation id) {
+    public static IncidentDefinition unknown(ResourceLocation id) {
         return new IncidentDefinition(
                 Component.translatable("mcareputation.incident.unknown", id.toString()),
                 0,

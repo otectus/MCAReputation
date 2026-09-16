@@ -108,6 +108,59 @@ class CoreAuthorityTest {
     }
 
     // ------------------------------------------------------------------
+    // One producer per kind (§16.3)
+    // ------------------------------------------------------------------
+
+    @Test
+    void twoAuthoritiesClaimingOneKindAreReportedOncePerKind() {
+        CoreIncidentAuthorities.register(new DeclaringAuthority("crime",
+                EnumSet.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT, CoreIncidentKind.MCA_VILLAGER_KILL)));
+        assertTrue(CoreIncidentAuthorities.overlappingClaimsLogged().isEmpty(),
+                "the first claimant overlaps nobody");
+
+        CoreIncidentAuthorities.register(new DeclaringAuthority("other_crime",
+                EnumSet.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT)));
+        assertEquals(Set.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT),
+                CoreIncidentAuthorities.overlappingClaimsLogged(),
+                "only the kind they actually share is ambiguous");
+
+        CoreIncidentAuthorities.register(new DeclaringAuthority("third_crime",
+                EnumSet.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT)));
+        assertEquals(Set.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT),
+                CoreIncidentAuthorities.overlappingClaimsLogged(),
+                "once per kind, not once per registration");
+    }
+
+    @Test
+    void authoritiesWithDisjointDeclarationsAreNotReportedAsOverlapping() {
+        CoreIncidentAuthorities.register(new DeclaringAuthority("crime",
+                EnumSet.of(CoreIncidentKind.MCA_VILLAGER_ASSAULT)));
+        CoreIncidentAuthorities.register(new DeclaringAuthority("raids",
+                EnumSet.of(CoreIncidentKind.MCA_RAID_REPELLED)));
+        assertTrue(CoreIncidentAuthorities.overlappingClaimsLogged().isEmpty(),
+                "one producer each is exactly what §16.3 asks for");
+    }
+
+    @Test
+    void anUndeclaredAuthorityIsComparedOnTheKindsItCouldStillBeTrustedWith() {
+        CoreIncidentAuthorities.register(new LegacyAuthority("legacy_crime"));
+        CoreIncidentAuthorities.register(new DeclaringAuthority("crime",
+                EnumSet.of(CoreIncidentKind.MCA_VILLAGER_KILL, CoreIncidentKind.MCA_VILLAGER_RESCUE)));
+        assertEquals(Set.of(CoreIncidentKind.MCA_VILLAGER_KILL),
+                CoreIncidentAuthorities.overlappingClaimsLogged(),
+                "a blanket claim is only honoured for assault and killing, so only killing overlaps");
+    }
+
+    @Test
+    void anAuthorityThatCannotDeliverHandsTheKindBackWhoeverElseIsRegistered() {
+        LegacyAuthority disabled = new LegacyAuthority("legacy_crime");
+        disabled.deliverable = false;
+        CoreIncidentAuthorities.register(disabled);
+        assertTrue(claimedUnder(DEFAULT_POLICY).isEmpty(),
+                "canDeliver is the stronger of the two questions: owning is not filing");
+    }
+
+    // ------------------------------------------------------------------
     // T01 — the legacy claim, kind by kind
     // ------------------------------------------------------------------
 

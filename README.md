@@ -32,14 +32,24 @@ something different: what a **village** thinks of you, and *why*.
   a single tick of background processing.
 - **Amends.** A deed can be apologised for, atoned for, or forgiven. The penalty softens; the record
   stays. That is the point.
+- **A public profile.** Standing says how much a village likes you. A profile says what it knows you
+  **for** — brave, generous, violent — and **how widely** you are known there, on a separate ladder
+  from unknown up to famous. The two are independent on purpose: you can be famous for the wrong
+  things, or quietly well-regarded and recognised by nobody. What a village is able to say about you
+  fades on its own authored clocks, not standing's, so a deed can stop counting against your score
+  long before it stops being what you are known for.
+- **Repeated services are worth less.** The third rescue in a fortnight earns a fraction of the
+  first, per village and per beneficiary. Wrongdoing is never discounted: a second assault costs
+  exactly what the first one did.
 
 ## What it deliberately does not do
 
 No hearts replacement. No per-villager *stored* reputation (villagers have personal opinions derived
 from what they witnessed or heard, never a separate score). No guards, fines, exile, or bounties. No
-trade-price rewriting. No global fame. No AI text generation, no telemetry, no network calls. Routine
-trading, gifts, and repeated conversation clicks earn nothing at all — those are farmable, and they
-belong to systems that already own them.
+trade-price rewriting. No global fame — a profile is per village, and "how widely known" means within
+that village. No AI text generation, no telemetry, no network calls. Routine trading, gifts, and
+repeated conversation clicks earn nothing at all — those are farmable, and they belong to systems
+that already own them.
 
 ## Installing
 
@@ -81,6 +91,15 @@ visibility note — known only to those it involved, seen by whoever witnessed i
 village — and, once a deed has decayed, softened, or been absorbed by a later one, shows both what it was
 originally worth and what it counts for now.
 
+Above the ledger, two compact lines say how well known you are in that village and what for. A
+**Details** button expands a list of the traits behind it with how many deeds support and oppose each
+one — collapsed every time you open the screen, and expanding it asks the server for nothing, because
+the details arrived with the standing. When the screen is opened from a villager, it also says what
+*that villager* knows you for, filtered by what they have actually seen or heard: a resident who has
+not heard yet says so rather than reciting the village's view. If a village's memory of you is
+incomplete — because the world predates this feature — the screen says so, and never as "nobody here
+knows you". Each of those lines has a client-side switch, and none of them reaches the server.
+
 ## Automatic deeds and who detects them
 
 Six things are detected without being asked: harming an MCA villager, killing one, saving one from the
@@ -98,8 +117,10 @@ honoured for those; one that claims detection without declaring anything falls u
 `/mcareputation debug authorities` shows exactly who is claiming what, and why an unavailable claim isn't
 being honoured.
 
-A companion can also ask `McaReputationApi.capabilities(server)` for a snapshot of what this build
-supports — its API version, whether decay and per-villager opinion are enabled, which optional operations
+A companion can also ask `McaReputationApi.capabilities(server)` — or
+`McaReputationApi.profileCapabilities(server)` for the profile half, which additionally reports whether
+profile content is currently published and how complete the world's history is — for a snapshot of
+what this build supports — its API version, whether decay and per-villager opinion are enabled, which optional operations
 exist as a set of feature strings, which kinds this mod is still detecting itself, and who claims the
 rest — instead of inferring feature support from a version number alone.
 
@@ -125,7 +146,15 @@ needs permission level 2, and every change is written to the server log with who
 /mcareputation debug receipts <player> [community]     delivery receipts recorded for a player
 /mcareputation debug supersede <player> <community>    every incident folded into another, and by what
 /mcareputation debug quarantine                        malformed save entries and read-only status
+/mcareputation debug profile <player> <community>      the stored profile, its evidence and origins
+/mcareputation debug credit <player> <community>       repeat-credit windows, peeked not consumed
+/mcareputation debug profileincident <player> <community> <incident>
+/mcareputation debug profilemigration [run <budget>]   legacy enrichment coverage and progress
 ```
+
+`debug profile` is an inspecting read: running it does not age the evidence it prints. `debug credit`
+peeks at an allowance without consuming it. `debug profilemigration` reports by default and only
+mutates with an explicit `run <budget>`.
 
 Communities are written `<dimension>/<villageId>`, e.g. `minecraft:overworld/3`, or the literal `here`.
 A bare village id is deliberately not accepted: MCA numbers villages per dimension, so an unqualified

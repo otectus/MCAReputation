@@ -1,0 +1,20 @@
+{
+  "allowed_incidents": [
+    "mcareputation:situation_resolved"
+  ],
+  "recognition": {
+    "points": 4,
+    "lifetime_ticks": 1344000,
+    "resolution_mode": "recognition"
+  },
+  "facets": {
+    "mcareputation:mercy": {
+      "points": 6,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    }
+  },
+  "credit_class": "commendable",
+  "credit_policy": "mcareputation:mercy_sparing",
+  "major_evidence": false
+}

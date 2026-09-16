@@ -78,6 +78,24 @@ Each (incident, villager, community) triple hashes to its own fixed delay inside
 village learns gradually rather than all at once — with no stored per-villager knowledge and no tick
 cost. Once a villager knows something they cannot un-know it, not even by winding the clock back.
 
+## `[profiles]`
+
+Public profiles: what a village knows you **for**, as distinct from how much it likes you. The tuning
+lives in datapacks (see DATAPACK.md); these four settings switch the behaviour and bound it.
+
+| Option | Default | Range | What it does |
+|---|---|---|---|
+| `enableProfiles` | `true` | — | Master switch for profile evidence and profile queries. With this off, no new evidence is created and every profile query reports itself disabled — but **nothing is deleted**: stored payloads are retained and their profile-aging clock freezes, so turning it back on resumes where it stopped rather than paying out the disabled interval as a catch-up burst. Scalar standing continues under its own rules throughout, and repeat-credit accounting still records a decision on each accepted deed, because switching profiles off is not permission to farm. |
+| `enableRepeatCredit` | `true` | — | Whether repeated services are worth progressively less. With this off, future qualified awards take 100% of their authored value, but accepted operations **still advance** the bounded window accounting for the current window — it is an explicit operator bypass of the reduction, not a deletion of the anti-grind state that applies again the moment it is switched back on. Decisions already frozen onto past deeds never change either way. |
+| `enableFacetOpinion` | `true` | — | Whether the facets a villager knows you for contribute their one bounded term to that villager's opinion of you. This is an adjustment to an opinion *this mod* resolves; it is never a write to MCA's hearts, warmth, familiarity, fear, or legal state. With this off the interpretation still reports its basis as `DISABLED`, so a diagnostic can tell "nothing moved it" from "nothing was read". |
+| `maxFacetOpinionAdjustment` | `25` | `0 … 100` | The operator's ceiling on the combined facet term, in opinion points. A pack's own `opinion_weight_bp` applies first and this clamps their sum, so a pack cannot out-author the operator and the operator cannot make a facet matter that its pack weighted at zero. `0` switches the term off without switching its reporting off. Separate from the ±8 a Trust/Respect check ever receives: that bound is in different units and applies to what leaves the mod, not to where the opinion lands. |
+
+Three related quantities are deliberately **not** settings. Recognition's `0 … 1000` scale and a facet's
+`100`-point display ceiling are the units the stored evidence is interpreted in, so lowering either
+would reinterpret what a player already earned; and a record holding live profile evidence is never
+pruned to make room, which is a retention rule rather than a preference. Profile lifetimes and decay
+steps are authored per contribution in the datapack and frozen onto each deed for the same reason.
+
 ## `[limits]`
 
 | Option | Default | Range | What it does |
@@ -140,6 +158,22 @@ None of these change what the server records. They change what you are shown.
 | `showExactScore` | `true` | Show the number. With this off, standing is described by tier name and qualitative progress — the server's arithmetic is identical either way. |
 | `showIncidentDeltas` | `true` | Show each deed's numeric contribution in the Standing screen. |
 | `showVillagerOpinion` | `true` | When the screen was opened from a villager, show what that villager personally makes of you beneath the village's own view. |
+
+## Client — `[profiles]`
+
+What the Standing screen says about your public profile. Presentation only: the server records and
+interprets the same evidence whatever is hidden here, and none of these four reaches the server.
+
+| Option | Default | What it does |
+|---|---|---|
+| `showRecognition` | `true` | Show how widely known you are in the selected village, as its recognition ladder's own tier name. |
+| `showKnownFor` | `true` | Show the traits the village would describe you by — at most three, in the dominance order the server decided. |
+| `showObserverProfile` | `true` | When the screen was opened from a villager, show what *that villager* knows you for, how much of your history they know, and how they came to know it. A villager who has heard nothing says so; their view is never quietly replaced by the village's. |
+| `showExactProfileValues` | `false` | Show the numbers behind recognition, each trait, and a villager's own reading of them. Off by default, and deliberately separate from `showExactScore`: standing points and profile points are different quantities on different scales. |
+
+The **Details** button beside the village arrows expands one compact pane listing up to eight traits
+with their evidence counts. It starts collapsed every time the screen is opened, and expanding it
+sends nothing to the server — the details arrived with the standing.
 
 ## Playing with it turned down
 

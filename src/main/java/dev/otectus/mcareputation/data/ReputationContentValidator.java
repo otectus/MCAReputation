@@ -1,8 +1,14 @@
 package dev.otectus.mcareputation.data;
 
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.credit.CreditPolicy;
 import dev.otectus.mcareputation.incident.IncidentDefinition;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
+import dev.otectus.mcareputation.profile.FacetDefinition;
+import dev.otectus.mcareputation.profile.IncidentProfileDefinition;
+import dev.otectus.mcareputation.profile.ProfileMath;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
+import dev.otectus.mcareputation.profile.RecognitionTierSet;
 import dev.otectus.mcareputation.reputation.ReputationTier;
 import dev.otectus.mcareputation.reputation.ReputationTierSet;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
@@ -10,9 +16,12 @@ import dev.otectus.mcareputation.reputation.TitleDefinition;
 import net.minecraft.resources.ResourceLocation;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -209,6 +218,336 @@ public final class ReputationContentValidator {
                     + " or " + ReputationTiers.LEGACY_DEFAULT_ID
                     + "); the built-in ladder will be used instead"));
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Profile content (§9.6)
+    // ------------------------------------------------------------------
+
+    /** The four new registries as one candidate generation, before anything is published. */
+    public record ProfileContent(
+            Map<ResourceLocation, FacetDefinition> facets,
+            Map<ResourceLocation, RecognitionTierSet> recognitionLadders,
+            Map<ResourceLocation, IncidentProfileDefinition> profiles,
+            Map<ResourceLocation, CreditPolicy> creditPolicies) {
+
+        public static final ProfileContent EMPTY =
+                new ProfileContent(Map.of(), Map.of(), Map.of(), Map.of());
+
+        public ProfileContent {
+            facets = facets == null ? Map.of() : Map.copyOf(facets);
+            recognitionLadders = recognitionLadders == null ? Map.of() : Map.copyOf(recognitionLadders);
+            profiles = profiles == null ? Map.of() : Map.copyOf(profiles);
+            creditPolicies = creditPolicies == null ? Map.of() : Map.copyOf(creditPolicies);
+        }
+
+        public boolean isEmpty() {
+            return facets.isEmpty() && recognitionLadders.isEmpty() && profiles.isEmpty()
+                    && creditPolicies.isEmpty();
+        }
+    }
+
+    /**
+     * What cross-registry validation found, and — crucially — <b>which ids must not be published</b>.
+     *
+     * <p>§9.6 asks for two different behaviours from one pass. In strict mode any error rejects the
+     * whole generation. In lenient mode the working content has to survive: a crime definition whose
+     * optional profile reference is broken keeps scoring, with only the new attachment disabled. That
+     * is impossible to do from a list of log strings, so the rejected ids are returned explicitly and
+     * the reload removes exactly those, cascading facet rejections into the profiles that reference
+     * them so a half-consistent bundle can never reach {@link ProfileRegistryBundle}.
+     */
+    public record ProfileValidation(
+            List<Problem> problems,
+            Set<ResourceLocation> rejectedFacets,
+            Set<ResourceLocation> rejectedRecognitionLadders,
+            Set<ResourceLocation> rejectedProfiles,
+            Set<ResourceLocation> rejectedCreditPolicies,
+            Set<ResourceLocation> incidentsWithUnusableProfile) {
+
+        public static final ProfileValidation CLEAN = new ProfileValidation(List.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of());
+
+        public ProfileValidation {
+            problems = problems == null ? List.of() : List.copyOf(problems);
+            rejectedFacets = copyIds(rejectedFacets);
+            rejectedRecognitionLadders = copyIds(rejectedRecognitionLadders);
+            rejectedProfiles = copyIds(rejectedProfiles);
+            rejectedCreditPolicies = copyIds(rejectedCreditPolicies);
+            incidentsWithUnusableProfile = copyIds(incidentsWithUnusableProfile);
+        }
+
+        private static Set<ResourceLocation> copyIds(Set<ResourceLocation> ids) {
+            return ids == null ? Set.of() : Set.copyOf(ids);
+        }
+
+        public boolean hasErrors() {
+            return problems.stream().anyMatch(Problem::isError);
+        }
+
+        /** Whether anything at all has to be removed before the bundle is consistent. */
+        public boolean requiresSanitisation() {
+            return !rejectedFacets.isEmpty() || !rejectedRecognitionLadders.isEmpty()
+                    || !rejectedProfiles.isEmpty() || !rejectedCreditPolicies.isEmpty()
+                    || !incidentsWithUnusableProfile.isEmpty();
+        }
+    }
+
+    /**
+     * Validates the new profile registries against each other and against the incident definitions
+     * that select them, applying every numeric hard bound §9.6 tabulates that a single codec cannot
+     * see on its own.
+     *
+     * <p>The order matters: facets and credit policies are judged first, then profiles (which may be
+     * rejected for referencing a rejected facet or policy), then incidents (which may lose their
+     * attachment for referencing a rejected profile). Judging them in the other order would let a
+     * profile survive its own broken dependency.
+     */
+    public static ProfileValidation validateProfileContent(
+            Map<ResourceLocation, IncidentDefinition> incidents, ProfileContent content) {
+        List<Problem> problems = new ArrayList<>();
+        Set<ResourceLocation> rejectedFacets = new LinkedHashSet<>();
+        Set<ResourceLocation> rejectedLadders = new LinkedHashSet<>();
+        Set<ResourceLocation> rejectedProfiles = new LinkedHashSet<>();
+        Set<ResourceLocation> rejectedPolicies = new LinkedHashSet<>();
+        Set<ResourceLocation> unusableAttachments = new LinkedHashSet<>();
+
+        validateFacets(content, problems, rejectedFacets);
+        validateRecognitionLadders(content, problems, rejectedLadders);
+        validateCreditPolicies(content, problems, rejectedPolicies);
+        validateProfiles(content, incidents, rejectedFacets, rejectedPolicies, problems, rejectedProfiles);
+        validateProfileAttachments(content, incidents, rejectedProfiles, problems, unusableAttachments);
+
+        return new ProfileValidation(problems, rejectedFacets, rejectedLadders, rejectedProfiles,
+                rejectedPolicies, unusableAttachments);
+    }
+
+    private static void validateFacets(ProfileContent content, List<Problem> problems,
+                                       Set<ResourceLocation> rejected) {
+        // Over the bound: reject the surplus in id order rather than the whole set, so which facets
+        // survive is deterministic instead of depending on which files the pack happened to list.
+        if (content.facets().size() > ProfileRegistryBundle.MAX_FACETS) {
+            List<ResourceLocation> surplus = sortedIds(content.facets().keySet())
+                    .subList(ProfileRegistryBundle.MAX_FACETS, content.facets().size());
+            problems.add(Problem.error("too many facet definitions: " + content.facets().size()
+                    + " loaded but at most " + ProfileRegistryBundle.MAX_FACETS
+                    + " are supported; these will not be loaded: " + surplus));
+            rejected.addAll(surplus);
+        }
+        for (ResourceLocation id : sortedIds(content.facets().keySet())) {
+            FacetDefinition facet = content.facets().get(id);
+            if (facet.opinionWeightBp() == 0 && facet.personalityOverrides().isEmpty()) {
+                problems.add(Problem.warning("facet " + id + " has opinion_weight_bp 0 and no "
+                        + "personality_overrides, so it describes the player but never influences any "
+                        + "villager's opinion"));
+            }
+            if (facet.labelMinMagnitude() > facet.range().magnitude()) {
+                problems.add(Problem.error("facet " + id + " label_min_magnitude "
+                        + facet.labelMinMagnitude() + " exceeds its own range magnitude "
+                        + facet.range().magnitude() + "; the label could never appear"));
+                rejected.add(id);
+            }
+        }
+    }
+
+    private static void validateRecognitionLadders(ProfileContent content, List<Problem> problems,
+                                                   Set<ResourceLocation> rejected) {
+        if (content.recognitionLadders().size() > ProfileRegistryBundle.MAX_RECOGNITION_LADDERS) {
+            List<ResourceLocation> surplus = sortedIds(content.recognitionLadders().keySet())
+                    .subList(ProfileRegistryBundle.MAX_RECOGNITION_LADDERS,
+                            content.recognitionLadders().size());
+            problems.add(Problem.error("too many recognition ladders: "
+                    + content.recognitionLadders().size() + " loaded but at most "
+                    + ProfileRegistryBundle.MAX_RECOGNITION_LADDERS + " are supported; these will not "
+                    + "be loaded: " + surplus));
+            rejected.addAll(surplus);
+        }
+        for (ResourceLocation id : sortedIds(content.recognitionLadders().keySet())) {
+            RecognitionTierSet ladder = content.recognitionLadders().get(id);
+            // The codec enforces the zero floor and strict ascent; what it cannot see is a ladder
+            // whose top rung is unreachable because recognition saturates below it.
+            RecognitionTierSet.Tier top = ladder.tiers().get(ladder.size() - 1);
+            if (top.threshold() > ProfileMath.MAX_RECOGNITION) {
+                problems.add(Problem.error("recognition ladder " + id + " tier '" + top.id()
+                        + "' has threshold " + top.threshold() + ", above the maximum recognition "
+                        + ProfileMath.MAX_RECOGNITION + "; nobody could ever reach it"));
+                rejected.add(id);
+            }
+        }
+        if (!content.recognitionLadders().isEmpty()
+                && !content.recognitionLadders().containsKey(RecognitionTierSet.DEFAULT_ID)) {
+            problems.add(Problem.warning("no default recognition ladder is defined ("
+                    + RecognitionTierSet.DEFAULT_ID + "); the built-in ladder will be used instead"));
+        }
+    }
+
+    private static void validateCreditPolicies(ProfileContent content, List<Problem> problems,
+                                               Set<ResourceLocation> rejected) {
+        Map<ResourceLocation, ResourceLocation> firstFileForGroup = new HashMap<>();
+        Map<ResourceLocation, CreditPolicy> firstPolicyForGroup = new HashMap<>();
+
+        for (ResourceLocation id : sortedIds(content.creditPolicies().keySet())) {
+            CreditPolicy policy = content.creditPolicies().get(id);
+            ResourceLocation group = policy.group();
+            if (!id.equals(group)) {
+                problems.add(Problem.warning("credit policy " + id + " declares group " + group
+                        + "; trackers are keyed by the group, so the file id is only documentation"));
+            }
+            ResourceLocation existingFile = firstFileForGroup.putIfAbsent(group, id);
+            if (existingFile == null) {
+                firstPolicyForGroup.put(group, policy);
+                continue;
+            }
+            // §9.6: contradictory definitions sharing a group are rejected. Two identical files are
+            // harmless (a pack and its compatibility alias), two different ones are ambiguous — and
+            // guessing which wins would silently change how much farming a server permits.
+            if (!firstPolicyForGroup.get(group).equals(policy)) {
+                problems.add(Problem.error("credit policies " + existingFile + " and " + id
+                        + " both define group " + group + " with different schedules; one group has one "
+                        + "allowance and the definitions contradict each other"));
+                rejected.add(existingFile);
+                rejected.add(id);
+            }
+        }
+
+        Set<ResourceLocation> groups = new LinkedHashSet<>(firstFileForGroup.keySet());
+        if (groups.size() > ProfileRegistryBundle.MAX_CREDIT_GROUPS) {
+            problems.add(Problem.error("too many credit groups in one content generation: "
+                    + groups.size() + " but at most " + ProfileRegistryBundle.MAX_CREDIT_GROUPS
+                    + " are supported"));
+            rejected.addAll(content.creditPolicies().keySet());
+        }
+
+        for (ResourceLocation id : sortedIds(content.creditPolicies().keySet())) {
+            CreditPolicy policy = content.creditPolicies().get(id);
+            // §10.2: an honest description of what a nonzero tail is. Advice, not an error — it is a
+            // legitimate pack-author choice, just not one that should be made by accident.
+            if (policy.permitsIndefiniteCredit()) {
+                problems.add(Problem.warning("credit policy " + id + " has tail_bp " + policy.tailBp()
+                        + ", so repeating this deed forever keeps paying " + policy.tailBp() / 100
+                        + "% of full credit; shipped policies use a zero tail"));
+            }
+            policy.subjectLimit().ifPresent(limit -> {
+                if (!IDENTIFIER.matcher(limit.role()).matches()) {
+                    problems.add(Problem.error("credit policy " + id + " subject_limit.role '"
+                            + limit.role() + "' is not a valid identifier (lowercase a-z, 0-9, '_', "
+                            + "'.', '-', at most 64 chars)"));
+                    rejected.add(id);
+                }
+            });
+        }
+    }
+
+    private static void validateProfiles(ProfileContent content,
+                                         Map<ResourceLocation, IncidentDefinition> incidents,
+                                         Set<ResourceLocation> rejectedFacets,
+                                         Set<ResourceLocation> rejectedPolicies,
+                                         List<Problem> problems,
+                                         Set<ResourceLocation> rejected) {
+        if (content.profiles().size() > ProfileRegistryBundle.MAX_PROFILES) {
+            List<ResourceLocation> surplus = sortedIds(content.profiles().keySet())
+                    .subList(ProfileRegistryBundle.MAX_PROFILES, content.profiles().size());
+            problems.add(Problem.error("too many incident profiles: " + content.profiles().size()
+                    + " loaded but at most " + ProfileRegistryBundle.MAX_PROFILES
+                    + " are supported; these will not be loaded: " + surplus));
+            rejected.addAll(surplus);
+        }
+
+        for (ResourceLocation id : sortedIds(content.profiles().keySet())) {
+            IncidentProfileDefinition profile = content.profiles().get(id);
+
+            profile.facets().forEach((facetId, contribution) -> {
+                FacetDefinition facet = content.facets().get(facetId);
+                if (facet == null || rejectedFacets.contains(facetId)) {
+                    problems.add(Problem.error("incident profile " + id + " contributes to facet "
+                            + facetId + ", which no loaded datapack defines; the profile cannot be "
+                            + "used"));
+                    rejected.add(id);
+                    return;
+                }
+                // §9.6: an authored facet value must respect the facet's own range and sign. A +8
+                // on a facet that tops out at +5 is a promise the read model will clamp away, and a
+                // negative value on a unipolar facet is a claim the facet cannot express at all.
+                if (!facet.range().permits(contribution.points())) {
+                    problems.add(Problem.error("incident profile " + id + " contributes "
+                            + contribution.points() + " to facet " + facetId + ", outside that "
+                            + "facet's authored range " + facet.range().min() + ".."
+                            + facet.range().max()));
+                    rejected.add(id);
+                }
+            });
+
+            profile.creditPolicy().ifPresent(policyId -> {
+                if (!content.creditPolicies().containsKey(policyId)
+                        || rejectedPolicies.contains(policyId)) {
+                    problems.add(Problem.error("incident profile " + id + " names credit_policy "
+                            + policyId + ", which no loaded datapack defines; without it the repeat "
+                            + "limit the profile promises would not exist"));
+                    rejected.add(id);
+                }
+            });
+
+            // §7.3: recognition survives apology, atonement and forgiveness. An evaluative recognition
+            // would fade the fact that people know who you are because you said sorry.
+            profile.recognition().ifPresent(recognition -> {
+                if (recognition.resolutionMode()
+                        == IncidentProfileDefinition.ResolutionMode.EVALUATIVE) {
+                    problems.add(Problem.warning("incident profile " + id + " authors recognition with "
+                            + "resolution_mode 'evaluative'; recognition normally survives apology and "
+                            + "atonement (§7.3), so 'recognition' is almost certainly meant"));
+                }
+            });
+
+            for (ResourceLocation allowed : profile.allowedIncidents()) {
+                if (!incidents.containsKey(allowed)) {
+                    problems.add(Problem.warning("incident profile " + id + " allows incident "
+                            + allowed + ", which no loaded datapack defines; the entry has no effect "
+                            + "until that incident exists"));
+                }
+            }
+        }
+    }
+
+    private static void validateProfileAttachments(ProfileContent content,
+                                                   Map<ResourceLocation, IncidentDefinition> incidents,
+                                                   Set<ResourceLocation> rejectedProfiles,
+                                                   List<Problem> problems,
+                                                   Set<ResourceLocation> unusable) {
+        for (ResourceLocation id : sortedIds(incidents.keySet())) {
+            IncidentDefinition definition = incidents.get(id);
+            if (definition.socialProfile().isEmpty()) {
+                continue;
+            }
+            ResourceLocation profileId = definition.socialProfile().get();
+            IncidentProfileDefinition profile = content.profiles().get(profileId);
+            if (profile == null || rejectedProfiles.contains(profileId)) {
+                problems.add(Problem.error("incident " + id + " names social_profile " + profileId
+                        + ", which is not available; the incident keeps working and contributes no "
+                        + "profile evidence"));
+                unusable.add(id);
+                continue;
+            }
+            // §9.5: selection must be compatible with the authored source allowlist, or a generic
+            // completion event could quietly borrow a specific heroic profile.
+            if (!profile.permits(id)) {
+                problems.add(Problem.error("incident " + id + " names social_profile " + profileId
+                        + ", whose allowed_incidents does not list it"));
+                unusable.add(id);
+                continue;
+            }
+            // I03: a private deed has no public audience, so it can carry no public profile. Advice,
+            // not an error: the reference is legal and simply contributes nothing (§13.1).
+            if (definition.visibility() == IncidentVisibility.PRIVATE) {
+                problems.add(Problem.warning("incident " + id + " is private and names social_profile "
+                        + profileId + "; a private deed contributes no public recognition or facets"));
+            }
+        }
+    }
+
+    private static List<ResourceLocation> sortedIds(java.util.Collection<ResourceLocation> ids) {
+        List<ResourceLocation> sorted = new ArrayList<>(ids);
+        sorted.sort(Comparator.comparing(ResourceLocation::toString));
+        return sorted;
     }
 
     /** Keeps the identifier rule in one place for tests. */

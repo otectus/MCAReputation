@@ -6,26 +6,28 @@ import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
+import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Optional;
 import java.util.UUID;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -62,6 +64,13 @@ class GoldenSavedDataCompatibilityTest {
     private static final UUID INC_FOLDED = UUID.fromString("55555555-5555-5555-5555-555555555555");
     private static final UUID INC_SUCCESSOR = UUID.fromString("66666666-6666-6666-6666-666666666666");
 
+    /** The format-3 fixture's own ids, from the Forge fixture's {@code profiledLedger()}. */
+    private static final UUID RESCUE_V3 = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    private static final ResourceLocation BRAVERY =
+            ResourceLocation.fromNamespaceAndPath("mcareputation", "bravery");
+    private static final ResourceLocation CREDIT_GROUP =
+            ResourceLocation.fromNamespaceAndPath("mcareputation", "rescue_service");
+
     private static final CommunityKey OVERWORLD_3 = new CommunityKey(
             ResourceLocation.fromNamespaceAndPath("minecraft", "overworld"), 3);
     private static final CommunityKey NETHER_3 = new CommunityKey(
@@ -73,6 +82,15 @@ class GoldenSavedDataCompatibilityTest {
      */
     private static final Path FIXTURE_V2 = TestPaths.testResources()
             .resolve("fixtures/mcareputation-format-2-1.20.1.nbt");
+
+    /**
+     * The third Forge fixture, written by the Forge 0.6.0 serializer at format 3 and copied here
+     * byte for byte. This is the strongest of the three statements: format 3 is where the profile
+     * layer first reaches other people's disks, and it has to reach them as the same bytes on both
+     * loaders or a world stops being able to cross.
+     */
+    private static final Path FIXTURE_V3 = TestPaths.testResources()
+            .resolve("fixtures/mcareputation-format-3-1.20.1.nbt");
 
     private static final UUID V2_ASSAULT =
             UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -95,6 +113,19 @@ class GoldenSavedDataCompatibilityTest {
         return ReputationSavedData.loadPayload(readFixture());
     }
 
+    /** The format-3 fixture, likewise uncompressed so the two loaders compare over NBT alone. */
+    private static CompoundTag readFixtureV3() throws IOException {
+        return readUncompressed(FIXTURE_V3, "format-3");
+    }
+
+    private static CompoundTag readUncompressed(Path fixture, String what) throws IOException {
+        assertTrue(Files.isRegularFile(fixture),
+                () -> "the golden " + what + " fixture is missing from " + fixture.toAbsolutePath());
+        try (DataInputStream in = new DataInputStream(Files.newInputStream(fixture))) {
+            return NbtIo.read(in, NbtAccounter.unlimitedHeap());
+        }
+    }
+
     // ------------------------------------------------------------------
     // The format itself
     // ------------------------------------------------------------------
@@ -103,24 +134,25 @@ class GoldenSavedDataCompatibilityTest {
     void theFixtureStillDeclaresFormatVersionOne() throws IOException {
         assertEquals(1, readFixture().getInt("version"),
                 "the fixture is evidence of what 1.20.1 wrote; it must never be regenerated");
-        assertEquals(2, ReputationSavedData.FORMAT_VERSION,
-                "0.5.0 moved the schema to v2 (receipts and per-community revisions)");
+        assertEquals(3, ReputationSavedData.FORMAT_VERSION,
+                "the schema number tracks the Forge build exactly; the loader port does not move it");
         assertEquals("mcareputation", ReputationSavedData.DATA_NAME,
                 "the data file name is part of the save's identity and must not move");
     }
 
     /**
      * The stored version is read from the file, then carried forward. A v1 file is recognised as v1
-     * and migrated in place, which is why {@code loadedVersion()} reports v2 afterwards.
+     * and migrated in place, which is why {@code loadedVersion()} reports the current format
+     * afterwards — 3 since 0.6.0, and the upgrade runs in one step.
      */
     @Test
     void loadingReportsTheStoredVersionRatherThanAssumingIt() throws IOException {
-        assertEquals(2, loadGolden().loadedVersion(),
+        assertEquals(ReputationSavedData.FORMAT_VERSION, loadGolden().loadedVersion(),
                 "a v1 file is migrated on load, so the live store is at the current format");
     }
 
     // ------------------------------------------------------------------
-    // The v1 to v2 migration
+    // The v1 migration
     // ------------------------------------------------------------------
 
     /**
@@ -166,9 +198,89 @@ class GoldenSavedDataCompatibilityTest {
 
         ReputationSavedData twice =
                 ReputationSavedData.loadPayload(once.savePayload(new CompoundTag()));
-        assertEquals(2, twice.loadedVersion());
+        assertEquals(ReputationSavedData.FORMAT_VERSION, twice.loadedVersion());
         assertEquals(receipts, twice.player(ADA).orElseThrow().receipts().size(),
-                "a v2 file must not be migrated again");
+                "an already-migrated file must not be migrated again");
+    }
+
+    // ------------------------------------------------------------------
+    // Format 3: the profile layer crossing loaders
+    // ------------------------------------------------------------------
+
+    /**
+     * The whole of invariant 2 at the current format: the Forge 0.6.0 serializer's own output is
+     * byte-for-byte what this build writes for the same ledger.
+     *
+     * <p>{@code GoldenSavedDataTest} builds that ledger from loader-neutral state and asserts the
+     * bytes; this test asserts the other half, that the file it is comparing against is the Forge
+     * file and not a local regeneration. The digest is checked rather than the name, because a
+     * regenerated file keeps its name.
+     */
+    @Test
+    void theForgeFormatThreeFixtureIsTheFileForgeWrote() throws IOException {
+        assertTrue(Files.isRegularFile(FIXTURE_V3),
+                () -> "the Forge format-3 fixture is missing from " + FIXTURE_V3.toAbsolutePath());
+        assertEquals("1a906772662000bc0331c6ba358d21cb1880b1036356a900acd3473a233ec758",
+                sha256(FIXTURE_V3),
+                "this file is evidence copied from the Forge branch; never regenerate it here");
+        assertEquals(3, readFixtureV3().getInt("version"));
+        assertEquals(ReputationSavedData.FORMAT_VERSION, readFixtureV3().getInt("version"));
+    }
+
+    /**
+     * Every format-3 addition survives the crossing with its exact stored quantities.
+     *
+     * <p>The frozen subunits are the point (§9.4): an authored quantity is copied onto an accepted
+     * deed forever, so a loader that read them back even slightly differently would be handing the
+     * player a different history rather than a rounding error.
+     */
+    @Test
+    void theProfileLayerCrossesLoadersIntact() throws IOException {
+        ReputationSavedData loaded = ReputationSavedData.loadPayload(readFixtureV3());
+        assertEquals(3, loaded.loadedVersion(), "nothing is migrated: this is already format 3");
+        assertFalse(loaded.isReadOnly());
+
+        CommunityReputationRecord riverbend = loaded.player(ADA).orElseThrow()
+                .community(OVERWORLD_3).orElseThrow();
+        IncidentRecord rescue = riverbend.incident(RESCUE_V3).orElseThrow();
+        IncidentProfileEvidence live = rescue.profileEvidence().orElseThrow();
+        assertEquals(IncidentProfileEvidence.Origin.LIVE, live.origin());
+        assertEquals(48_000L, rescue.profileElapsedTicks(), "the second clock is persisted");
+        assertEquals(500L, rescue.lastProfileObservedGameTime());
+
+        IncidentProfileEvidence.Channel bravery = live.facet(BRAVERY).orElseThrow();
+        assertEquals(80_000L, bravery.authored(), "authored 8 points, in subunits");
+        assertEquals(40_000L, bravery.credited(), "credited at 50%");
+        assertEquals(37_142L, bravery.current(), "aged two of its 28 days");
+        assertEquals(5000, live.credit().effectiveBp());
+
+        assertTrue(riverbend.creditTrackers().trackedGroups().contains(CREDIT_GROUP),
+                "the bounded anti-farm counters cross too, or an allowance is handed back");
+        assertEquals(1, riverbend.creditTrackers().groupCount());
+        assertEquals(1, riverbend.creditTrackers().subjectCount());
+        assertFalse(riverbend.creditTrackers().isOverflowing());
+
+        assertTrue(loaded.isProfileMigrationPending(), "an unfinished cursor stays unfinished");
+        assertEquals(ProfileMigrationState.Coverage.MIGRATING, loaded.profileCoverage());
+    }
+
+    /** Re-saving the Forge format-3 file must not move a byte, in either direction. */
+    @Test
+    void reSavingTheForgeFormatThreeFileIsAFixedPoint() throws IOException {
+        CompoundTag fixture = readFixtureV3();
+        CompoundTag rewritten = ReputationSavedData.loadPayload(fixture)
+                .savePayload(new CompoundTag());
+        assertEquals(fixture, rewritten,
+                "a save that crossed loaders must be writable back as the same tree");
+    }
+
+    private static String sha256(Path file) throws IOException {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(Files.readAllBytes(file)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is mandated by the JLS", e);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -297,12 +409,12 @@ class GoldenSavedDataCompatibilityTest {
 
     /**
      * Loading a 1.20.1 save and writing it back out must not lose or renumber anything. It now
-     * declares format 2, because the load migrated it; the fixture on disk is untouched.
+     * declares the current format, because the load migrated it; the fixture on disk is untouched.
      */
     @Test
-    void reSavingLosesNothingAndUpgradesToFormatTwo() throws IOException {
+    void reSavingLosesNothingAndWritesTheUpgradedFormat() throws IOException {
         CompoundTag rewritten = loadGolden().savePayload(new CompoundTag());
-        assertEquals(2, rewritten.getInt("version"));
+        assertEquals(ReputationSavedData.FORMAT_VERSION, rewritten.getInt("version"));
 
         ReputationSavedData reloaded = ReputationSavedData.loadPayload(rewritten);
         assertEquals(2, reloaded.playerCount());
@@ -343,17 +455,13 @@ class GoldenSavedDataCompatibilityTest {
         }
     }
 
-    private static byte[] encode(CompoundTag tag) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (DataOutputStream data = new DataOutputStream(out)) {
-            NbtIo.write(tag, data);
-        }
-        return out.toByteArray();
-    }
-
     /**
      * A v2 ledger written by Forge 1.20.1 reads on NeoForge 1.21.1 with exactly the totals the Forge
      * {@code GoldenSavedDataTest} asserts against it. Same numbers, other loader.
+     *
+     * <p>Since 0.6.0 it also takes the v2-to-v3 upgrade here, and takes it exactly as the Forge
+     * build would: the schema number moves, no total does. This was a "nothing left to migrate"
+     * assertion until format 3 existed.
      */
     @Test
     void theFormatTwoFixtureLoadsWithTheExpectedTotals() throws IOException {
@@ -361,7 +469,10 @@ class GoldenSavedDataCompatibilityTest {
         ReputationSavedData loaded = ReputationSavedData.loadPayload(readFixtureV2());
 
         assertEquals(2, loaded.playerCount());
+        assertEquals(3, loaded.loadedVersion(),
+                "a format-2 file is upgraded to 3 in place, exactly as the Forge build upgrades it");
         assertEquals(ReputationSavedData.FORMAT_VERSION, loaded.loadedVersion());
+        assertFalse(loaded.isReadOnly(), "format 2 is a past format of this build, not a future one");
         assertEquals(-25, loaded.score(ADA, OVERWORLD_3));
         assertEquals(60, loaded.score(ADA, NETHER_3));
         assertEquals(15, loaded.score(ADA, STONEBROOK));
@@ -383,13 +494,25 @@ class GoldenSavedDataCompatibilityTest {
     }
 
     /**
-     * The cross-loader claim itself: re-saving that file on NeoForge produces the identical bytes.
-     * A difference here is a real incompatibility in the schema, never a reason to rewrite the file.
+     * The cross-loader claim itself, at the current format: re-saving that file on NeoForge moves
+     * the schema number and nothing else. A difference anywhere else is a real incompatibility in
+     * the schema, never a reason to rewrite the file.
+     *
+     * <p>Raw byte identity was the 0.5.0 statement and format 3 cannot honour it — the version
+     * header legitimately differs — so the claim is made where it still means something, over the
+     * player subtrees. Every format-3 field is written only when it carries information, so a ledger
+     * with no profile content re-serializes as exactly the bytes Forge 1.20.1 wrote at format 2.
      */
     @Test
-    void reSavingTheFormatTwoFixtureMovesNoByte() throws IOException {
-        assertArrayEquals(fixtureV2Bytes(),
-                encode(ReputationSavedData.loadPayload(readFixtureV2()).savePayload(new CompoundTag())),
-                "NeoForge must write the same v2 bytes Forge 1.20.1 wrote");
+    void reSavingTheFormatTwoFixtureMovesNothingButTheSchemaNumber() throws IOException {
+        CompoundTag fixture = readFixtureV2();
+        CompoundTag rewritten = ReputationSavedData.loadPayload(readFixtureV2())
+                .savePayload(new CompoundTag());
+
+        assertEquals(3, rewritten.getInt("version"), "the v2 to v3 upgrade is the only difference");
+        assertEquals(fixture.getCompound("players"), rewritten.getCompound("players"),
+                "format 3 must add fields without moving a byte of the format-2 player subtrees");
+        assertEquals(fixture.getList("decayImmune", Tag.TAG_COMPOUND),
+                rewritten.getList("decayImmune", Tag.TAG_COMPOUND));
     }
 }

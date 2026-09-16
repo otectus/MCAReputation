@@ -9,10 +9,15 @@ import dev.otectus.mcareputation.incident.IncidentSeverity;
 import dev.otectus.mcareputation.incident.IncidentSubject;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.incident.ResolutionPolicy;
+import dev.otectus.mcareputation.credit.CreditPolicy;
+import dev.otectus.mcareputation.profile.FacetDefinition;
+import dev.otectus.mcareputation.profile.IncidentProfileDefinition;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -60,6 +65,88 @@ public final class TestFixtures {
                 Optional.of(100),
                 false,
                 false);
+    }
+
+    /** The same definition with a {@code social_profile} attached: what a profiled deed looks like. */
+    public static IncidentDefinition definition(int delta, IncidentVisibility visibility,
+                                                DecayPolicy decay, ResourceLocation socialProfile) {
+        IncidentDefinition base = definition(delta, visibility, decay);
+        return new IncidentDefinition(base.display(), base.defaultDelta(), base.visibility(),
+                base.severity(), base.tags(), base.retentionTicks(), base.decay(), base.resolution(),
+                base.gossip(), base.pinned(), base.maxOverrideAbs(), base.retainUnwitnessed(),
+                base.allowPrivateScore(), Optional.ofNullable(socialProfile));
+    }
+
+    // --- profile content ----------------------------------------------------
+
+    public static final ResourceLocation PROFILE = ResourceLocation.fromNamespaceAndPath("mcareputation", "test_profile");
+    public static final ResourceLocation FACET = ResourceLocation.fromNamespaceAndPath("mcareputation", "bravery");
+    public static final ResourceLocation CREDIT_GROUP =
+            ResourceLocation.fromNamespaceAndPath("mcareputation", "test_service");
+    public static final ResourceLocation CREDIT_POLICY =
+            ResourceLocation.fromNamespaceAndPath("mcareputation", "test_policy");
+
+    /** Whole in-game days, which is what the default decay step quantizes profile age to. */
+    public static final long DAY = 24_000L;
+
+    /**
+     * A commendable profile worth 6 recognition and 8 bravery, both {@code historical}, both with a
+     * 28-day lifetime — the §17 shipped shape, small enough to assert on exactly.
+     */
+    public static IncidentProfileDefinition profile(ResourceLocation creditPolicy) {
+        return new IncidentProfileDefinition(
+                List.of(),
+                Optional.of(new IncidentProfileDefinition.Contribution(6, 56 * DAY,
+                        IncidentProfileDefinition.ResolutionMode.RECOGNITION,
+                        IncidentProfileDefinition.ResolutionMultipliers.DEFAULT)),
+                Map.of(FACET, new IncidentProfileDefinition.Contribution(8, 28 * DAY,
+                        IncidentProfileDefinition.ResolutionMode.HISTORICAL,
+                        IncidentProfileDefinition.ResolutionMultipliers.DEFAULT)),
+                IncidentProfileDefinition.CreditClass.COMMENDABLE,
+                Optional.ofNullable(creditPolicy),
+                false,
+                Optional.empty());
+    }
+
+    /** 100%, 100%, 50%, 25%, then nothing: §23.1's group-credit fixture schedule. */
+    public static CreditPolicy creditPolicy() {
+        return new CreditPolicy(CREDIT_GROUP, 14 * DAY, List.of(10000, 10000, 5000, 2500, 0), 0,
+                CreditPolicy.Scope.PLAYER_COMMUNITY, Optional.empty());
+    }
+
+    /** The same, with a subject ceiling of 100%, 50%, 0% on the {@code beneficiary} role. */
+    public static CreditPolicy creditPolicyWithSubject() {
+        return new CreditPolicy(CREDIT_GROUP, 14 * DAY, List.of(10000, 10000, 5000, 2500, 0), 0,
+                CreditPolicy.Scope.PLAYER_COMMUNITY,
+                Optional.of(new CreditPolicy.SubjectLimit("beneficiary", List.of(10000, 5000, 0), 0)));
+    }
+
+    /**
+     * A bipolar facet definition for {@link #FACET}: a label from 5 points and two evidence items, a
+     * 50% interpretation weight, and no personality overrides.
+     *
+     * <p>Published separately from the profile because the two carry different things: the profile
+     * authors the quantities a deed freezes, the facet authors the presentation and the interpretation
+     * weight a reload may change (§9.4). A test that publishes only the profile is testing a facet
+     * whose definition is missing, which is a real and different case.
+     */
+    public static FacetDefinition facet() {
+        return new FacetDefinition(Component.literal("Bravery"), Optional.empty(),
+                new FacetDefinition.Range(-100, 100), Component.literal("Brave"),
+                Optional.of(Component.literal("Cowardly")), 10, 5, 2, 5_000, Map.of());
+    }
+
+    /** Publishes one profile generation. Call {@link ProfileRegistryBundle#clear()} afterwards. */
+    public static void publishProfile(IncidentProfileDefinition profile, CreditPolicy creditPolicy) {
+        ProfileRegistryBundle.publish(Map.of(), Map.of(), Map.of(PROFILE, profile),
+                creditPolicy == null ? Map.of() : Map.of(CREDIT_POLICY, creditPolicy));
+    }
+
+    /** The same, with facet definitions published too: what a complete content generation looks like. */
+    public static void publishProfile(IncidentProfileDefinition profile, CreditPolicy creditPolicy,
+                                      Map<ResourceLocation, FacetDefinition> facets) {
+        ProfileRegistryBundle.publish(facets, Map.of(), Map.of(PROFILE, profile),
+                creditPolicy == null ? Map.of() : Map.of(CREDIT_POLICY, creditPolicy));
     }
 
     public static IncidentRecord record(int delta) {

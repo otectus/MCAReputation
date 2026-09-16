@@ -1,0 +1,19 @@
+{
+  "name": {
+    "translate": "mcareputation.facet.bravery"
+  },
+  "description": {
+    "translate": "mcareputation.facet.bravery.description"
+  },
+  "range": {
+    "min": 0,
+    "max": 100
+  },
+  "positive_label": {
+    "translate": "mcareputation.facet.bravery.brave"
+  },
+  "display_order": 20,
+  "label_min_magnitude": 10,
+  "label_min_evidence": 2,
+  "opinion_weight_bp": 3000
+}

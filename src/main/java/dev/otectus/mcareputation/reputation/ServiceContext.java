@@ -19,15 +19,17 @@ import java.util.UUID;
  * through this interface is what lets {@code ReputationServiceTest} run the <em>real</em> transaction —
  * ordering, dedupe, containment and all — against an in-memory store and a recording bus.
  *
- * <p>Deliberately package-private: this is a seam, not API. Integrations keep calling the public
- * {@code MinecraftServer}-taking entry points, which wrap themselves in {@link #of}.
+ * <p>Deliberately package-private: writing is not a seam anyone outside this package may hold. What
+ * <em>is</em> shared is the read half — {@link ReputationContext#policy()},
+ * {@link ReputationContext#now()} and {@link ReputationContext#data()} — which is public so the
+ * sibling calculator packages later phases add can evaluate against this operation's policy snapshot
+ * and evaluation time instead of re-reading the config and the clock for themselves. Integrations keep
+ * calling the public {@code MinecraftServer}-taking entry points, which wrap themselves in
+ * {@link #of}.
  */
-interface ServiceContext {
+interface ServiceContext extends ReputationContext {
 
     boolean isServerThread();
-
-    /** The canonical store. Production resolves it from the overworld's data storage on each call. */
-    ReputationSavedData data();
 
     @Nullable
     ServerPlayer onlinePlayer(UUID playerId);
@@ -38,18 +40,6 @@ interface ServiceContext {
      * tests can simulate exactly that listener.
      */
     void post(Event event);
-
-    /**
-     * The current world time: "now", as distinct from the occurrence time a request carries. Backdated
-     * delivery needs the two to be separable, and only the context knows the live clock.
-     */
-    long now();
-
-    // The policy this transaction runs under, read once so a mid-transaction config reload cannot
-    // change the rules half way through. Tests inject a fixed snapshot instead.
-    default ReputationPolicy policy() {
-        return ReputationPolicy.fromConfig();
-    }
 
     static ServiceContext of(MinecraftServer server) {
         return new ServiceContext() {

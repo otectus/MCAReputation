@@ -21,5 +21,6 @@
     "phrase": "mcareputation.gossip.villager_assaulted",
     "with": ["player", "subject"]
   },
-  "max_override_abs": 20
+  "max_override_abs": 20,
+  "social_profile": "mcareputation:assaulted_villager"
 }

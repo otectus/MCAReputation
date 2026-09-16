@@ -74,8 +74,38 @@ public final class ReputationBounds {
     public static final int MAX_RECEIPT_NAMESPACE_LENGTH = 64;
 
     /**
+     * Repeat-credit group trackers held for one player in one community (§10.5). A ceiling, never an
+     * eviction trigger: at capacity the accounting takes a conservative zero-credit decision and says
+     * so, because dropping a live counter and then granting full credit is a farming strategy.
+     */
+    public static final int MAX_CREDIT_GROUP_TRACKERS = 64;
+
+    /** Repeat-credit subject trackers held across one player's record in one community (§10.5). */
+    public static final int MAX_CREDIT_SUBJECT_TRACKERS = 128;
+
+    /**
      * Recent dedupe keys indexed per player for fast rejection. The index is rebuilt from the records
      * themselves on load and is therefore a cache, never a source of truth (§14.2).
      */
     public static final int MAX_DEDUPE_INDEX_PER_PLAYER = 512;
+
+    /**
+     * Dominant traits carried in one profile subpayload (§18.3), which is also §8.2's own ceiling.
+     * A screen that named a fourth trait would be describing a player by evidence the dominance
+     * order deliberately left out.
+     */
+    public static final int MAX_SYNCED_DOMINANT_TRAITS = 3;
+
+    /** Detailed facet entries carried in one profile subpayload pane (§18.3). */
+    public static final int MAX_SYNCED_FACET_DETAILS = 8;
+
+    /**
+     * §18.3's deliberate serialized byte budget for the new profile subpayload.
+     *
+     * <p>The per-field limits above bound the <em>shape</em> of the payload; they cannot bound an
+     * authored {@code Component} a datapack made enormous. This is the second bound, checked against
+     * the actual encoded bytes, and exceeding it degrades the summary to its state fields rather than
+     * sending a packet large enough to disconnect the player it describes.
+     */
+    public static final int MAX_PROFILE_PAYLOAD_BYTES = 16 * 1024;
 }

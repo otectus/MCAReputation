@@ -1,0 +1,22 @@
+{
+  "name": {
+    "translate": "mcareputation.facet.lawfulness"
+  },
+  "description": {
+    "translate": "mcareputation.facet.lawfulness.description"
+  },
+  "range": {
+    "min": -100,
+    "max": 100
+  },
+  "positive_label": {
+    "translate": "mcareputation.facet.lawfulness.lawful"
+  },
+  "negative_label": {
+    "translate": "mcareputation.facet.lawfulness.lawless"
+  },
+  "display_order": 40,
+  "label_min_magnitude": 10,
+  "label_min_evidence": 2,
+  "opinion_weight_bp": 4000
+}

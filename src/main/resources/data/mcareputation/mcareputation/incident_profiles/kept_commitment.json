@@ -1,0 +1,20 @@
+{
+  "allowed_incidents": [
+    "mcareputation:promise_kept"
+  ],
+  "recognition": {
+    "points": 3,
+    "lifetime_ticks": 1344000,
+    "resolution_mode": "recognition"
+  },
+  "facets": {
+    "mcareputation:reliability": {
+      "points": 4,
+      "lifetime_ticks": 672000,
+      "resolution_mode": "historical"
+    }
+  },
+  "credit_class": "commendable",
+  "credit_policy": "mcareputation:commission_work",
+  "major_evidence": false
+}

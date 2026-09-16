@@ -1,0 +1,19 @@
+{
+  "name": {
+    "translate": "mcareputation.facet.violence"
+  },
+  "description": {
+    "translate": "mcareputation.facet.violence.description"
+  },
+  "range": {
+    "min": 0,
+    "max": 100
+  },
+  "positive_label": {
+    "translate": "mcareputation.facet.violence.violent"
+  },
+  "display_order": 70,
+  "label_min_magnitude": 10,
+  "label_min_evidence": 2,
+  "opinion_weight_bp": -6000
+}
