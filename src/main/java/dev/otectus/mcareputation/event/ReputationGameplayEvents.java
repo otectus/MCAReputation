@@ -344,6 +344,18 @@ public final class ReputationGameplayEvents {
         }
         long gameTime = server.overworld().getGameTime();
         AssaultTracker.sweep(gameTime, McaReputationConfig.selfDefenseWindowTicks());
+        // One budgeted pass of the §19.2 profile migration, if the upgrade still owes any. It is
+        // deliberately here rather than on a schedule of its own: this is already the one periodic
+        // task, the pass is bounded to a handful of saved player records, and it stops asking as soon
+        // as the cursor is spent. It touches no village, no entity and nobody's score.
+        try {
+            ReputationSavedData data = ReputationSavedData.get(server);
+            if (data.isProfileMigrationPending()) {
+                data.advanceProfileMigration();
+            }
+        } catch (Throwable t) {
+            McaReputation.LOGGER.debug("[MCA: Reputation] profile migration pass failed; it stays owed", t);
+        }
         for (ServerPlayer player : online) {
             try {
                 ReputationService.reconcile(server, player.getUUID(), gameTime);

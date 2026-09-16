@@ -49,8 +49,49 @@ field above, saves it again, reloads, and asserts no semantic loss — and that 
 
 ## `mcareputation-format-2-1.20.1.nbt`
 
-The format-2 golden file, asserted byte for byte by `GoldenSavedDataTest` and copied unchanged by the
-NeoForge port. Stored **uncompressed** (`NbtIo.write`), so the comparison is over NBT alone.
+The format-2 golden file, written by the 0.5.0 serializer and **never regenerated since**. Stored
+**uncompressed** (`NbtIo.write`), so any comparison is over NBT alone.
 
-Regenerate deliberately, never to make a failing assertion pass:
+Since the save format moved to 3 it can no longer be compared whole — the current serializer writes
+`version = 3` — so `GoldenSavedDataTest` compares its **player subtrees** instead
+(`theFormatTwoPlayerSubtreesStillSerializeIdentically`). That is the statement worth keeping: format 3
+adds fields and moves no scalar byte, because every new field is written only when it carries
+information. The same test also loads the file and asserts the v2 to v3 migration changes no total.
+
+## `mcareputation-format-3-1.20.1.nbt`
+
+The current golden file, asserted byte for byte by `GoldenSavedDataTest` and intended to be copied
+unchanged by the NeoForge port — cross-loader byte identity is why it is stored **uncompressed**.
+
+| | |
+|---|---|
+| Produced by | `/home/otectus/Projects/MCAReputation` on `feature/0.6.0-profiles`, work package P3 |
+| Produced on | 2026-09-16 |
+| Producing code | `GoldenSavedDataTest.profiledLedger().save(new CompoundTag())` |
+| Encoding | **uncompressed** NBT (`NbtIo.write`) |
+| Size | 5269 bytes |
+| SHA-256 | `1a906772662000bc0331c6ba358d21cb1880b1036356a900acd3473a233ec758` |
+| `version` | `3` |
+
+### What it adds over format 2
+
+The same two players and three communities, plus one of each thing format 3 introduced — one of each
+*kind*, deliberately, because a fixture carrying only the easy case would not notice a serializer that
+dropped the hard one:
+
+- **A live payload** on Ada's rescue (`33333333…`): origin `live`, recognition 6 and bravery 8
+  authored, credited at 50% as the third rescue in the window, aged two of the bravery channel's 28
+  days. Half an authored point survives as `5000` subunits, which puts the fixed-point promise of
+  §8.3 on disk rather than in a comment.
+- **An enriched legacy payload** on the folded assault (`11111111…`): origin `legacy_enriched`,
+  recognition only, full historical credit. A superseded record keeps its stored units and
+  contributes none, which is what makes a refused supersession restorable.
+- **An unenriched stub** on Bo's deed (`44444444…`): origin `legacy_unenriched`, no quantities at all.
+- **A live credit window** on Ada's Riverbend: one group counter at two occurrences and one subject
+  counter, with their frozen window duration and monotonic watermarks.
+- **An unfinished migration cursor**: `profileMigration` with the manifest version, one stubbed
+  record and a cursor resuming after Ada, so coverage reads `migrating` rather than complete.
+
+Regenerate deliberately, never to make a failing assertion pass — and note that the gated test only
+ever rewrites the **newest** file:
 `./gradlew test --tests '*GoldenSavedDataTest' -Dmcareputation.regenerateFixtures=true`

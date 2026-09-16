@@ -9,6 +9,7 @@ import dev.otectus.mcareputation.api.ReceiptView;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.ReputationResult;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.credit.CreditDecision;
 import dev.otectus.mcareputation.incident.DecayPolicy;
 import dev.otectus.mcareputation.incident.IncidentDefinition;
 import dev.otectus.mcareputation.incident.IncidentRecord;
@@ -18,6 +19,9 @@ import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.api.ResolutionResult;
 import dev.otectus.mcareputation.api.SupersedeSpec;
+import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
+import dev.otectus.mcareputation.profile.ProfileMath;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
 import dev.otectus.mcareputation.api.event.ReputationIncidentCreatedEvent;
 import dev.otectus.mcareputation.reputation.ReputationPolicy;
 import net.minecraft.nbt.CompoundTag;
@@ -386,6 +390,165 @@ class ReceiptTest {
         assertEquals(1, home().incidentCount(), "one logical outcome, one canonical deed");
         assertEquals(-8, home().score());
         assertEquals(1, seam.store().player(TestFixtures.PLAYER_A).orElseThrow().receiptCount());
+    }
+
+    /**
+     * A profiled deed commits its frozen evidence and its credit reservation inside the <em>same</em>
+     * accepted operation, and the receipt still lands before the publication (§9.4, §11.1 steps 7-9).
+     *
+     * <p>Three things are being held together here, and the order of all three is the point. The
+     * payload and the counter move with the incident and the score, so a listener cannot observe a
+     * deed whose accounting is half done; the receipt is already in the store when the event fires,
+     * so a re-entrant retry is a duplicate rather than a second award; and the re-entrant duplicate
+     * consumes no further allowance, so the second occurrence of the schedule is still available to
+     * the next genuinely different deed (I02).
+     */
+    @Test
+    void aProfiledDeliveryFreezesItsEvidenceAndConsumesItsCreditInTheAcceptedOperation() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.VILLAGE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        try {
+            List<Boolean> receiptVisible = new ArrayList<>();
+            List<Boolean> evidenceVisible = new ArrayList<>();
+            List<ReceiptOutcome> reentrant = new ArrayList<>();
+            seam.listener(event -> {
+                if (!(event instanceof ReputationIncidentCreatedEvent) || !reentrant.isEmpty()) {
+                    return;
+                }
+                receiptVisible.add(
+                        seam.findReceipt(NAMESPACE, TestFixtures.PLAYER_A, HOME, KEY).isPresent());
+                evidenceVisible.add(home().incidents().stream()
+                        .allMatch(IncidentRecord::hasProfileEvidence));
+                reentrant.add(seam.deliver(delivery(KEY, 1000L)).outcome());
+            });
+
+            DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+            assertEquals(ReceiptOutcome.APPLIED, outcome.outcome());
+            assertEquals(List.of(Boolean.TRUE), receiptVisible,
+                    "the receipt is filed before the deed is announced");
+            assertEquals(List.of(Boolean.TRUE), evidenceVisible,
+                    "and the frozen payload is already attached when the announcement goes out");
+            assertEquals(List.of(ReceiptOutcome.DUPLICATE), reentrant);
+            seam.listener(null);
+
+            IncidentRecord incident = home().incidents().iterator().next();
+            IncidentProfileEvidence evidence = incident.profileEvidence().orElseThrow();
+            assertEquals(IncidentProfileEvidence.Origin.LIVE, evidence.origin());
+            assertEquals(TestFixtures.PROFILE, evidence.profileId());
+            assertEquals(ProfileMath.subunits(6), evidence.recognition().orElseThrow().credited(),
+                    "first occurrence, full credit");
+            assertEquals(ProfileMath.subunits(8),
+                    evidence.facet(TestFixtures.FACET).orElseThrow().credited());
+            assertEquals(CreditDecision.Reason.FULL_CREDIT, evidence.credit().reason());
+            assertEquals(0, evidence.credit().groupOrdinal());
+            assertTrue(incident.profileContributes());
+            assertEquals(0L, incident.profileElapsedTicks(), "a live deed arrives unaged");
+
+            // One allowance consumed, by the accepted operation and not by the replay.
+            assertEquals(1, home().creditTrackers().groupCount());
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal());
+
+            // And it survives the restart, payload and counter together.
+            seam.reload();
+            IncidentRecord reloaded = home().incidents().iterator().next();
+            assertEquals(evidence, reloaded.profileEvidence().orElseThrow());
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal());
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * A second, genuinely different deed takes the next place in the schedule; a private one takes no
+     * public allowance at all and carries no payload (I03, §23.1's private-event fixture).
+     */
+    @Test
+    void aPrivateProfiledDeedConsumesNoPublicAllowanceAndCarriesNoEvidence() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.PRIVATE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        try {
+            DeliveryOutcome outcome = seam.deliver(delivery(KEY, 1000L));
+
+            assertEquals(ReceiptOutcome.ACCEPTED_NO_PUBLIC_INCIDENT, outcome.outcome());
+            IncidentRecord incident = home().incidents().iterator().next();
+            assertFalse(incident.hasProfileEvidence(),
+                    "a private deed has an authored profile and no public evidence");
+            assertEquals(0, home().creditTrackers().groupCount(),
+                    "and it spends nothing a public deed would have needed");
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * With profiles switched off, the deed is marked as having happened while they were off — and the
+     * repeat-credit window still advances (§19.1, §20).
+     *
+     * <p>Both halves matter. The distinct marker is what stops a later migration from treating this
+     * record as pre-upgrade history it could enrich: nothing was observed about it that a manifest
+     * could honestly reconstruct. And the counter still moving is what stops the switch from being a
+     * farming tool — turning profiles off, collecting, and turning them back on must not hand back an
+     * allowance, because repeat accounting is not profile display.
+     */
+    @Test
+    void aDeedAcceptedWhileProfilesAreOffIsMarkedAsSuchAndStillAdvancesTheWindow() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.VILLAGE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        seam.policy(ReputationPolicy.defaults().withProfilesEnabled(false));
+        try {
+            assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome());
+
+            IncidentProfileEvidence evidence = home().incidents().iterator().next()
+                    .profileEvidence().orElseThrow();
+            assertEquals(IncidentProfileEvidence.Origin.DISABLED_AT_OCCURRENCE, evidence.origin());
+            assertTrue(evidence.channels().isEmpty(), "nothing was computed, so nothing is claimed");
+            assertFalse(evidence.isEnrichmentCandidate(),
+                    "and it must never be mistaken for pre-upgrade history");
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal(),
+                    "the window advanced: switching profiles off is not a way to reset an allowance");
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * With repeat credit switched off, the award keeps its whole authored value and says why — and the
+     * window still advances, for the same reason as above (§20).
+     */
+    @Test
+    void aDeedAcceptedWhileRepeatCreditIsOffTakesFullValueAndStillAdvancesTheWindow() {
+        IncidentRegistry.replaceAll(Map.of(TestFixtures.ASSAULT,
+                TestFixtures.definition(8, IncidentVisibility.VILLAGE, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(TestFixtures.CREDIT_POLICY),
+                TestFixtures.creditPolicy());
+        seam.policy(ReputationPolicy.defaults().withRepeatCreditEnabled(false));
+        try {
+            assertEquals(ReceiptOutcome.APPLIED, seam.deliver(delivery(KEY, 1000L)).outcome());
+
+            IncidentProfileEvidence evidence = home().incidents().iterator().next()
+                    .profileEvidence().orElseThrow();
+            assertEquals(IncidentProfileEvidence.Origin.LIVE, evidence.origin());
+            assertEquals(CreditDecision.Reason.CREDIT_DISABLED, evidence.credit().reason());
+            assertTrue(evidence.credit().isFullCredit());
+            assertEquals(1, home().creditTrackers()
+                    .peek(TestFixtures.CREDIT_GROUP, Optional.empty(), false, 1000L).groupOrdinal());
+        } finally {
+            ProfileRegistryBundle.clear();
+        }
     }
 
     /** The publication boundary: a broken listener cannot un-consume a committed operation. */

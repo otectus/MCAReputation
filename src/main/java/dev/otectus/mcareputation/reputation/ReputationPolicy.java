@@ -25,7 +25,13 @@ public record ReputationPolicy(
         int reconcileOnlineIntervalTicks,
         long receiptRetentionTicks,
         UndeclaredAuthorityMode undeclaredAuthorityMode,
-        boolean conversationsIntegrationEnabled) {
+        boolean conversationsIntegrationEnabled,
+        // The two profile switches of §20, as policy rather than as a live config read: one snapshot
+        // per operation is what stops a mid-transaction reload from creating evidence under one rule
+        // and accounting for it under another (I09). P7 wires them to McaReputationConfig; until then
+        // they carry the documented defaults, which is why fromConfig() names the constants below.
+        boolean profilesEnabled,
+        boolean repeatCreditEnabled) {
 
     // How an incident claimed by an authority that declared no kinds is treated.
     public enum UndeclaredAuthorityMode {
@@ -42,6 +48,12 @@ public record ReputationPolicy(
 
     public static final UndeclaredAuthorityMode DEFAULT_UNDECLARED_AUTHORITY_MODE =
             UndeclaredAuthorityMode.ASSAULT_KILL_ONLY;
+
+    // §20's documented defaults. Profiles on: a fresh world gets recognition and facets from its
+    // first deed. Repeat credit on: the shipped schedules are the anti-farm story, and an installation
+    // that silently ran without them would accumulate history no later switch could correct.
+    public static final boolean DEFAULT_PROFILES_ENABLED = true;
+    public static final boolean DEFAULT_REPEAT_CREDIT_ENABLED = true;
 
     // Reads through the guarded accessors only, so this is safe before the spec is loaded.
     public static ReputationPolicy fromConfig() {
@@ -67,7 +79,9 @@ public record ReputationPolicy(
                 McaReputationConfig.reconcileOnlineIntervalTicks(),
                 McaReputationConfig.receiptRetentionTicks(),
                 McaReputationConfig.coreAuthorityUndeclaredKinds(),
-                McaReputationConfig.conversationsIntegrationEnabled());
+                McaReputationConfig.conversationsIntegrationEnabled(),
+                DEFAULT_PROFILES_ENABLED,
+                DEFAULT_REPEAT_CREDIT_ENABLED);
     }
 
     // The documented config defaults, mirrored without touching the spec at all.
@@ -94,7 +108,9 @@ public record ReputationPolicy(
                 1200,
                 DEFAULT_RECEIPT_RETENTION_TICKS,
                 DEFAULT_UNDECLARED_AUTHORITY_MODE,
-                true);
+                true,
+                DEFAULT_PROFILES_ENABLED,
+                DEFAULT_REPEAT_CREDIT_ENABLED);
     }
 
     public Builder toBuilder() {
@@ -125,6 +141,14 @@ public record ReputationPolicy(
         return toBuilder().conversationsIntegrationEnabled(value).build();
     }
 
+    public ReputationPolicy withProfilesEnabled(boolean value) {
+        return toBuilder().profilesEnabled(value).build();
+    }
+
+    public ReputationPolicy withRepeatCreditEnabled(boolean value) {
+        return toBuilder().repeatCreditEnabled(value).build();
+    }
+
     // A mutable copy of one snapshot, so a test can vary a single field without naming twenty-one.
     public static final class Builder {
 
@@ -150,6 +174,8 @@ public record ReputationPolicy(
         private long receiptRetentionTicks;
         private UndeclaredAuthorityMode undeclaredAuthorityMode;
         private boolean conversationsIntegrationEnabled;
+        private boolean profilesEnabled;
+        private boolean repeatCreditEnabled;
 
         private Builder(ReputationPolicy source) {
             this.enabled = source.enabled;
@@ -174,6 +200,8 @@ public record ReputationPolicy(
             this.receiptRetentionTicks = source.receiptRetentionTicks;
             this.undeclaredAuthorityMode = source.undeclaredAuthorityMode;
             this.conversationsIntegrationEnabled = source.conversationsIntegrationEnabled;
+            this.profilesEnabled = source.profilesEnabled;
+            this.repeatCreditEnabled = source.repeatCreditEnabled;
         }
 
         public Builder enabled(boolean value) {
@@ -286,6 +314,16 @@ public record ReputationPolicy(
             return this;
         }
 
+        public Builder profilesEnabled(boolean value) {
+            this.profilesEnabled = value;
+            return this;
+        }
+
+        public Builder repeatCreditEnabled(boolean value) {
+            this.repeatCreditEnabled = value;
+            return this;
+        }
+
         public ReputationPolicy build() {
             return new ReputationPolicy(enabled, scoreDecayEnabled, tierTitlesEnabled, minimumScore,
                     maximumScore, villageSearchRadius, witnessRadius, maxWitnesses,
@@ -293,7 +331,8 @@ public record ReputationPolicy(
                     villagerOpinionEnabled, opinionHearsayPercent, opinionInvolvedPercent,
                     maxIncidentsPerCommunity, maxIncidentsPerPlayer, assaultCoalesceTicks,
                     selfDefenseWindowTicks, reconcileOnlineIntervalTicks, receiptRetentionTicks,
-                    undeclaredAuthorityMode, conversationsIntegrationEnabled);
+                    undeclaredAuthorityMode, conversationsIntegrationEnabled, profilesEnabled,
+                    repeatCreditEnabled);
         }
     }
 }

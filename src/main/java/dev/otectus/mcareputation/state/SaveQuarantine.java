@@ -38,6 +38,7 @@ public final class SaveQuarantine {
 
     private static final List<Entry> ENTRIES = Collections.synchronizedList(new ArrayList<>());
     private static int dropped;
+    private static int profilePayloads;
     private static boolean written;
 
     private SaveQuarantine() {
@@ -55,6 +56,28 @@ public final class SaveQuarantine {
             }
             ENTRIES.add(new Entry(path == null ? "?" : path, reason == null ? "?" : reason, tag.copy()));
         }
+    }
+
+    /**
+     * Holds a profile evidence payload the loader could not read, keeping the scalar incident that
+     * carried it (§19.4).
+     *
+     * <p>Counted separately from the bound, and deliberately still counted once the bound is reached:
+     * a quarantined contribution makes profile coverage incomplete, and "we stopped keeping copies"
+     * must not read as "there was nothing wrong". §19.3's coverage rule depends on this number being
+     * honest rather than on the held tags being complete.
+     */
+    public static void holdProfilePayload(String path, String reason, Tag tag) {
+        profilePayloads++;
+        hold(path, reason, tag);
+    }
+
+    /**
+     * How many profile payloads have been quarantined this server lifetime. Never decreases, and is
+     * not capped by {@link #MAX_ENTRIES}.
+     */
+    public static int profilePayloadCount() {
+        return profilePayloads;
     }
 
     public static int size() {
@@ -75,10 +98,16 @@ public final class SaveQuarantine {
     public static String report() {
         synchronized (ENTRIES) {
             if (ENTRIES.isEmpty()) {
-                return "nothing quarantined";
+                return profilePayloads > 0
+                        ? profilePayloads + " profile payload(s) were rejected beyond the held bound"
+                        : "nothing quarantined";
             }
             StringBuilder out = new StringBuilder();
             out.append(ENTRIES.size()).append(" quarantined subtree(s)");
+            if (profilePayloads > 0) {
+                out.append(", ").append(profilePayloads)
+                        .append(" of them profile payload(s) whose incident was kept");
+            }
             if (dropped > 0) {
                 out.append(" (+").append(dropped).append(" beyond the bound of ").append(MAX_ENTRIES)
                         .append(")");
@@ -96,6 +125,7 @@ public final class SaveQuarantine {
             ENTRIES.clear();
         }
         dropped = 0;
+        profilePayloads = 0;
         written = false;
     }
 

@@ -74,6 +74,16 @@ public final class ReputationBounds {
     public static final int MAX_RECEIPT_NAMESPACE_LENGTH = 64;
 
     /**
+     * Repeat-credit group trackers held for one player in one community (§10.5). A ceiling, never an
+     * eviction trigger: at capacity the accounting takes a conservative zero-credit decision and says
+     * so, because dropping a live counter and then granting full credit is a farming strategy.
+     */
+    public static final int MAX_CREDIT_GROUP_TRACKERS = 64;
+
+    /** Repeat-credit subject trackers held across one player's record in one community (§10.5). */
+    public static final int MAX_CREDIT_SUBJECT_TRACKERS = 128;
+
+    /**
      * Recent dedupe keys indexed per player for fast rejection. The index is rebuilt from the records
      * themselves on load and is therefore a cache, never a source of truth (§14.2).
      */

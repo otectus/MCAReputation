@@ -214,12 +214,20 @@ class SavedDataMigrationTest {
         assertTrue(ReputationSavedData.load(fixtureTag()).isDirty());
     }
 
-    /** A save/load round trip after the upgrade is a v2 file with the same totals. */
+    /**
+     * A save/load round trip after the upgrade is a current-format file with the same totals.
+     *
+     * <p>A format-1 file reaches the newest format in one load, through both steps in order, rather
+     * than jumping to it: the receipts and terminal flags of v1 to v2 are what the v2 to v3 pass then
+     * walks over.
+     */
     @Test
-    void theUpgradedStoreRoundTripsAsVersionTwo() {
+    void theUpgradedStoreRoundTripsAsTheCurrentFormat() {
         ReputationSavedData migrated = ReputationSavedData.load(fixtureTag());
         CompoundTag written = migrated.save(new CompoundTag());
-        assertEquals(2, written.getInt("version"));
+        assertEquals(ReputationSavedData.FORMAT_VERSION, written.getInt("version"));
+        assertEquals(3, ReputationSavedData.FORMAT_VERSION,
+                "this test documents the format it was written for; update it deliberately");
 
         ReputationSavedData reloaded = ReputationSavedData.load(written);
         assertEquals(-70, reloaded.score(ADA, RIVERBEND));
@@ -227,5 +235,24 @@ class SavedDataMigrationTest {
         assertEquals(-80, reloaded.score(BO, RIVERBEND));
         assertEquals(migrated.player(ADA).orElseThrow().receiptCount(),
                 reloaded.player(ADA).orElseThrow().receiptCount());
+    }
+
+    /**
+     * The v1 to v2 work still happens on the way to v3.
+     *
+     * <p>Worth its own assertion because the steps are now chained: a {@code migrateFormat} that
+     * tested {@code loadedVersion} once and then ran only the newest step would silently stop
+     * recovering receipts from the oldest saves of all, and every existing v1 assertion above would
+     * still pass if they ran against a v2 file.
+     */
+    @Test
+    void aFormatOneFileStillGoesThroughBothSteps() {
+        ReputationSavedData migrated = ReputationSavedData.load(fixtureTag());
+
+        assertEquals(ReputationSavedData.FORMAT_VERSION, migrated.loadedVersion());
+        assertTrue(migrated.player(ADA).orElseThrow().receiptCount() > 0,
+                "the v1 to v2 receipt recovery must still run");
+        assertTrue(allIncidents(migrated).stream().anyMatch(IncidentRecord::isSuperseded),
+                "and so must the v1 to v2 supersession adoption");
     }
 }

@@ -59,6 +59,13 @@ public final class CommunityReputationRecord {
     private final Map<ResourceLocation, String> tierHighWater = new LinkedHashMap<>();
     private final Set<ResourceLocation> titles = new LinkedHashSet<>();
 
+    /**
+     * Repeat-credit accounting (§10.5). Policy state, not standing: it lives here because the
+     * allowance a shipped policy shares is per player per community, and it is deliberately not
+     * rebuilt from the ledger or the receipts, both of which expire on their own schedules.
+     */
+    private final CreditWindowTrackers credit = CreditWindowTrackers.empty();
+
     private CommunityMetadata metadata = CommunityMetadata.EMPTY;
     private int baseline;
     private int score;
@@ -105,8 +112,16 @@ public final class CommunityReputationRecord {
         return ++revision;
     }
 
+    /**
+     * Whether this record holds nothing worth saving.
+     *
+     * <p>The credit trackers count. A record whose only content is a live anti-farm counter must be
+     * written, or a restart would drop the counter and hand back the allowance it had spent — the
+     * eviction exploit of §10.5 arriving through the save path instead of through a cap sweep.
+     */
     public boolean isEmpty() {
-        return baseline == 0 && incidents.isEmpty() && titles.isEmpty() && tierHighWater.isEmpty();
+        return baseline == 0 && incidents.isEmpty() && titles.isEmpty() && tierHighWater.isEmpty()
+                && credit.isEmpty();
     }
 
     /** Chronological view, oldest first. Unmodifiable. */
@@ -169,6 +184,36 @@ public final class CommunityReputationRecord {
         if (ladder != null && tierId != null) {
             tierHighWater.put(ladder, tierId);
         }
+    }
+
+    // --- repeat credit ------------------------------------------------------
+
+    /**
+     * The repeat-credit counters for this player in this community (§10.5).
+     *
+     * <p>Exposed rather than wrapped because the two callers want different halves of it: the staged
+     * transaction reserves and consumes an allowance, and the capacity diagnostic reads the window
+     * identities. Neither is allowed to decide a <em>percentage</em> — that is {@code CreditResolver}
+     * against the frozen {@code CreditPolicy}, and keeping the decision out of here is what stops a
+     * schedule from being reimplemented next to the counters it reads.
+     */
+    public CreditWindowTrackers creditTrackers() {
+        return credit;
+    }
+
+    /**
+     * Where an operation would land in its credit window, creating nothing (I04).
+     *
+     * <p>This is the read a staged operation takes <em>before</em> anything is written, so a refusal
+     * cannot have spent an allowance. {@link CreditWindowTrackers#consume} is the matching write, and
+     * the two agree by construction: both ignore trackers whose window has already ended at the same
+     * evaluation time.
+     */
+    public CreditWindowTrackers.CreditWindow peekCreditWindow(ResourceLocation group,
+                                                              Optional<String> subjectKey,
+                                                              boolean subjectRequired,
+                                                              long acceptanceTime) {
+        return credit.peek(group, subjectKey, subjectRequired, acceptanceTime);
     }
 
     // --- score --------------------------------------------------------------
@@ -466,6 +511,12 @@ public final class CommunityReputationRecord {
             titles.forEach(title -> list.add(StringTag.valueOf(title.toString())));
             tag.put("titles", list);
         }
+        // Format 3, written only when something is tracked, so a ledger that has never seen a
+        // credited deed is byte-identical to what format 2 produced.
+        CompoundTag creditTag = credit.save();
+        if (!creditTag.isEmpty()) {
+            tag.put("credit", creditTag);
+        }
         return tag;
     }
 
@@ -492,11 +543,17 @@ public final class CommunityReputationRecord {
         record.lastReconciledGameTime = tag.getLong("reconciled");
         record.revision = tag.getLong("revision");
 
+        // §19.4: a malformed profile payload is quarantined and its scalar incident is kept. The path
+        // names the incident so an operator can find it; the reason comes from the reader.
+        IncidentRecord.QuarantineSink payloadSink = (incidentId, reason, payload) ->
+                SaveQuarantine.holdProfilePayload("community/" + record.key.asString() + "/incidents/"
+                        + incidentId + "/profile", reason, payload);
+
         ListTag incidentList = tag.getList("incidents", Tag.TAG_COMPOUND);
         for (int i = 0; i < incidentList.size(); i++) {
             CompoundTag entry = incidentList.getCompound(i);
             try {
-                IncidentRecord.load(entry).ifPresentOrElse(
+                IncidentRecord.load(entry, payloadSink).ifPresentOrElse(
                         record::addIncident,
                         () -> {
                             McaReputation.LOGGER.debug(
@@ -523,6 +580,8 @@ public final class CommunityReputationRecord {
                 record.tierHighWater.put(ladder, hw.getString(ladderId));
             }
         }
+
+        record.credit.absorb(CreditWindowTrackers.load(tag.getCompound("credit")));
 
         ListTag titleList = tag.getList("titles", Tag.TAG_STRING);
         for (int i = 0; i < titleList.size() && record.titles.size() < ReputationBounds.MAX_TITLES; i++) {

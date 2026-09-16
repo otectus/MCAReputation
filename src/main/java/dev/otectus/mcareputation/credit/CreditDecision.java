@@ -53,7 +53,22 @@ public record CreditDecision(
          * The profile is not classified as repeatable-and-commendable, so §10.4 forbids discounting
          * it at all. Reported rather than silently treated as full credit.
          */
-        NOT_COMMENDABLE;
+        NOT_COMMENDABLE,
+        /**
+         * The deed predates repeat-credit accounting altogether: the §19.2 migration awards historical
+         * credit at 100% because the old system stored no decision to honour, and §19.2 forbids
+         * inventing how much credit a player would have received under a policy that did not exist.
+         * Distinct from {@link #NO_POLICY} so a diagnostic can tell "nothing limits this" from
+         * "nothing was recorded when this happened".
+         */
+        LEGACY_FULL_CREDIT,
+        /**
+         * Repeat credit is switched off by an operator, so this award took its whole authored value
+         * (§20). The bounded window accounting still advanced: disabling the discount is an explicit
+         * bypass of the reduction, not permission to delete the anti-grind state that would apply
+         * again the moment it is switched back on.
+         */
+        CREDIT_DISABLED;
 
         public String jsonName() {
             return name().toLowerCase(Locale.ROOT);

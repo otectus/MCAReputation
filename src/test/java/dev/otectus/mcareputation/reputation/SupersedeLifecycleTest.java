@@ -383,13 +383,101 @@ class SupersedeLifecycleTest {
     /**
      * The rollback is only complete while the snapshot covers every mutable field, and the compiler
      * cannot check that a new field was added to both. This is the reminder: a later phase attaching
-     * profile evidence, a credit reservation or a second elapsed clock to {@code IncidentRecord} must
-     * extend {@link IncidentRecord.LifecycleSnapshot} in the same change.
+     * anything further to {@code IncidentRecord}'s mutable state must extend
+     * {@link IncidentRecord.LifecycleSnapshot} in the same change.
+     *
+     * <p>Moved from 11 to 14 deliberately in P3, for the three fields the frozen profile payload
+     * brought with it: the profile elapsed clock, the last profile observation, and the payload
+     * itself. Each one is state a supersession can move and therefore state a refusal has to put
+     * back.
      */
     @Test
     void theLifecycleSnapshotStillCoversEveryFieldASupersessionCanMove() {
-        assertEquals(11, IncidentRecord.LifecycleSnapshot.class.getRecordComponents().length,
+        assertEquals(14, IncidentRecord.LifecycleSnapshot.class.getRecordComponents().length,
                 "a field was added to IncidentRecord's mutable state without being snapshotted, so a "
                         + "refused supersession no longer restores the precursor exactly (§11.3)");
+    }
+
+    // ------------------------------------------------------------------
+    // §11.3 — profile evidence is part of the rollback, not beside it
+    // ------------------------------------------------------------------
+
+    /**
+     * A refused successor must leave the precursor's <em>profile</em> evidence exactly as it was too.
+     *
+     * <p>This is the half a scalar-only rollback would miss. The assault carries frozen recognition
+     * and violence evidence; the killing that tries to replace it is never witnessed, so the whole
+     * supersession is refused. If the rollback restored the two scalars and not the payload — or
+     * advanced the profile clock on the way out — the village would end up describing the player by
+     * evidence from a deed that was refused.
+     */
+    @Test
+    void aRefusedSuccessorLeavesThePrecursorsProfileEvidenceUnchanged() {
+        IncidentRegistry.replaceAll(Map.of(
+                TestFixtures.ASSAULT,
+                TestFixtures.definition(-8, IncidentVisibility.WITNESSED, DecayPolicy.NONE,
+                        TestFixtures.PROFILE),
+                KILL,
+                TestFixtures.definition(-40, IncidentVisibility.WITNESSED, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(null), null);
+        try {
+            IncidentRecord assault = seedAssault(HOME, TestFixtures.VILLAGER_1);
+            assertTrue(assault.hasProfileEvidence(), "the profiled assault has to carry evidence");
+            ctx.gameTime = 100L;
+            IncidentRecord.LifecycleSnapshot before = atEvaluationTime(100L, assault);
+
+            ReputationResult result = ReputationService.recordSupersedingWith(ctx,
+                    request(KILL, HOME, TestFixtures.VILLAGER_1, Set.of(), 100L),
+                    SupersedeSpec.of(assault.id(), 200L, true));
+
+            assertFalse(result.applied(), "nobody saw the killing");
+            assertEquals(before, assault.snapshotLifecycle(),
+                    "the precursor's payload, profile clock and observation time must all come back");
+            assertTrue(assault.profileEvidence().orElseThrow().hasCurrentSubunits());
+            assertTrue(assault.profileContributes());
+        } finally {
+            dev.otectus.mcareputation.profile.ProfileRegistryBundle.clear();
+        }
+    }
+
+    /**
+     * §11.3's own example: an accepted supersession leaves the precursor terminal, and a terminal
+     * record contributes no profile evidence — so the pair totals the killing's evidence rather than
+     * the sum of both.
+     *
+     * <p>The stored units stay on the precursor on purpose (§9.4): zeroing them in place is what
+     * would make the rollback above impossible, so "contributes nothing" is derived from the terminal
+     * flag instead.
+     */
+    @Test
+    void anAcceptedSupersessionSilencesThePrecursorsProfileEvidenceWithoutErasingIt() {
+        IncidentRegistry.replaceAll(Map.of(
+                TestFixtures.ASSAULT,
+                TestFixtures.definition(-8, IncidentVisibility.WITNESSED, DecayPolicy.NONE,
+                        TestFixtures.PROFILE),
+                KILL,
+                TestFixtures.definition(-40, IncidentVisibility.WITNESSED, DecayPolicy.NONE,
+                        TestFixtures.PROFILE)));
+        TestFixtures.publishProfile(TestFixtures.profile(null), null);
+        try {
+            IncidentRecord assault = seedAssault(HOME, TestFixtures.VILLAGER_1);
+            ctx.gameTime = 100L;
+
+            ReputationResult result = ReputationService.recordSupersedingWith(ctx,
+                    request(KILL, HOME, TestFixtures.VILLAGER_1, Set.of(TestFixtures.VILLAGER_2), 100L),
+                    SupersedeSpec.of(assault.id(), 200L, true));
+
+            assertTrue(result.applied());
+            assertTrue(assault.isSuperseded());
+            assertFalse(assault.profileContributes(), "a folded deed describes nobody any more");
+            assertTrue(assault.profileEvidence().orElseThrow().hasCurrentSubunits(),
+                    "but its frozen units are still on disk, which is what makes a rollback exact");
+            IncidentRecord killing = community(HOME).incident(result.incidentId().orElseThrow())
+                    .orElseThrow();
+            assertTrue(killing.profileContributes(), "the successor carries the whole encounter");
+        } finally {
+            dev.otectus.mcareputation.profile.ProfileRegistryBundle.clear();
+        }
     }
 }

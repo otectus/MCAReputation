@@ -330,6 +330,46 @@ public final class PlayerReputationRecord {
                 .isPresent());
     }
 
+    // --- repeat credit ------------------------------------------------------
+
+    /**
+     * The credit window for a {@code player_global} policy: one allowance shared across every
+     * community this player has a record in (§10.2's scope).
+     *
+     * <p>Deliberately <b>stricter than exact</b>. The counters are stored per community, so a global
+     * allowance is read as the sum of them and the operation still consumes in its own community's
+     * tracker. A player who has rescued once in three villages therefore reads as occurrence four
+     * globally, never as occurrence two: a global scope that resolved more generously than a
+     * per-community one would make declaring it an exploit rather than a restriction. The alternative
+     * — a second parallel set of global counters — would be a second growing structure with its own
+     * capacity story for a scope no shipped policy uses.
+     */
+    public CreditWindowTrackers.CreditWindow peekGlobalCreditWindow(ResourceLocation group,
+                                                                    Optional<String> subjectKey,
+                                                                    boolean subjectRequired,
+                                                                    long acceptanceTime) {
+        long groupOrdinal = 0L;
+        long subjectOrdinal = 0L;
+        boolean sawSubject = false;
+        boolean overflow = false;
+        for (CommunityReputationRecord community : communities.values()) {
+            CreditWindowTrackers.CreditWindow window = community.peekCreditWindow(group, subjectKey,
+                    subjectRequired, acceptanceTime);
+            groupOrdinal += window.groupOrdinal();
+            if (window.subjectOrdinal().isPresent()) {
+                sawSubject = true;
+                subjectOrdinal += window.subjectOrdinal().getAsInt();
+            }
+            overflow |= window.capacityOverflow();
+        }
+        int boundedGroup = (int) Math.min(groupOrdinal, CreditWindowTrackers.MAX_OCCURRENCES);
+        java.util.OptionalInt boundedSubject = sawSubject
+                ? java.util.OptionalInt.of((int) Math.min(subjectOrdinal,
+                        CreditWindowTrackers.MAX_OCCURRENCES))
+                : java.util.OptionalInt.empty();
+        return new CreditWindowTrackers.CreditWindow(boundedGroup, boundedSubject, overflow);
+    }
+
     // --- cross-community bounds ---------------------------------------------
 
     public int totalIncidentCount() {

@@ -27,6 +27,9 @@ import dev.otectus.mcareputation.api.event.ReputationIncidentResolvedEvent;
 import dev.otectus.mcareputation.api.event.ReputationTierChangedEvent;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.community.CommunityMetadata;
+import dev.otectus.mcareputation.credit.CreditDecision;
+import dev.otectus.mcareputation.credit.CreditPolicy;
+import dev.otectus.mcareputation.credit.CreditResolver;
 import dev.otectus.mcareputation.incident.AwarenessResolver;
 import dev.otectus.mcareputation.incident.BuiltinIncidents;
 import dev.otectus.mcareputation.incident.IncidentDefinition;
@@ -34,10 +37,16 @@ import dev.otectus.mcareputation.incident.IncidentDisplay;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
+import dev.otectus.mcareputation.incident.IncidentSubject;
 import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.network.SnapshotSelection;
+import dev.otectus.mcareputation.profile.IncidentProfileDefinition;
+import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
+import dev.otectus.mcareputation.profile.ProfileMath;
+import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
 import dev.otectus.mcareputation.state.AdmissionPreflight;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
+import dev.otectus.mcareputation.state.CreditWindowTrackers;
 import dev.otectus.mcareputation.state.OperationReceipt;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.ReputationSavedData;
@@ -742,6 +751,14 @@ public final class ReputationService {
             visibility = IncidentVisibility.PRIVATE;
         }
 
+        // 8b. the profile payload and the repeat-credit reservation (§11.1 step 5), computed while
+        // nothing has been written. Both are pure reads of the published content, the policy snapshot
+        // and the existing trackers: a refusal after this point has still spent no allowance and
+        // created no evidence, which is the entire reason the slots are staged rather than filled as
+        // the transaction goes.
+        ProfileStaging profileStaging = stageProfile(definition, policy, knownPlayer, knownCommunity,
+                visibility, request, occurredAt, now);
+
         // 9. the last read that can fail, taken before the first write. Everything after this point is
         // an in-memory mutation of records this transaction already holds, so a failure cannot leave
         // the ledger half written — which is the only condition under which the contained-failure log
@@ -772,6 +789,15 @@ public final class ReputationService {
         // delivered late is worth what it is worth now, not what it was worth when it happened, or the
         // mirrors, the toast and the tier event all announce a value it no longer earns.
         incident.reconcile(definition.decay(), now);
+        // The profile channel is aged by the same initial-aging policy as the scalar one, from the
+        // same pair of times (§12.2): a deed delivered a week late arrives a week old in both
+        // channels or the two disagree about the same encounter. Nothing advances this clock again
+        // until reconciliation does, through the gate.
+        incident.initializeProfileClock(incident.decayElapsedTicks(), now);
+        // The evidence and the counter move here, in the same mutation as the incident and the score.
+        // Not before — a refused operation would have spent the allowance; not after publication — a
+        // synchronous listener replaying the operation would observe it unspent. Both are free credit.
+        commitProfileStaging(incident, communityRecord, profileStaging, now);
         communityRecord.addIncident(incident);
         playerRecord.indexDedupe(incident);
 
@@ -785,10 +811,214 @@ public final class ReputationService {
 
         data.setDirty();
         return new StagedOperation(null, Identity.of(request), policy, now, incident,
-                // Nothing to stage in either reserved slot yet; see PendingProfilePayload.
-                Optional.empty(), Optional.empty(), evicted,
+                Optional.of(profileStaging.profile()), Optional.of(profileStaging.credit()), evicted,
                 Optional.ofNullable(precursor), Optional.empty(), playerRecord, communityRecord,
                 new Standing(oldScore, oldTierId), Standing.of(newScore));
+    }
+
+    /**
+     * The two staged profile slots for one operation, decided together.
+     *
+     * <p>Together on purpose: a credit decision scales the evidence it is bound to, so computing one
+     * without the other would leave the two to be reconciled at commit time — and §9.4 freezes the
+     * credited quantity onto the deed forever, which makes "reconciled later" a wrong number nobody
+     * can correct afterwards.
+     */
+    private record ProfileStaging(PendingProfilePayload profile, PendingCreditReservation credit) {
+
+        /** Nothing to attach and nothing to consume: the ordinary answer for most deeds. */
+        static final ProfileStaging NONE = new ProfileStaging(new PendingProfilePayload.Unstaged(),
+                new PendingCreditReservation.Unreserved());
+
+        Optional<IncidentProfileEvidence> evidence() {
+            return profile instanceof PendingProfilePayload.Staged staged
+                    ? Optional.of(staged.evidence())
+                    : Optional.empty();
+        }
+    }
+
+    /**
+     * Computes the frozen §9.4 payload and the §10 credit reservation for one operation, writing
+     * nothing.
+     *
+     * <p>Four outcomes, and the difference between them is the whole design:
+     *
+     * <ul>
+     *   <li><b>No payload</b> when the definition names no {@code social_profile}. §7.1 is explicit
+     *       that recognition is authored or it is zero — there is no severity-derived default,
+     *       because severity describes impact and impact is not publicity.</li>
+     *   <li><b>No payload</b> when the deed is effectively private, including a witnessed deed nobody
+     *       saw that the definition retains as hidden history. Such a record contributes no public
+     *       recognition and no community facets and consumes no public allowance (I03, §23.1's
+     *       private-harmful-event fixture). A stub would be worse than nothing: it would claim there
+     *       is public evidence waiting to be established.</li>
+     *   <li>{@link IncidentProfileEvidence.Origin#DISABLED_AT_OCCURRENCE} when profiles are switched
+     *       off at delivery time. The deed still happened and the window accounting still advances
+     *       (§20); marking it distinctly is what stops a later migration from mistaking it for a
+     *       pre-upgrade record it could enrich (§19.1).</li>
+     *   <li>{@link IncidentProfileEvidence.Origin#LIVE} otherwise: the published profile, the peeked
+     *       credit decision, and every authored channel aged to the deed's own arrival age.</li>
+     * </ul>
+     *
+     * <p>An unresolvable or disallowed profile reference also produces no payload. A profile removed
+     * from the pack, or one whose {@code allowed_incidents} does not admit this type, has no
+     * quantities to freeze, and inventing some would be the live reinterpretation §9.4 replaced.
+     */
+    private static ProfileStaging stageProfile(IncidentDefinition definition, ReputationPolicy policy,
+                                               Optional<PlayerReputationRecord> knownPlayer,
+                                               Optional<CommunityReputationRecord> knownCommunity,
+                                               IncidentVisibility visibility,
+                                               ReputationRequest request, long occurredAt, long now) {
+        Optional<ResourceLocation> profileId = definition.socialProfile();
+        if (profileId.isEmpty() || visibility.effective() == IncidentVisibility.PRIVATE) {
+            return ProfileStaging.NONE;
+        }
+        ProfileRegistryBundle bundle = ProfileRegistryBundle.current();
+        Optional<IncidentProfileDefinition> maybeProfile = bundle.profile(profileId.get());
+        if (maybeProfile.isEmpty()) {
+            if (McaReputationConfig.debugLogging()) {
+                McaReputation.LOGGER.debug("[MCA: Reputation] {} names social profile {}, which no "
+                                + "published pack defines; the deed is recorded with no profile "
+                                + "evidence", request.incidentType(), profileId.get());
+            }
+            return ProfileStaging.NONE;
+        }
+        IncidentProfileDefinition profile = maybeProfile.get();
+        if (!profile.permits(request.incidentType())) {
+            McaReputation.LOGGER.warn("[MCA: Reputation] social profile {} does not allow incident {}; "
+                            + "the deed is recorded with no profile evidence (spec 9.5)",
+                    profileId.get(), request.incidentType());
+            return ProfileStaging.NONE;
+        }
+
+        // --- the credit decision, from a peek that creates nothing -----------
+        Optional<CreditPolicy> creditPolicy = profile.creditPolicy().flatMap(bundle::creditPolicy);
+        boolean commendable = profile.creditClass().discountable();
+        Optional<String> subjectKey = creditPolicy.flatMap(p -> p.subjectLimit()
+                .flatMap(limit -> subjectKey(request, limit.role())));
+        boolean subjectRequired = creditPolicy.flatMap(CreditPolicy::subjectLimit).isPresent();
+
+        CreditWindowTrackers.CreditWindow peeked = CreditWindowTrackers.CreditWindow.FIRST;
+        PendingCreditReservation reservation = new PendingCreditReservation.Unreserved();
+        CreditDecision decision = CreditDecision.unlimited(CreditDecision.Reason.NO_POLICY);
+        if (creditPolicy.isPresent()) {
+            CreditPolicy applicable = creditPolicy.get();
+            peeked = peekCreditWindow(applicable, knownPlayer, knownCommunity, subjectKey,
+                    subjectRequired, now);
+            decision = CreditResolver.resolve(creditPolicy, commendable, peeked.groupOrdinal(),
+                    peeked.subjectOrdinal(), peeked.capacityOverflow());
+            if (!policy.repeatCreditEnabled()) {
+                // §20: an operator bypass of the reduction, not of the accounting. The window still
+                // advances below, so switching the discount back on does not hand back a spent
+                // allowance, and the deed records honestly why it kept its whole value.
+                decision = CreditDecision.unlimited(CreditDecision.Reason.CREDIT_DISABLED);
+            }
+            reservation = new PendingCreditReservation.Reserved(applicable.group(),
+                    applicable.windowTicks(), subjectKey, subjectRequired, peeked, decision);
+        }
+
+        if (!policy.profilesEnabled()) {
+            return new ProfileStaging(new PendingProfilePayload.Staged(
+                    IncidentProfileEvidence.disabledAtOccurrence(profileId.get(), decision)),
+                    reservation);
+        }
+
+        // --- the frozen channels --------------------------------------------
+        long step = profile.effectiveDecayStepTicks();
+        long initialAge = Math.max(0L, now - occurredAt);
+        CreditDecision frozen = decision;
+        Optional<IncidentProfileEvidence.Channel> recognition = profile.recognition()
+                .map(contribution -> stageChannel(Optional.empty(), contribution, frozen, step,
+                        initialAge));
+        List<IncidentProfileEvidence.Channel> facets = new ArrayList<>();
+        profile.facets().forEach((facet, contribution) ->
+                facets.add(stageChannel(Optional.of(facet), contribution, frozen, step, initialAge)));
+
+        IncidentProfileEvidence evidence = IncidentProfileEvidence.of(
+                IncidentProfileEvidence.Origin.LIVE, profileId.get(),
+                IncidentProfileEvidence.fingerprint(profileId.get(), profile), bundle.generation(),
+                recognition, facets, frozen);
+        return new ProfileStaging(new PendingProfilePayload.Staged(evidence), reservation);
+    }
+
+    /**
+     * One authored contribution, credited and aged, in subunits.
+     *
+     * <p>The order is the point: scale first, age second, and both in subunits. A 25%-credited half
+     * point is {@code 1250} subunits rather than a public zero, so two of them still aggregate to one
+     * point (§8.3). {@link CreditDecision#applyTo} refuses to scale a negative contribution at all,
+     * which is where I07 lives — repetition discounts rewards, never accountability.
+     */
+    private static IncidentProfileEvidence.Channel stageChannel(
+            Optional<ResourceLocation> facet, IncidentProfileDefinition.Contribution contribution,
+            CreditDecision decision, long step, long ageTicks) {
+        long authored = contribution.authoredSubunits();
+        long credited = decision.applyTo(authored);
+        long current = ProfileMath.remainingAt(credited, ageTicks, contribution.lifetimeTicks(), step);
+        return new IncidentProfileEvidence.Channel(facet, authored, credited, current,
+                contribution.lifetimeTicks(), step, contribution.resolutionMode(),
+                contribution.resolutionBp());
+    }
+
+    /**
+     * The window this operation would land in, read without creating a record or a counter (I04).
+     *
+     * <p>A community this player has never dealt with reads as occurrence one, which is correct and
+     * is <em>not</em> the same as creating a tracker to say so.
+     */
+    private static CreditWindowTrackers.CreditWindow peekCreditWindow(
+            CreditPolicy policy, Optional<PlayerReputationRecord> knownPlayer,
+            Optional<CommunityReputationRecord> knownCommunity, Optional<String> subjectKey,
+            boolean subjectRequired, long now) {
+        if (policy.scope() == CreditPolicy.Scope.PLAYER_GLOBAL) {
+            return knownPlayer
+                    .map(player -> player.peekGlobalCreditWindow(policy.group(), subjectKey,
+                            subjectRequired, now))
+                    .orElse(CreditWindowTrackers.CreditWindow.FIRST);
+        }
+        return knownCommunity
+                .map(community -> community.peekCreditWindow(policy.group(), subjectKey,
+                        subjectRequired, now))
+                .orElse(CreditWindowTrackers.CreditWindow.FIRST);
+    }
+
+    /** The subject identity a credit policy's role names, when the request carries a usable one. */
+    private static Optional<String> subjectKey(ReputationRequest request, String role) {
+        for (IncidentSubject subject : request.subjects()) {
+            if (subject.hasRole(role) && subject.uuid().isPresent()) {
+                return Optional.of(subject.uuid().get().toString());
+            }
+        }
+        // §10.2: no usable subject takes the conservative shared bucket. Never a fresh allowance, and
+        // never a key derived from a display name or a quest instance id.
+        return Optional.empty();
+    }
+
+    /**
+     * Applies the staged slots inside the canonical mutation: attach the evidence, consume the
+     * allowance (§11.1 step 7).
+     *
+     * <p>The consume is the first and only write to the trackers, and it runs against the same record
+     * and the same evaluation time the staging peeked. The two agree by construction — both ignore a
+     * tracker whose window has already ended at that time — so a disagreement here is a bug rather
+     * than a data condition, and it is logged as one instead of silently changing what the deed is
+     * worth after its credited quantities were already computed.
+     */
+    private static void commitProfileStaging(IncidentRecord incident,
+                                             CommunityReputationRecord community,
+                                             ProfileStaging staging, long now) {
+        if (staging.credit() instanceof PendingCreditReservation.Reserved reserved) {
+            CreditWindowTrackers.CreditWindow consumed = community.creditTrackers().consume(
+                    reserved.group(), reserved.windowTicks(), reserved.subjectKey(),
+                    reserved.subjectRequired(), now);
+            if (!consumed.equals(reserved.peeked())) {
+                McaReputation.LOGGER.error("[MCA: Reputation] repeat-credit reservation for group {} was "
+                                + "staged at {} and consumed at {}; the deed keeps the decision it was "
+                                + "judged by. This is a bug in the staging, not a save condition.",
+                        reserved.group(), reserved.peeked(), consumed);
+            }
+        }
+        staging.evidence().ifPresent(incident::attachProfileEvidence);
     }
 
     /**
