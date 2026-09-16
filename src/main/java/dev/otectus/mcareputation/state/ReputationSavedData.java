@@ -2,7 +2,10 @@ package dev.otectus.mcareputation.state;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.ReceiptOutcome;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.incident.IncidentRecord;
+import dev.otectus.mcareputation.reputation.ReconciliationService;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -50,7 +53,8 @@ import java.util.UUID;
  * the lookup-aware methods are thin adapters over {@link #savePayload} and {@link #loadPayload},
  * which stay provider-neutral. Those two are what the tests and the golden 1.20.1 fixture exercise,
  * and keeping them free of a provider is what lets a fixture written by the Forge build be read back
- * here unchanged. FORMAT_VERSION stays 1 across the loader port because the bytes did not move.
+ * here unchanged. FORMAT_VERSION tracks the schema, never the loader: it moved to 2 with receipts and
+ * per-community revisions, and a v1 file from either build still migrates in place.
  */
 public final class ReputationSavedData extends SavedData {
 
@@ -58,7 +62,7 @@ public final class ReputationSavedData extends SavedData {
     public static final String DATA_NAME = McaReputation.MOD_ID;
 
     /** Bump only for a format change that {@link #migrateFormat} can carry forward. */
-    public static final int FORMAT_VERSION = 1;
+    public static final int FORMAT_VERSION = 2;
 
     private final Map<UUID, PlayerReputationRecord> players = new LinkedHashMap<>();
     /**
@@ -67,6 +71,14 @@ public final class ReputationSavedData extends SavedData {
      */
     private final Set<CommunityKey> decayImmune = new TreeSet<>();
     private int loadedVersion = FORMAT_VERSION;
+
+    /**
+     * Set when the file on disk was written by a newer format than this build understands. Nothing is
+     * loaded into live state, {@link #setDirty} is inert, and {@link #save} writes the untouched tag
+     * back: preserving a file we cannot read beats converting it destructively (§9).
+     */
+    private boolean readOnly;
+    private CompoundTag retainedRaw;
 
     public ReputationSavedData() {
     }
@@ -85,6 +97,23 @@ public final class ReputationSavedData extends SavedData {
 
     public int loadedVersion() {
         return loadedVersion;
+    }
+
+    /**
+     * True when this store is latched read-only because the file came from a newer format. Every
+     * mutation is still accepted by the API and simply never persisted, so a server stays playable
+     * while an operator downgrades or restores a backup.
+     */
+    public boolean isReadOnly() {
+        return readOnly;
+    }
+
+    @Override
+    public void setDirty(boolean value) {
+        if (readOnly) {
+            return;
+        }
+        super.setDirty(value);
     }
 
     // --- player access ------------------------------------------------------
@@ -148,35 +177,11 @@ public final class ReputationSavedData extends SavedData {
      * @return true when something changed and the store was marked dirty
      */
     public boolean reconcilePlayer(UUID playerId, long gameTime) {
-        PlayerReputationRecord record = players.get(playerId);
-        if (record == null) {
-            return false;
-        }
-        int min = McaReputationConfig.minimumScore();
-        int max = McaReputationConfig.maximumScore();
-        boolean changed = false;
-        if (McaReputationConfig.scoreDecayEnabled()) {
-            for (CommunityReputationRecord community : record.communities()) {
-                // An immune community is skipped here and nowhere else: this is the single
-                // reconciliation entry point, so one check covers login, query, mutation and sweep.
-                if (decayImmune.contains(community.key())) {
-                    continue;
-                }
-                if (community.reconcile(gameTime, min, max)) {
-                    changed = true;
-                }
-            }
-        }
-        // Cap enforcement mutates the store (prunes incidents, folds weight into baselines) just as
-        // decay does; either kind of change must mark the save dirty or a crash loses it.
-        if (record.enforcePlayerIncidentCap(McaReputationConfig.maxIncidentsPerPlayer(), gameTime,
-                min, max) > 0) {
-            changed = true;
-        }
-        if (changed) {
-            setDirty();
-        }
-        return changed;
+        // The freeze decision lives in the gate, not here: immunity used to be checked in this method
+        // and nowhere else, which is exactly why seven service paths could walk round it (§5 F07).
+        return ReconciliationService.reconcilePlayer(McaReputationConfig.snapshot(), this, playerId,
+                gameTime, (community, outcome) -> {
+                });
     }
 
     // --- decay immunity -----------------------------------------------------
@@ -218,6 +223,14 @@ public final class ReputationSavedData extends SavedData {
 
     /** The provider-neutral serializer. Byte-for-byte what the Forge 1.20.1 build wrote. */
     CompoundTag savePayload(CompoundTag tag) {
+        if (readOnly && retainedRaw != null) {
+            // Verbatim, key for key: the one safe thing to do with a file from the future is to hand
+            // it back exactly as it arrived.
+            for (String key : retainedRaw.getAllKeys()) {
+                tag.put(key, retainedRaw.get(key).copy());
+            }
+            return tag;
+        }
         tag.putInt("version", FORMAT_VERSION);
         CompoundTag playerTag = new CompoundTag();
         players.forEach((uuid, record) -> {
@@ -244,12 +257,19 @@ public final class ReputationSavedData extends SavedData {
     /** The provider-neutral deserializer, and what the golden 1.20.1 fixture is read through. */
     public static ReputationSavedData loadPayload(CompoundTag tag) {
         ReputationSavedData data = new ReputationSavedData();
-        data.loadedVersion = tag.contains("version") ? tag.getInt("version") : FORMAT_VERSION;
+        // A file with no version at all predates versioning: it is format 1, not "whatever this build
+        // happens to be", or the migration below would never run on the oldest saves of all.
+        data.loadedVersion = tag.contains("version") ? tag.getInt("version") : 1;
         if (data.loadedVersion > FORMAT_VERSION) {
-            McaReputation.LOGGER.warn(
-                    "[MCA: Reputation] {}.dat was written by a newer format (v{} > v{}). Loading what is "
-                            + "readable; unknown fields are preserved only if they sit inside entries we keep.",
+            data.readOnly = true;
+            data.retainedRaw = tag.copy();
+            McaReputation.LOGGER.error(
+                    "[MCA: Reputation] {}.dat was written by format v{}, and this build understands v{}. "
+                            + "Nothing has been loaded and nothing will be written: the file is preserved "
+                            + "exactly as it is. Run the newer version of MCA: Reputation, or restore a "
+                            + "backup taken before the upgrade.",
                     DATA_NAME, data.loadedVersion, FORMAT_VERSION);
+            return data;
         }
 
         int min = McaReputationConfig.minimumScore();
@@ -262,7 +282,9 @@ public final class ReputationSavedData extends SavedData {
                 playerId = UUID.fromString(key);
             } catch (IllegalArgumentException e) {
                 skipped++;
-                McaReputation.LOGGER.debug("[MCA: Reputation] skipping player entry with unparseable UUID '{}'", key);
+                McaReputation.LOGGER.debug("[MCA: Reputation] quarantining player entry with unparseable "
+                        + "UUID '{}'", key);
+                SaveQuarantine.hold("players/" + key, "unparseable player UUID", playerTag.getCompound(key));
                 continue;
             }
             try {
@@ -270,7 +292,10 @@ public final class ReputationSavedData extends SavedData {
                         PlayerReputationRecord.load(playerId, playerTag.getCompound(key), min, max));
             } catch (Throwable t) {
                 skipped++;
-                McaReputation.LOGGER.warn("[MCA: Reputation] skipping unreadable record for player {}", playerId, t);
+                McaReputation.LOGGER.warn("[MCA: Reputation] quarantining unreadable record for player {}",
+                        playerId, t);
+                SaveQuarantine.hold("players/" + key, "player record threw while loading: " + t,
+                        playerTag.getCompound(key));
             }
         }
         if (tag.contains("decayImmune")) {
@@ -290,17 +315,57 @@ public final class ReputationSavedData extends SavedData {
     }
 
     /**
-     * Carries an older on-disk format forward. Nothing to do at v1 — the hook exists so that the very
-     * first format change has an obvious, tested place to live rather than being bolted onto
-     * {@link #load}.
+     * Carries an older on-disk format forward (§9). Idempotent, silent, and lossless: it emits no
+     * event, no toast, no mirror call and no reward, invents nothing for history that was already
+     * pruned, and never moves a score — every field it writes is one that was already implied by what
+     * is on disk.
+     *
+     * <h2>v1 to v2</h2>
+     *
+     * <ol>
+     *   <li>Every retained incident with a dedupe key gets an {@code APPLIED} receipt returning that
+     *       incident's id, so a companion replaying a pre-upgrade operation key learns what it already
+     *       produced instead of recording it a second time.</li>
+     *   <li>Every record carrying only the legacy {@code superseded_by} context entry becomes terminal,
+     *       with the typed link parsed when it is a valid UUID.</li>
+     * </ol>
+     *
+     * <p>There is deliberately <b>no</b> freeze clock in v2. The WP3 reconciliation gate already skips
+     * an immune community's elapsed time on its first pass rather than banking it, which is what
+     * "initialise the freeze clock at upgrade" was asking for; a second stored clock would be a field
+     * whose only job is to agree with that one.
      */
     private void migrateFormat() {
-        if (loadedVersion < FORMAT_VERSION) {
-            McaReputation.LOGGER.info("[MCA: Reputation] upgrading saved data from format v{} to v{}",
-                    loadedVersion, FORMAT_VERSION);
-            loadedVersion = FORMAT_VERSION;
-            setDirty();
+        if (loadedVersion >= FORMAT_VERSION) {
+            return;
         }
+        int receipts = 0;
+        int terminal = 0;
+        for (PlayerReputationRecord player : players.values()) {
+            for (CommunityReputationRecord community : player.communities()) {
+                for (IncidentRecord incident : community.incidents()) {
+                    Optional<String> key = incident.dedupeKey();
+                    if (key.isPresent()) {
+                        String namespace = incident.source().getNamespace();
+                        if (player.findReceipt(namespace, community.key(), key.get()).isEmpty()) {
+                            player.recordReceipt(new OperationReceipt(namespace, player.playerId(),
+                                    community.key(), key.get(), ReceiptOutcome.APPLIED,
+                                    Optional.of(incident.id()), incident.createdGameTime(),
+                                    incident.appliedGameTime()));
+                            receipts++;
+                        }
+                    }
+                    if (incident.adoptLegacySupersession()) {
+                        terminal++;
+                    }
+                }
+            }
+        }
+        McaReputation.LOGGER.info("[MCA: Reputation] upgrading saved data from format v{} to v{}: "
+                        + "{} receipt(s) recovered from retained incidents, {} record(s) marked terminal",
+                loadedVersion, FORMAT_VERSION, receipts, terminal);
+        loadedVersion = FORMAT_VERSION;
+        setDirty();
     }
 
     /** Test seam: an in-memory store with no server attached. */

@@ -46,3 +46,11 @@ Two players, and every schema feature the port must not lose:
 `SavedDataTest` loads it through the provider-neutral `loadPayload` helper, asserts every semantic
 field above, saves it again, reloads, and asserts no semantic loss — and that the re-written
 `version` is still `1`.
+
+## `mcareputation-format-2-1.20.1.nbt`
+
+The format-2 golden file, asserted byte for byte by `GoldenSavedDataTest` and copied unchanged by the
+NeoForge port. Stored **uncompressed** (`NbtIo.write`), so the comparison is over NBT alone.
+
+Regenerate deliberately, never to make a failing assertion pass:
+`./gradlew test --tests '*GoldenSavedDataTest' -Dmcareputation.regenerateFixtures=true`

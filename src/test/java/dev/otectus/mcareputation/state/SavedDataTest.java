@@ -246,7 +246,8 @@ class SavedDataTest {
                 CommunityReputationRecord.load(tag, MIN, MAX).orElseThrow();
         assertEquals(dev.otectus.mcareputation.reputation.ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY,
                 loaded.incidentCount(),
-                "a hand-edited or corrupt save cannot smuggle an unbounded ledger into memory");
+                "the load path applies the runtime admission policy: this ledger is entirely spent, "
+                        + "weightless history, so all of the overflow is evictable");
     }
 
     // ------------------------------------------------------------------
@@ -313,6 +314,99 @@ class SavedDataTest {
      * other. {@code reconcilePlayer} must report it and mark the save dirty even when decay itself
      * moved nothing, or the prune is silently lost on a crash before the next unrelated write.
      */
+    // ------------------------------------------------------------------
+    // Format 2: retention, the read-only latch, and quarantine (T22, T37)
+    // ------------------------------------------------------------------
+
+    /** T22: a ledger the cap cannot touch survives a reload with its standing intact. */
+    @Test
+    void pinnedOverflowSurvivesReloadWithNoScoreLoss() {
+        ReputationSavedData data = ReputationSavedData.createForTest();
+        CommunityReputationRecord community = data.getOrCreatePlayer(TestFixtures.PLAYER_A)
+                .getOrCreate(TestFixtures.OVERWORLD_3);
+        int oversize = dev.otectus.mcareputation.reputation.ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY + 6;
+        for (int i = 0; i < oversize; i++) {
+            IncidentRecord pinned = IncidentRecord.create(UUID.randomUUID(), TestFixtures.ASSAULT,
+                    TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3, i, TestFixtures.SOURCE,
+                    Optional.empty(), 5, IncidentVisibility.VILLAGE, IncidentSeverity.MINOR, List.of());
+            pinned.setPinned(true);
+            community.addIncident(pinned);
+        }
+        community.recomputeScore(MIN, MAX);
+        int before = community.score();
+        assertEquals(oversize * 5, before);
+
+        ReputationSavedData loaded = data.roundTripForTest();
+        CommunityReputationRecord reloaded = loaded.player(TestFixtures.PLAYER_A).orElseThrow()
+                .community(TestFixtures.OVERWORLD_3).orElseThrow();
+
+        assertEquals(oversize, reloaded.incidentCount(),
+                "load applies the same admission policy as runtime, and pinned history is not evictable");
+        assertEquals(before, reloaded.score(), "so not a point of standing is lost to the cap");
+    }
+
+    /** T22: a file from a newer format is preserved untouched, never half-converted. */
+    @Test
+    void aFutureFormatFileIsPreservedAndTheStoreLatchesReadOnly() {
+        CompoundTag written = populated().savePayload(new CompoundTag());
+        written.putInt("version", ReputationSavedData.FORMAT_VERSION + 1);
+        CompoundTag original = written.copy();
+
+        ReputationSavedData loaded = ReputationSavedData.loadPayload(written);
+
+        assertTrue(loaded.isReadOnly());
+        assertEquals(0, loaded.playerCount(), "nothing from a format we cannot read enters live state");
+        loaded.setDirty();
+        assertFalse(loaded.isDirty(), "and nothing we do can schedule a write over it");
+        assertEquals(original, loaded.savePayload(new CompoundTag()),
+                "the file is handed back exactly as it arrived");
+    }
+
+    /** T22: the malformed neighbour is quarantined for inspection, not merely skipped. */
+    @Test
+    void malformedNeighboursAreQuarantinedWhileValidOnesLoad() {
+        dev.otectus.mcareputation.state.SaveQuarantine.clear();
+        try {
+            CompoundTag tag = populated().savePayload(new CompoundTag());
+            tag.getCompound("players").put("definitely-not-a-uuid", new CompoundTag());
+
+            ReputationSavedData loaded = ReputationSavedData.loadPayload(tag);
+
+            assertEquals(2, loaded.playerCount(), "the readable players still load");
+            assertEquals(30, loaded.score(TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3));
+            assertEquals(1, dev.otectus.mcareputation.state.SaveQuarantine.size(),
+                    "and the unreadable entry is held rather than dropped");
+            assertTrue(dev.otectus.mcareputation.state.SaveQuarantine.report()
+                    .contains("definitely-not-a-uuid"));
+        } finally {
+            dev.otectus.mcareputation.state.SaveQuarantine.clear();
+        }
+    }
+
+    /** T37: the exactly-once import marker outlives two passes of the format upgrade. */
+    @Test
+    void legacyImportMarkersSurviveADoubleMigration() {
+        ReputationSavedData data = ReputationSavedData.createForTest();
+        PlayerReputationRecord player = data.getOrCreatePlayer(TestFixtures.PLAYER_A);
+        player.getOrCreate(TestFixtures.OVERWORLD_3).addBaseline(120, MIN, MAX);
+        player.markMigrated("mcaquests:legacy_reputation_v1", "1");
+
+        CompoundTag asV1 = data.savePayload(new CompoundTag());
+        asV1.putInt("version", 1);
+        ReputationSavedData once = ReputationSavedData.loadPayload(asV1);
+
+        CompoundTag againAsV1 = once.savePayload(new CompoundTag());
+        againAsV1.putInt("version", 1); // the same file offered to the upgrade a second time
+        ReputationSavedData twice = ReputationSavedData.loadPayload(againAsV1);
+
+        PlayerReputationRecord reloaded = twice.player(TestFixtures.PLAYER_A).orElseThrow();
+        assertTrue(reloaded.hasMigrated("mcaquests:legacy_reputation_v1"));
+        assertEquals(Optional.of("1"), reloaded.migrationVersion("mcaquests:legacy_reputation_v1"));
+        assertEquals(120, twice.score(TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3),
+                "two upgrades neither duplicate nor lose the imported balance");
+        assertEquals(0, reloaded.receiptCount(), "and invent no receipts for history that never existed");
+    }
+
     @Test
     void capPruningAloneMarksTheStoreDirty() {
         ReputationSavedData data = ReputationSavedData.createForTest();

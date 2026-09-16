@@ -19,6 +19,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 
@@ -48,7 +49,21 @@ public final class PlayerReputationRecord {
     /** {@code "<community>|<dedupeKey>"} → incident id. Rebuilt on load; bounded; advisory only. */
     private final Map<String, UUID> dedupeIndex = new LinkedHashMap<>();
 
+    /**
+     * Delivery receipts (§5 F03, DD6). Unlike {@link #dedupeIndex} these are a <b>source of truth</b>:
+     * they are the only record of a delivery that produced no incident, so they are saved and loaded
+     * rather than rebuilt.
+     */
+    private final OperationReceipts receipts = new OperationReceipts();
+
     private String lastKnownName = "";
+
+    /**
+     * How many times this player's title set has changed (§6 "Title synchronization"). Persisted, or a
+     * mirror that caches by revision would see it restart at zero after a reload and ignore the state
+     * it is being sent.
+     */
+    private long titleRevision;
 
     public PlayerReputationRecord(UUID playerId) {
         this.playerId = playerId;
@@ -73,9 +88,18 @@ public final class PlayerReputationRecord {
         }
     }
 
+    public long titleRevision() {
+        return titleRevision;
+    }
+
+    /** @return the new revision. Called by the title service after a grant or revocation. */
+    public long bumpTitleRevision() {
+        return ++titleRevision;
+    }
+
     public boolean isEmpty() {
         return communities.values().stream().allMatch(CommunityReputationRecord::isEmpty)
-                && globalTitles.isEmpty() && migrationMarkers.isEmpty();
+                && globalTitles.isEmpty() && migrationMarkers.isEmpty() && receipts.isEmpty();
     }
 
     // --- communities --------------------------------------------------------
@@ -104,21 +128,39 @@ public final class PlayerReputationRecord {
     }
 
     /**
-     * Drops the oldest empty community record to make room. Only genuinely empty records are eligible,
-     * so hitting the cap can never cost a player standing; if none are empty the cap is exceeded and
-     * logged rather than something meaningful being discarded.
+     * Whether a community record can be admitted without exceeding the per-player community budget:
+     * either the player is under the cap, or something empty can make room. When this is false the
+     * write is refused (§5 F09, D5) rather than the cap being quietly exceeded.
      */
-    private void evictLeastInteresting() {
+    public boolean canAdmitCommunity(CommunityKey key) {
+        if (key != null && communities.containsKey(key)) {
+            return true;
+        }
+        if (communities.size() < ReputationBounds.MAX_COMMUNITIES_PER_PLAYER) {
+            return true;
+        }
+        return communities.values().stream().anyMatch(CommunityReputationRecord::isEmpty);
+    }
+
+    /**
+     * Drops the oldest empty community record to make room. Only genuinely empty records are eligible,
+     * so hitting the cap can never cost a player standing; if none are empty nothing is evicted and
+     * the caller's own admission check is what refuses the write.
+     *
+     * @return true when a record was evicted
+     */
+    private boolean evictLeastInteresting() {
         for (Map.Entry<CommunityKey, CommunityReputationRecord> entry : communities.entrySet()) {
             if (entry.getValue().isEmpty()) {
                 communities.remove(entry.getKey());
-                return;
+                return true;
             }
         }
         McaReputation.LOGGER.warn(
                 "[MCA: Reputation] player {} tracks {} communities, above the cap of {}; none are empty so "
                         + "nothing was evicted",
                 playerId, communities.size(), ReputationBounds.MAX_COMMUNITIES_PER_PLAYER);
+        return false;
     }
 
     public Collection<CommunityReputationRecord> communities() {
@@ -241,6 +283,52 @@ public final class PlayerReputationRecord {
         }
     }
 
+    // --- receipts -----------------------------------------------------------
+
+    /** The receipt for one producer's operation, exactly. */
+    public Optional<OperationReceipt> findReceipt(String namespace, CommunityKey community,
+                                                  String operationKey) {
+        return receipts.find(namespace, community, operationKey);
+    }
+
+    /**
+     * The receipt for an operation key produced before namespaces existed: matched within the
+     * community, whoever filed it. Consulted only after the exact lookup misses.
+     */
+    public Optional<OperationReceipt> findLegacyReceipt(CommunityKey community, String operationKey) {
+        return receipts.findAnyNamespace(community, operationKey);
+    }
+
+    public void recordReceipt(OperationReceipt receipt) {
+        receipts.put(receipt);
+    }
+
+    public int receiptCount() {
+        return receipts.size();
+    }
+
+    public Collection<OperationReceipt> receipts() {
+        return receipts.all();
+    }
+
+    /** The oldest occurrence still answerable, or empty while nothing has been forgotten. */
+    public OptionalLong receiptFloor() {
+        return receipts.floor();
+    }
+
+    /**
+     * Applies both receipt budgets: the retention horizon and the count ceiling. A receipt whose
+     * incident is still in the ledger is kept while the count is under budget, so the two indexes can
+     * never give different answers about the same operation.
+     *
+     * @return how many receipts were evicted
+     */
+    public int pruneReceipts(long now, long retentionTicks) {
+        return receipts.prune(now, retentionTicks, receipt -> receipt.incidentId()
+                .flatMap(id -> community(receipt.community()).flatMap(record -> record.incident(id)))
+                .isPresent());
+    }
+
     // --- cross-community bounds ---------------------------------------------
 
     public int totalIncidentCount() {
@@ -249,6 +337,20 @@ public final class PlayerReputationRecord {
             total += community.incidentCount();
         }
         return total;
+    }
+
+    /**
+     * Whether any community holds something that could be dropped. When this is false and the player
+     * is at the whole-player cap, the next deed is refused with {@code Reason.CAPACITY} rather than the
+     * cap being exceeded (§5 F09, D5).
+     */
+    public boolean hasEvictableIncident(long gameTime, long receiptHorizonTicks) {
+        for (CommunityReputationRecord community : communities.values()) {
+            if (community.hasEvictableIncident(gameTime, receiptHorizonTicks)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -302,10 +404,20 @@ public final class PlayerReputationRecord {
             globalTitles.forEach(title -> titleList.add(StringTag.valueOf(title.toString())));
             tag.put("globalTitles", titleList);
         }
+        // Format 2, written only when non-zero, so a store with no title history is byte-identical
+        // to what format 1 produced.
+        if (titleRevision != 0L) {
+            tag.putLong("titleRevision", titleRevision);
+        }
         if (!migrationMarkers.isEmpty()) {
             CompoundTag markers = new CompoundTag();
             migrationMarkers.forEach(markers::putString);
             tag.put("migrations", markers);
+        }
+        // Format 2. Written only when non-empty, so a store that has seen no keyed delivery is
+        // byte-identical to what format 1 produced.
+        if (!receipts.isEmpty()) {
+            tag.put("receipts", receipts.save());
         }
         return tag;
     }
@@ -334,9 +446,17 @@ public final class PlayerReputationRecord {
             }
         }
 
+        record.titleRevision = Math.max(0L, tag.getLong("titleRevision"));
+
         CompoundTag markers = tag.getCompound("migrations");
         for (String key : markers.getAllKeys()) {
             record.migrationMarkers.put(key, markers.getString(key));
+        }
+
+        ListTag receiptList = tag.getList("receipts", Tag.TAG_COMPOUND);
+        for (int i = 0; i < receiptList.size(); i++) {
+            OperationReceipt.load(receiptList.getCompound(i), playerId)
+                    .ifPresent(record.receipts::put);
         }
 
         record.rebuildDedupeIndex();

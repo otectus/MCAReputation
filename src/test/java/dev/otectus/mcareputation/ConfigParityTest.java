@@ -60,6 +60,7 @@ class ConfigParityTest {
             "witnesses.opinionInvolvedPercent",
             "limits.maxIncidentsPerCommunity",
             "limits.maxIncidentsPerPlayer",
+            "limits.receiptRetentionTicks",
             "limits.reconcileOnlineIntervalTicks",
             "limits.strictJsonValidation",
             "visibility.enableScoreboardObjective",
@@ -69,6 +70,7 @@ class ConfigParityTest {
             "integration.enableQuestsIntegration",
             "integration.enableConversationsIntegration",
             "integration.enableCrimeIntegration",
+            "integration.coreAuthorityUndeclaredKinds",
             "integration.mirrorQuestsFallbackState",
             "integration.migrateLegacyQuestsData");
 
@@ -177,6 +179,13 @@ class ConfigParityTest {
         assertTrue(McaReputationConfig.maxWitnesses()
                         <= dev.otectus.mcareputation.reputation.ReputationBounds.MAX_WITNESSES,
                 "config must not be able to raise the witness cap");
+
+        assertEquals(336000L, McaReputationConfig.receiptRetentionTicks(),
+                "receipts default to a fortnight of ticks before they may be compacted away");
+        assertEquals(dev.otectus.mcareputation.reputation.ReputationPolicy.UndeclaredAuthorityMode
+                        .ASSAULT_KILL_ONLY,
+                McaReputationConfig.coreAuthorityUndeclaredKinds(),
+                "an authority that does not declare its kinds is trusted only for the two legacy kinds");
     }
 
     /** The two file names are part of the upgrade contract: an existing TOML must still be found. */

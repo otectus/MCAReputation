@@ -96,11 +96,21 @@ Built with `ReputationRequest.builder(server, playerId, community, incidentType,
 
 ### `ReputationResult` / `ResolutionResult` / `ImportResult`
 
-Each carries `applied` plus a `Reason`. `DUPLICATE`, `DISABLED`, `NO_COMMUNITY`, `UNWITNESSED`, and
-`ALREADY_MIGRATED` are all correct, expected answers.
+Each carries `applied` plus a `Reason`. `DUPLICATE`, `DISABLED`, `NO_COMMUNITY`, `UNWITNESSED`,
+`CAPACITY`, and `ALREADY_MIGRATED` are all correct, expected answers.
 
 `appliedDelta` is what the score **actually** moved, not what was asked for. At the clamp they differ,
 and player-facing feedback must use the real number.
+
+A `DUPLICATE` result from `ReputationResult.duplicate(...)` **names the incident the first attempt
+created**: `applied()` is false and `appliedDelta()` is zero, but `incidentId()` is present. That is
+what makes a duplicated write recoverable — a caller that crashed between our commit and its own link
+write replays the same key and learns the id, instead of losing the link or recording a second
+incident to obtain one.
+
+`CAPACITY` means the community's ledger is full of history that may not be evicted (retained because
+it is pinned, still contributing, or a live amends candidate) and nothing was written — never a
+partial commit.
 
 ### `ReputationSnapshot`
 
@@ -141,6 +151,9 @@ Optional<CommunityKey> resolveCommunity(Entity villager);
 Optional<CommunityKey> resolveCommunity(ServerLevel level, BlockPos pos, int radius);
 List<CommunityKey>     knownCommunities(MinecraftServer server, UUID player);
 
+// Capabilities
+ReputationCapabilities capabilities(MinecraftServer server);
+
 // Reads
 OptionalInt                  getScore(MinecraftServer, UUID, CommunityKey);
 int                          getScoreOrZero(MinecraftServer, UUID, CommunityKey);
@@ -151,26 +164,45 @@ int                          getCheckBias(MinecraftServer, UUID, CommunityKey, S
 boolean                      matches(MinecraftServer, UUID, CommunityKey, ReputationQuery);
 List<ReputationIncidentView> recentIncidents(MinecraftServer, UUID, CommunityKey, int limit);
 List<ReputationIncidentView> selectIncidents(MinecraftServer, UUID, CommunityKey, IncidentQuery);
+List<ReputationIncidentView> selectIncidents(MinecraftServer, UUID, CommunityKey, IncidentQuery,
+                                             SpeakerContext speaker);
+Optional<SpeakerContext>     speakerContext(MinecraftServer, Entity villager);
 boolean                      villagerKnows(MinecraftServer, Entity villager, UUID player, UUID incident);
 Optional<ExternalGossipCandidate> gossipCandidate(MinecraftServer, UUID, CommunityKey, UUID incident,
                                                   String playerName);
+Optional<GossipStory>        gossipStory(MinecraftServer, Entity villager, UUID player, CommunityKey);
+Optional<ReceiptView>        findReceipt(MinecraftServer, String namespace, UUID player, CommunityKey,
+                                        String operationKey);
+Optional<ReputationIncidentView> findIncident(MinecraftServer, UUID player, CommunityKey, UUID incidentId);
+OptionalLong                 receiptFloor(MinecraftServer, UUID player);
 
 // Per-villager opinion
 Optional<VillagerOpinion>    getVillagerOpinion(MinecraftServer, UUID player, UUID villager,
                                                CommunityKey);
 Optional<VillagerOpinion>    getVillagerOpinion(MinecraftServer, UUID player, Entity villager);
+OpinionResult                getVillagerOpinionDetailed(MinecraftServer, UUID player, UUID villager,
+                                                       CommunityKey);
+OpinionResult                getVillagerOpinionDetailed(MinecraftServer, UUID player, Entity villager);
 int                          getOpinionBias(MinecraftServer, UUID player, UUID villager,
                                            CommunityKey, String axis);
 
 // Writes
 ReputationResult record(ReputationRequest);
+DeliveryOutcome   deliver(IncidentDelivery);
+ReputationResult  recordSuperseding(ReputationRequest successor, SupersedeSpec spec);
 ResolutionResult resolve(MinecraftServer, UUID, CommunityKey, UUID incident, IncidentStatus,
                          ResourceLocation source);
 ResolutionResult resolveBySelector(MinecraftServer, UUID, CommunityKey, IncidentQuery selector,
                                    IncidentStatus, ResourceLocation source);
+ResolutionResult resolveBySelector(MinecraftServer, UUID, CommunityKey, IncidentQuery selector,
+                                   SpeakerContext speaker, IncidentStatus, ResourceLocation source);
+ResolutionResult resolveBound(MinecraftServer, UUID, CommunityKey, UUID incidentId, IncidentStatus,
+                              ResourceLocation source, String operationKey);
 
 // Titles
 boolean hasTitle(MinecraftServer, UUID, ResourceLocation, Optional<CommunityKey>);
+Set<ResourceLocation> globalTitles(MinecraftServer, UUID player);
+Optional<String> highWaterTierId(MinecraftServer, UUID, CommunityKey, ResourceLocation ladder);
 boolean grantTitle(MinecraftServer, UUID, ResourceLocation, CommunityKey);
 boolean revokeTitle(MinecraftServer, UUID, ResourceLocation, CommunityKey);
 
@@ -198,12 +230,39 @@ tension, and familiarity are private interpersonal state; public standing has no
 ### Per-villager opinion
 
 `getVillagerOpinion` queries what one villager personally makes of a player. Returns empty when the
-feature is off, when the mod is disabled, or when the player has no record with the community —
-there is nothing to have an opinion about. The variant taking a `UUID` returns the opinion and an empty
+feature is off or the mod is disabled; a valid community with no record still answers, with a
+present zero opinion (basis `NONE`) rather than an empty result — this villager genuinely knows
+nothing, which is a real answer. The variant taking a `UUID` returns the opinion and an empty
 `villagerName`; the one taking an `Entity` resolves the community from MCA and fills in the name.
 
 `getOpinionBias` answers the bounded check bias from that villager's opinion tier rather than the
 village's — same ±8 ceiling and the same two axes (`trust`, `respect`) as `getCheckBias`.
+
+`getVillagerOpinionDetailed` answers the question the plain overload cannot: an
+`OpinionResult(OpinionAvailability, Optional<VillagerOpinion>)` where `AVAILABLE` covers a real
+answer, including a genuine zero for a villager who knows nothing about the player yet. Only
+`DISABLED`, `UNSUPPORTED`, and `UNRESOLVED` license falling back to public standing — a valid
+community with no record and no opinion feature disabled is `AVAILABLE`, not an excuse to guess.
+
+### Effective capabilities
+
+`capabilities(server)` returns a `ReputationCapabilities` record — `apiVersion`, `enabled`,
+`decayEnabled`, `opinionEnabled`, the set of supported operation `features` (named string constants on
+`ReputationCapabilities`, e.g. `FEATURE_SUPERSEDE`, `FEATURE_RECEIPTS`, `FEATURE_SPEAKER_QUERY`), the
+`nativeKinds` this build is still detecting itself, a `claimants` map of which authority (if any) has
+effectively claimed each `CoreIncidentKind`, and an optional `readinessReason` for an operator. This is
+additive; a companion probes for the method and falls back to its own assumptions without it.
+
+### Standing change envelope
+
+Every canonical change now carries a `StandingChange(player, community, oldScore, newScore, oldTierId,
+newTierId, ladder, highWaterTierId, revision, cause, quiet)`, published exactly once per semantic
+event so mirrors, the NeoForge events, and player feedback can never disagree. `ChangeCause` is one of
+`DEED`, `RESOLUTION`, `SUPERSEDE`, `DECAY`, `ADMIN`, `IMPORT`, `RELOAD`, `MIGRATION`; `DECAY`, `RELOAD`,
+and `MIGRATION` are **quiet** — the displayed tier and every condition that reads standing still moves,
+but no toast, no action-bar line, and `ReputationTierChangedEvent.firstTime()` is never `true` for
+them. `ReputationChangedEvent` gained a constructor overload carrying `cause()`/`quiet()`; the original
+constructor still exists and implies `DEED`/`false`.
 
 ### Decay immunity
 
@@ -220,11 +279,95 @@ snapshot for the named community followed by the open-screen push; the **caller*
 having validated the interaction server-side (the Quests Journal validates that the player actually
 knows the village before calling it).
 
+### Incident delivery, receipts and the exactly-once limit
+
+`deliver(IncidentDelivery)` records a deed under a producer-owned operation identity and answers with
+a `DeliveryOutcome(ReceiptOutcome, ReputationResult, Optional<ReceiptView>)`. `IncidentDelivery` wraps
+an existing `ReputationRequest` — it does not add fields to that public record — plus
+`producerNamespace`, `operationKey`, and an opaque `producerRevision`; `IncidentDelivery.of(request)`
+derives the namespace from the request's `source()` and the key from its `dedupeKey`. Replaying the
+same `namespace + player + community + operationKey` returns the first delivery's answer, including
+for an operation that produced no incident at all (`ACCEPTED_NO_PUBLIC_INCIDENT`) — something a plain
+dedupe key cannot express.
+
+`ReceiptOutcome` is `APPLIED`, `DUPLICATE`, `ACCEPTED_NO_PUBLIC_INCIDENT`, `REFUSED_DISABLED`,
+`REFUSED_INVALID`, `REFUSED_CAPACITY`. `isTerminal()` is true for `APPLIED`,
+`ACCEPTED_NO_PUBLIC_INCIDENT`, and `REFUSED_INVALID` — these persist a receipt and replay forever.
+`REFUSED_DISABLED` and `REFUSED_CAPACITY` are retryable and store nothing; `DUPLICATE` is reported but
+never itself stored, since the original receipt already holds the answer.
+
+`findReceipt`, `findIncident`, and `receiptFloor` are **strictly read-only**: no player record is
+created, nothing is reconciled, and no event fires. `findReceipt` tries the namespaced identity first
+and falls back to the legacy unnamespaced key, so an operation key written before receipts existed
+still resolves. `receiptFloor` returns the oldest occurrence time this player's receipts can still
+answer for; an absent value means nothing has been evicted yet, and an operation older than the floor
+is outside the replay guarantee and needs explicit recovery rather than trusting a "never seen" answer.
+
+**Exactly-once delivery is not an unconditional guarantee.** Two independently saved mod files are not
+one transaction: if the world is killed between this mod's commit and a caller's own save, the receipt
+answers correctly on replay, but only for as long as it survives `receiptRetentionTicks` and the
+receipt budget. Design a producer's recovery path around the horizon `receiptFloor` reports, not around
+memory lasting forever.
+
+### Superseding a precursor
+
+`recordSuperseding(ReputationRequest successor, SupersedeSpec spec)` is the seam a fatal encounter
+uses so an assault and the killing that follows it total one figure rather than stacking two. It is
+also what a companion recording the same shape of upgrade should call — the native kill path uses this
+exact method. `SupersedeSpec(precursorIncidentId, maxWindowTicks, requireSharedSubject)` validates same
+player, same community, a shared subject if required, the precursor within the window by occurrence
+time, and that the precursor is not already superseded or `DISPROVEN`. On success it folds the
+precursor, records the successor, restores the precursor if the successor carries no public weight,
+and publishes exactly one `StandingChange` with `cause=SUPERSEDE`. If validation fails, the successor
+is still recorded normally — a real deed is never dropped for a bookkeeping mismatch.
+
+### Speaker-aware queries and bound resolution
+
+`SpeakerContext(speakerId, resident)` names the villager a knowledge-filtered query is being asked on
+behalf of. The 5-arg `selectIncidents(..., SpeakerContext)` and the `resolveBySelector` overload that
+takes one honour `IncidentQuery.knownToSpeaker()`, filtering through that villager's own awareness and
+rumor delay. **The speaker-less overloads now fail closed**: since 0.4.1, a selector carrying
+`knownToSpeaker` with no speaker supplied returns nothing rather than silently ignoring the flag. Use
+`speakerContext(server, villager)` to resolve one from an entity.
+
+`resolveBound(server, player, community, incidentId, status, source, operationKey)` resolves an exact
+incident by id, refuses a superseded record, and is idempotent per operation key through the receipt
+store: a replay of the same key answers with the current state rather than moving anything a second
+time, an unknown id is `NOT_FOUND` with no receipt written, and a blank key falls through to plain
+`resolve` semantics.
+
+### Gossip story
+
+`gossipStory(server, villager, player, community)` returns a `GossipStory` — incident id, type,
+status, a `storyRevision` that changes only on a status transition or a supersession (never on
+ordinary decay), current and original contribution, occurrence time, and the supersede link. A
+superseded or `DISPROVEN` record still produces a story, but only as a correction: `candidate` is
+empty for it, since there is a change to acknowledge and no baseline line to say. `gossipCandidate` and
+`ExternalGossipCandidate` are untouched, so an adapter written against the older call keeps its exact
+baseline behaviour.
+
+### Title sync additions
+
+`globalTitles(server, player)` enumerates a player's global titles directly, with no community record
+required — a player who has never touched a village can still hold one. `highWaterTierId(server,
+player, community, ladder)` reads the high-water mark for an arbitrary ladder rather than only the
+default one; a jump across several positive tiers in one change grants each newly crossed milestone
+title once while still publishing a single `StandingChange` and tier notification. `ReputationMirror`
+gained two additive defaults: `mirrorTitleRevoked(player, community, title)`, a no-op by default since
+a grants-only stream cannot repair a revoked title on its own, and `mirrorTitleState(player,
+TitleSnapshot, revision)` sending every title a player currently holds — sent after every grant and
+revocation and again on login, so a mirror can reconcile instead of unioning forever. A mirror written
+against the original interface keeps compiling and keeps receiving `mirrorScore`/`mirrorVillageTitle`/
+`mirrorGlobalTitle` unchanged; `mirrorStanding(StandingChange)` is also additive and defaults to calling
+`mirrorScore` with the change's fields.
+
 Writes attributed to a companion by their `source` namespace honour that companion's `[integration]`
 config toggle: with `enableQuestsIntegration=false`, an `mcaquests:*`-sourced `record`/`resolve`
 returns `DISABLED` and nothing mutates; likewise `mcaconversations:*` under
-`enableConversationsIntegration=false`, which also zeroes `getCheckBias`, empties `gossipCandidate`,
-and makes `matches` answer false so authored fallbacks fire.  MCA: Crime's `mcacrime:*` sources honour
+`enableConversationsIntegration=false`, which also zeroes `getCheckBias` and empties
+`gossipCandidate`. `matches` is not gated on that switch: it evaluates the effective standing
+either way, so a valid community with no record still answers from the neutral standing rather than
+failing, and an unresolvable community fails closed regardless of the toggle.  MCA: Crime's `mcacrime:*` sources honour
 `enableCrimeIntegration` the same way.
 
 ### Core-incident authority
@@ -234,10 +377,24 @@ one swing costs the player two deeds. `registerCoreIncidentAuthority` is that ag
 
 ```java
 McaReputationApi.registerCoreIncidentAuthority(new CoreIncidentAuthority() {
-    public ResourceLocation authorityId() { return new ResourceLocation("yourmod", "detector"); }
+    public ResourceLocation authorityId() { return ResourceLocation.fromNamespaceAndPath("yourmod", "detector"); }
     public boolean owns(CoreIncidentKind kind) { return detectorEnabled && bridgeHealthy; }
+    // overriding the additive defaults below is optional
 });
 ```
+
+`declaredKinds()`, `canDeliver(kind)`, and `onServerStopped()` are additive defaults since 0.4.1 and do
+not move `getApiVersion()`. An authority that declares nothing is *undeclared/legacy*: whether it is
+still honoured is governed by this mod's own `coreAuthorityUndeclaredKinds` config, which defaults to
+trusting it only for the two kinds that existed before this version
+(`MCA_VILLAGER_ASSAULT`/`MCA_VILLAGER_KILL`) — the four newer kinds
+(`MCA_VILLAGER_RESCUE`/`MCA_VILLAGER_CURE`/`MCA_RAID_REPELLED`/`PLAYER_KILL_IN_VILLAGE`) stay detected
+here unless the authority explicitly declares them. `canDeliver(kind)` lets an authority answer `owns`
+truthfully while still handing a kind back at the moment it genuinely cannot file it.
+`CoreIncidentAuthorityRegistration` gained an additive `unavailableReason()` for the same diagnostic.
+`onServerStopped()` is called once per server stop — the **registration itself survives** into the
+next world loaded in the same JVM, since companions register once from common setup and releasing the
+handle would leave them silently unregistered a second time.
 
 ```java
 public enum CoreIncidentKind {
@@ -265,16 +422,20 @@ A null authority is rejected immediately with `IllegalArgumentException`. Withdr
 very next event. `close()` is idempotent. Claims survive a server stop and remain active for the next
 world loaded in the same JVM.
 
-Reserved surface, carried but not yet consumed in this version: `TitleDefinition.revocable`,
-`TitleDefinition.icon`, and the `BuiltinIncidents.SOURCE_*` constants. Set them freely; they gain
-behaviour in a later version without a format change.
+Reserved surface, carried but not yet consumed in this version: `TitleDefinition.revocable` and
+`TitleDefinition.icon`. Set them freely; they gain behaviour in a later version without a format
+change.
 
 ## Additive additions
 
-The three new methods for per-villager opinion and the two for decay immunity do not bump the API
-version, which stays 2. `getApiVersion()` deliberately does not move, because a bridge written against
-this version remains fully compatible. A companion written for an earlier version neither calls these
-methods nor is affected by them, so a mismatch is silent and fine.
+Every method introduced in this generation past the original event-migration surface — per-villager
+opinion, decay immunity, `capabilities`, `deliver`/receipts, `recordSuperseding`, the speaker-aware and
+bound-resolution overloads, `highWaterTierId`/`globalTitles`, `getVillagerOpinionDetailed`,
+`gossipStory`, and the three `ReputationMirror`/`CoreIncidentAuthority` defaults — does not bump the
+API version, which stays 2. `getApiVersion()` deliberately does not move, because a bridge written
+against this version remains fully compatible. A companion written for an earlier version neither
+calls these methods nor is affected by them, so a mismatch is silent and fine. Use
+`capabilities(server)` to discover what an installed build actually supports before calling into it.
 
 For companions that must run against older servers, the recommended pattern is to probe once with
 `McaReputationApi.class.getMethod("getVillagerOpinion", MinecraftServer.class, UUID.class, UUID.class, CommunityKey.class)`,
@@ -283,7 +444,7 @@ screen; if not, fall back to village-level standing.
 
 ## Network compatibility
 
-The network protocol version is `"4"` for this release. Clients and servers must match exactly at
+The network protocol version is `"5"` for this release. Clients and servers must match exactly at
 handshake, or the connection is rejected before any data travels. The version bumps on any change to
 the registered packet format.
 
@@ -358,7 +519,7 @@ standing through authored data, or by recording and resolving incidents of your 
 
 | Event | Fired when |
 |---|---|
-| `ReputationChangedEvent` | Standing moved, from any cause. `delta()` is the applied change. `incidentId()` is empty for decay, baseline, and import changes. |
+| `ReputationChangedEvent` | Standing moved, from any cause. `delta()` is the applied change. `incidentId()` is empty for decay, baseline, and import changes. `cause()` names the `ChangeCause`; `quiet()` is true for `DECAY`/`RELOAD`/`MIGRATION`. |
 | `ReputationTierChangedEvent` | A tier boundary was crossed, either direction. `firstTime()` distinguishes a genuine new best from re-entering a tier already held. |
 | `ReputationIncidentCreatedEvent` | A deed was recorded. Note that a zero-delta narrative record fires this and **no** change event. |
 | `ReputationIncidentResolvedEvent` | A status genuinely moved. A repeated or weaker resolution stays silent. |
@@ -378,8 +539,14 @@ public interface ReputationMirror {
                      ResourceLocation ladder, String highWaterTierId);
     void mirrorVillageTitle(UUID player, CommunityKey community, ResourceLocation title);
     void mirrorGlobalTitle(UUID player, ResourceLocation title);
+    default void mirrorStanding(StandingChange change) { /* delegates to mirrorScore */ }
+    default void mirrorTitleRevoked(UUID player, Optional<CommunityKey> community,
+                                    ResourceLocation title) { }
+    default void mirrorTitleState(UUID player, TitleSnapshot state, long revision) { }
 }
 ```
+
+See "Standing change envelope" and "Title sync additions" above for the three additive defaults.
 
 Called after a successful commit, on the server thread. **Must not call back into Reputation** (it would
 recurse), must not fire gameplay events or send notifications (the commit already did), and may throw —

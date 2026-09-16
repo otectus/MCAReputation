@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation;
 
 import dev.otectus.mcareputation.reputation.ReputationBounds;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
 import net.neoforged.neoforge.common.ModConfigSpec;
 import org.apache.commons.lang3.tuple.Pair;
 
@@ -90,6 +91,7 @@ public final class McaReputationConfig {
         public final ModConfigSpec.IntValue opinionInvolvedPercent;
         public final ModConfigSpec.IntValue maxIncidentsPerCommunity;
         public final ModConfigSpec.IntValue maxIncidentsPerPlayer;
+        public final ModConfigSpec.IntValue receiptRetentionTicks;
         public final ModConfigSpec.IntValue reconcileOnlineIntervalTicks;
         public final ModConfigSpec.BooleanValue enableScoreboardObjective;
         public final ModConfigSpec.ConfigValue<String> scoreboardObjectiveName;
@@ -98,6 +100,8 @@ public final class McaReputationConfig {
         public final ModConfigSpec.BooleanValue enableScoreDecay;
         public final ModConfigSpec.BooleanValue enableTierTitles;
         public final ModConfigSpec.BooleanValue strictJsonValidation;
+        public final ModConfigSpec.EnumValue<ReputationPolicy.UndeclaredAuthorityMode>
+                coreAuthorityUndeclaredKinds;
         public final ModConfigSpec.BooleanValue enableQuestsIntegration;
         public final ModConfigSpec.BooleanValue enableConversationsIntegration;
         public final ModConfigSpec.BooleanValue enableCrimeIntegration;
@@ -229,6 +233,12 @@ public final class McaReputationConfig {
                     .comment("Incidents retained across all of one player's communities.")
                     .defineInRange("maxIncidentsPerPlayer", ReputationBounds.MAX_INCIDENTS_PER_PLAYER,
                             1, ReputationBounds.MAX_INCIDENTS_PER_PLAYER);
+            receiptRetentionTicks = builder
+                    .comment("How long a delivery receipt stays answerable, in ticks. A companion that",
+                            "replays an operation older than this gets no memory of it and has to",
+                            "recover explicitly. The default is 14 in-game days (336000 ticks).")
+                    .defineInRange("receiptRetentionTicks",
+                            (int) ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS, 0, 100_000_000);
             reconcileOnlineIntervalTicks = builder
                     .comment("How often decay is reconciled for online players. This is a bounded sweep over",
                             "online players only — never a scan of the save or of the world.")
@@ -270,6 +280,14 @@ public final class McaReputationConfig {
             enableConversationsIntegration = builder
                     .comment("Serve dialogue context, check bias, and gossip candidates to MCA: Conversations.")
                     .define("enableConversationsIntegration", true);
+            coreAuthorityUndeclaredKinds = builder
+                    .comment("How much to trust a companion that claims core incidents without saying which",
+                            "kinds it detects. TRUST_LEGACY honours every kind it claims; ASSAULT_KILL_ONLY",
+                            "honours only villager assault and killing, the two kinds that existed before",
+                            "declaration was possible; IGNORE honours none. A companion that declares its",
+                            "kinds is unaffected by this setting.")
+                    .defineEnum("coreAuthorityUndeclaredKinds",
+                            ReputationPolicy.DEFAULT_UNDECLARED_AUTHORITY_MODE);
             enableCrimeIntegration = builder
                     .comment("Accept incidents and resolutions from MCA: Crime, and let it claim ownership of",
                             "villager assault/death detection so one attack is not counted by both mods.",
@@ -353,6 +371,7 @@ public final class McaReputationConfig {
         public static volatile Boolean enabled;
         public static volatile Boolean scoreDecay;
         public static volatile Boolean tierTitles;
+        public static volatile Boolean villagerOpinion;
         public static volatile Boolean migrateLegacyQuestsData;
         public static volatile Boolean questsIntegration;
         public static volatile Boolean conversationsIntegration;
@@ -366,6 +385,7 @@ public final class McaReputationConfig {
             enabled = null;
             scoreDecay = null;
             tierTitles = null;
+            villagerOpinion = null;
             migrateLegacyQuestsData = null;
             questsIntegration = null;
             conversationsIntegration = null;
@@ -382,6 +402,12 @@ public final class McaReputationConfig {
             return TestOverrides.enabled;
         }
         return read(COMMON.enableReputation::get, true);
+    }
+
+    // One immutable read of every policy-relevant COMMON option, built from the accessors below so
+    // it inherits their unloaded-spec guarantee.
+    public static ReputationPolicy snapshot() {
+        return ReputationPolicy.fromConfig();
     }
 
     public static boolean debugLogging() {
@@ -494,6 +520,9 @@ public final class McaReputationConfig {
 
     /** Whether per-villager opinion is answered at all. Nothing is stored either way. */
     public static boolean villagerOpinionEnabled() {
+        if (TestOverrides.villagerOpinion != null) {
+            return TestOverrides.villagerOpinion;
+        }
         return read(COMMON.enableVillagerOpinion::get, true);
     }
 
@@ -515,6 +544,12 @@ public final class McaReputationConfig {
     public static int maxIncidentsPerPlayer() {
         return Math.max(1, Math.min(ReputationBounds.MAX_INCIDENTS_PER_PLAYER,
                 read(COMMON.maxIncidentsPerPlayer::get, ReputationBounds.MAX_INCIDENTS_PER_PLAYER)));
+    }
+
+    /** How long a delivery receipt stays answerable, in ticks. Zero switches the horizon off. */
+    public static long receiptRetentionTicks() {
+        return Math.max(0L, read(COMMON.receiptRetentionTicks::get,
+                (int) ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS).longValue());
     }
 
     public static int reconcileOnlineIntervalTicks() {
@@ -578,6 +613,11 @@ public final class McaReputationConfig {
             return TestOverrides.crimeIntegration;
         }
         return read(COMMON.enableCrimeIntegration::get, true);
+    }
+
+    public static ReputationPolicy.UndeclaredAuthorityMode coreAuthorityUndeclaredKinds() {
+        return read(COMMON.coreAuthorityUndeclaredKinds::get,
+                ReputationPolicy.DEFAULT_UNDECLARED_AUTHORITY_MODE);
     }
 
     public static boolean mirrorQuestsFallbackState() {

@@ -2,7 +2,9 @@ package dev.otectus.mcareputation.client;
 
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.VillagerOpinion;
+import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.network.ReputationNetwork;
+import dev.otectus.mcareputation.network.SnapshotPaging;
 import dev.otectus.mcareputation.reputation.ReputationMath;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.GuiGraphics;
@@ -77,6 +79,10 @@ public final class ReputationScreen extends Screen {
     private static final int BUTTON_HEIGHT = 18;
     private static final int ARROW_WIDTH = 20;
     private static final int ARROW_GAP = 2;
+    /** The page arrows are narrower than the village arrows: they share one footer row. */
+    private static final int PAGE_ARROW_WIDTH = 12;
+    /** Air between the two arrow pairs, and between the arrows and the footer label. */
+    private static final int FOOTER_GAP = 6;
 
     /**
      * The scroller channel, reserved beside the ledger whether or not it overflows.
@@ -127,6 +133,16 @@ public final class ReputationScreen extends Screen {
     private double scroll;
     private int contentHeight;
     private int selectedCommunityIndex;
+    private int footerTextLeft;
+    private int footerTextRight;
+    /**
+     * True from the moment the player asks for another village or another page until the reply lands.
+     *
+     * <p>The villager's opinion belongs to the community it was sent with. While a different one is
+     * being asked for, the cached opinion describes the previous selection, so it is not drawn —
+     * "selecting another community clears the contextual opinion" (§5 F16 row 4).
+     */
+    private boolean opinionStale;
     private boolean requestedOnce;
     private boolean draggingScroll;
     private double dragOffset;
@@ -183,22 +199,39 @@ public final class ReputationScreen extends Screen {
         scroll = ScrollMath.clampScroll(scroll, contentHeight, listBottom - listTop);
 
         List<ReputationNetwork.CommunitySummary> communities = ClientReputationData.communities();
+        int arrowY = panelTop + panelHeight - 22;
+        int cursorX = panelLeft + PADDING;
         if (canCycleCommunities()) {
-            int arrowY = panelTop + panelHeight - 22;
-            addRenderableWidget(SpriteButton.arrow(panelLeft + PADDING, arrowY,
+            addRenderableWidget(SpriteButton.arrow(cursorX, arrowY,
                     ARROW_WIDTH, BUTTON_HEIGHT,
                     Component.translatable("mcareputation.screen.previous_community"), true,
                     button -> cycleCommunity(-1)));
-            addRenderableWidget(SpriteButton.arrow(panelLeft + PADDING + ARROW_WIDTH + ARROW_GAP,
+            addRenderableWidget(SpriteButton.arrow(cursorX + ARROW_WIDTH + ARROW_GAP,
                     arrowY, ARROW_WIDTH, BUTTON_HEIGHT,
                     Component.translatable("mcareputation.screen.next_community"), false,
                     button -> cycleCommunity(1)));
+            cursorX += 2 * ARROW_WIDTH + ARROW_GAP + FOOTER_GAP;
         }
+        // The page arrows appear only when there is a second page, in the same row and in the same
+        // order as the village arrows, so tab order runs left to right across the footer.
+        if (canTurnPages()) {
+            addRenderableWidget(SpriteButton.arrow(cursorX, arrowY,
+                    PAGE_ARROW_WIDTH, BUTTON_HEIGHT,
+                    Component.translatable("mcareputation.screen.previous_page"), true,
+                    button -> turnPage(-1)));
+            addRenderableWidget(SpriteButton.arrow(cursorX + PAGE_ARROW_WIDTH + ARROW_GAP,
+                    arrowY, PAGE_ARROW_WIDTH, BUTTON_HEIGHT,
+                    Component.translatable("mcareputation.screen.next_page"), false,
+                    button -> turnPage(1)));
+            cursorX += 2 * PAGE_ARROW_WIDTH + ARROW_GAP + FOOTER_GAP;
+        }
+        footerTextLeft = cursorX;
 
         int closeWidth = Math.min(80, panelWidth / 3);
+        int closeLeft = panelLeft + panelWidth - PADDING - closeWidth;
+        footerTextRight = closeLeft - 4;
         addRenderableWidget(Button.builder(CommonComponentsCompat.done(), button -> onClose())
-                .bounds(panelLeft + panelWidth - PADDING - closeWidth, panelTop + panelHeight - 22,
-                        closeWidth, BUTTON_HEIGHT)
+                .bounds(closeLeft, panelTop + panelHeight - 22, closeWidth, BUTTON_HEIGHT)
                 .build());
 
         // Once per screen open, not once per rebuild: an empty reply rebuilds the widgets, and asking
@@ -244,6 +277,11 @@ public final class ReputationScreen extends Screen {
                 selectedCommunityIndex != SelectorMath.NOT_IN_LIST);
     }
 
+    /** True when the player's communities fill more than one page of the summary list. */
+    private boolean canTurnPages() {
+        return SnapshotPaging.hasMultiplePages(ClientReputationData.pageCount());
+    }
+
     private void cycleCommunity(int direction) {
         List<ReputationNetwork.CommunitySummary> communities = ClientReputationData.communities();
         if (communities.isEmpty()) {
@@ -252,11 +290,30 @@ public final class ReputationScreen extends Screen {
         selectedCommunityIndex =
                 SelectorMath.nextIndex(communities.size(), selectedCommunityIndex, direction);
         scroll = 0;
+        opinionStale = true;
         ClientReputationData.requestSelected(communities.get(selectedCommunityIndex).key());
+    }
+
+    /**
+     * Asks for another page of the community list.
+     *
+     * <p>The selection is deliberately untouched: the reply carries the same selected community's
+     * detail whichever page it lists, so a page turn moves the list under the selection rather than
+     * moving the selection (DIAGNOSIS.md §2 hop 7b).
+     */
+    private void turnPage(int direction) {
+        int next = SnapshotPaging.nextPage(ClientReputationData.page(),
+                ClientReputationData.pageCount(), direction);
+        if (next == ClientReputationData.page()) {
+            return;
+        }
+        opinionStale = true;
+        ClientReputationData.requestPage(next);
     }
 
     /** Called when a fresh snapshot lands, so the layout follows the new content. */
     void onDataRefreshed() {
+        opinionStale = false;
         syncSelectedIndex();
         rebuildWidgets();
     }
@@ -293,9 +350,15 @@ public final class ReputationScreen extends Screen {
                     GuiPalette.TEXT_MUTED, LINE));
         }
 
-        // What the one villager the player is looking at makes of them, when the server sent it.
-        opinionLine(detail.opinion(), McaReputationConfig.showVillagerOpinion()).ifPresent(line ->
-                headerLines.add(new HeaderLine(line.getVisualOrderText(), GuiPalette.TEXT_MUTED, LINE)));
+        // What the one villager the player is looking at makes of them, when the server sent it --
+        // and which village that view is about, so it cannot be read as a general opinion.
+        boolean showOpinion = McaReputationConfig.showVillagerOpinion() && !opinionStale;
+        opinionLine(detail.opinion(), showOpinion).ifPresent(line -> {
+            headerLines.add(new HeaderLine(line.getVisualOrderText(), GuiPalette.TEXT_MUTED, LINE));
+            relationshipLine(detail.opinion(), showOpinion, communityName).ifPresent(relationship ->
+                    headerLines.add(new HeaderLine(relationship.getVisualOrderText(),
+                            GuiPalette.TEXT_MUTED, LINE)));
+        });
 
         headerLines.add(new HeaderLine(null, 0, PROGRESS_GAP));
 
@@ -327,6 +390,23 @@ public final class ReputationScreen extends Screen {
         }
         return Optional.of(Component.translatable("mcareputation.screen.opinion", summary.villagerName(),
                 summary.tierName(), Component.translatable(summary.basis().translationKey())));
+    }
+
+    /**
+     * Which community the opinion above is an opinion about.
+     *
+     * <p>A villager's view is of the player's standing in <em>one</em> village, and the screen can be
+     * showing another one's detail. Naming the community turns an unqualified sentence into a
+     * checkable one; the line disappears with the opinion it belongs to.
+     */
+    static Optional<Component> relationshipLine(Optional<ReputationNetwork.OpinionSummary> opinion,
+                                                boolean show, Component communityName) {
+        if (!show || opinion.isEmpty()
+                || opinion.get().basis() == VillagerOpinion.OpinionBasis.NONE) {
+            return Optional.empty();
+        }
+        return Optional.of(Component.translatable("mcareputation.screen.opinion.relationship",
+                opinion.get().villagerName(), communityName));
     }
 
     /** Titles arrive from the server already resolved (§27.3); the client only joins them. */
@@ -363,21 +443,74 @@ public final class ReputationScreen extends Screen {
     }
 
     /** The meta line carries sign and words, never colour alone (§28.4). */
-    private static Component metaLine(ReputationNetwork.IncidentSummary incident) {
-        var meta = Component.translatable("mcareputation.age." + ageBucket(incident.ageTicks()));
+    static Component metaLine(ReputationNetwork.IncidentSummary incident) {
+        Component meta = Component.translatable("mcareputation.age." + ageBucket(incident.ageTicks()));
+        // Who this deed was ever known to. A private record that counts for nothing must not read
+        // like something the whole village saw (§5 F16 row 2).
+        meta = appendMeta(meta, Component.translatable(visibilityKey(incident.visibility())));
         if (!"active".equals(incident.status())) {
-            meta = meta.copy().append(Component.literal(" · "))
-                    .append(Component.translatable("mcareputation.status." + incident.status()));
+            meta = appendMeta(meta, Component.translatable("mcareputation.status." + incident.status()));
         }
-        if (McaReputationConfig.showIncidentDeltas() && incident.contribution() != 0) {
-            String sign = incident.contribution() > 0 ? "+" : "";
-            meta = meta.copy().append(Component.literal(" · " + sign + incident.contribution()));
+        if (McaReputationConfig.showIncidentDeltas()
+                && (incident.contribution() != 0 || incident.baseDelta() != 0)) {
+            meta = appendMeta(meta, contributionText(incident));
         }
         if (incident.pinned()) {
-            meta = meta.copy().append(Component.literal(" · "))
-                    .append(Component.translatable("mcareputation.screen.pinned"));
+            meta = appendMeta(meta, Component.translatable("mcareputation.screen.pinned"));
         }
         return meta;
+    }
+
+    private static Component appendMeta(Component meta, Component part) {
+        return meta.copy().append(Component.literal(" · ")).append(part);
+    }
+
+    /**
+     * What this deed counts for, and what it counted for when it happened.
+     *
+     * <p>Equal figures print once. When they differ the original is shown beside the current one with
+     * the reason it moved, so a deed that was made right, was replaced by a later one, or has simply
+     * faded is never presented as the fresh full penalty it no longer is (§5 F16 row 1).
+     */
+    static Component contributionText(ReputationNetwork.IncidentSummary incident) {
+        if (incident.contribution() == incident.baseDelta()) {
+            return Component.literal(signed(incident.contribution()));
+        }
+        Component changed = Component.translatable("mcareputation.screen.contribution_changed",
+                signed(incident.baseDelta()), signed(incident.contribution()));
+        return settlementKey(incident)
+                .<Component>map(key -> changed.copy().append(Component.literal(" "))
+                        .append(Component.translatable(key)))
+                .orElse(changed);
+    }
+
+    private static String signed(int value) {
+        return value > 0 ? "+" + value : Integer.toString(value);
+    }
+
+    /** Why the current contribution is not the original one, in one word. */
+    static Optional<String> settlementKey(ReputationNetwork.IncidentSummary incident) {
+        if (incident.superseded()) {
+            return Optional.of("mcareputation.incident.superseded");
+        }
+        if (!"active".equals(incident.status())) {
+            return Optional.of("mcareputation.screen.resolved");
+        }
+        return incident.decays() ? Optional.of("mcareputation.screen.faded") : Optional.empty();
+    }
+
+    /**
+     * The plain audience word: private, witnessed, or the whole village.
+     *
+     * <p>Spelled out rather than concatenated from the enum name, so {@code LangParityTest} can see
+     * all three keys in both directions instead of having to trust a prefix.
+     */
+    static String visibilityKey(IncidentVisibility visibility) {
+        return switch (visibility.effective()) {
+            case PRIVATE -> "mcareputation.screen.visibility.private";
+            case WITNESSED -> "mcareputation.screen.visibility.witnessed";
+            default -> "mcareputation.screen.visibility.village";
+        };
     }
 
     /** Coarse age buckets keep the list readable and avoid pretending to a precision nobody needs. */
@@ -539,14 +672,30 @@ public final class ReputationScreen extends Screen {
 
     private void renderFooter(GuiGraphics graphics) {
         List<ReputationNetwork.CommunitySummary> communities = ClientReputationData.communities();
-        if (communities.size() <= 1) {
+        Component label;
+        if (canTurnPages()) {
+            // With more than one page the position within the page means little on its own, so the
+            // page and the true community count travel with it rather than a silently short list.
+            label = Component.translatable("mcareputation.screen.page",
+                    ClientReputationData.page() + 1, ClientReputationData.pageCount(),
+                    ClientReputationData.totalCommunities());
+        } else if (communities.size() > 1) {
+            label = Component.translatable("mcareputation.screen.community_index",
+                    selectedCommunityIndex + 1, communities.size());
+        } else {
             return;
         }
-        Component label = Component.translatable("mcareputation.screen.community_index",
-                selectedCommunityIndex + 1, communities.size());
-        // Clear of the two selector arrows, measured from their bounds rather than guessed.
-        int x = panelLeft + PADDING + 2 * ARROW_WIDTH + ARROW_GAP + 6;
-        graphics.drawString(font, label, x, panelTop + panelHeight - 17,
+        // Clear of the arrows and of the Done button, measured from their bounds rather than guessed:
+        // at a punishing GUI scale there may be no room at all, and no label beats a clipped one.
+        int available = footerTextRight - footerTextLeft;
+        if (available < LINE) {
+            return;
+        }
+        List<FormattedCharSequence> lines = font.split(label, available);
+        if (lines.isEmpty()) {
+            return;
+        }
+        graphics.drawString(font, lines.get(0), footerTextLeft, panelTop + panelHeight - 17,
                 GuiPalette.TEXT_MUTED, false);
     }
 

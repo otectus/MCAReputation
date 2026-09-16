@@ -10,6 +10,8 @@ import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.community.CommunityMetadata;
 import dev.otectus.mcareputation.community.CommunityResolver;
 import dev.otectus.mcareputation.compat.McaCompat;
+import dev.otectus.mcareputation.incident.IncidentRegistry;
+import dev.otectus.mcareputation.incident.IncidentVisibility;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationService;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
@@ -80,9 +82,10 @@ public final class ReputationNetwork {
     /**
      * Bumped from the Forge channel's {@code "2"}: the framing, the payload ids and the component
      * encoding all changed with the loader, so nothing on the old protocol could talk to this. Bumped
-     * again for 0.4.0, which adds a field to the snapshot.
+     * again for 0.4.0, which adds a field to the snapshot, and once more for 0.4.1, which appends
+     * four fields to every deed line and pages the community list.
      */
-    private static final String PROTOCOL_VERSION = "4";
+    private static final String PROTOCOL_VERSION = "5";
 
     /** §27.2: at most one snapshot request per player per this many ticks. */
     private static final int REQUEST_COOLDOWN_TICKS = 10;
@@ -216,8 +219,13 @@ public final class ReputationNetwork {
      * can preselect that villager's community — the client never says <em>which</em> community, only
      * which entity it is looking at, and the server decides what that means.
      */
-    public record RequestSnapshotC2S(int contextEntityId, Optional<CommunityKey> requestedCommunity)
-            implements CustomPacketPayload {
+    public record RequestSnapshotC2S(int contextEntityId, Optional<CommunityKey> requestedCommunity,
+                                     int page) implements CustomPacketPayload {
+
+        /** The page-less form: page 0, which is what every non-paging caller wants. */
+        public RequestSnapshotC2S(int contextEntityId, Optional<CommunityKey> requestedCommunity) {
+            this(contextEntityId, requestedCommunity, 0);
+        }
 
         public static final CustomPacketPayload.Type<RequestSnapshotC2S> TYPE =
                 new CustomPacketPayload.Type<>(McaReputation.id("request_snapshot"));
@@ -233,12 +241,17 @@ public final class ReputationNetwork {
         private static void write(RequestSnapshotC2S packet, RegistryFriendlyByteBuf buf) {
             buf.writeVarInt(packet.contextEntityId);
             writeOptional(buf, packet.requestedCommunity, (b, key) -> key.write(b));
+            // Written last, so every field a reader already knew keeps the offset it had.
+            buf.writeVarInt(Math.max(0, packet.page));
         }
 
         private static RequestSnapshotC2S read(RegistryFriendlyByteBuf buf) {
             int entityId = buf.readVarInt();
             Optional<CommunityKey> community = readOptional(buf, CommunityKey::read);
-            return new RequestSnapshotC2S(entityId, community);
+            // A hostile page index is clamped here and again against the real page count, so it can
+            // never index anything; the client's claim carries no weight of its own (§27.2).
+            int page = Math.max(0, buf.readVarInt());
+            return new RequestSnapshotC2S(entityId, community, page);
         }
     }
 
@@ -256,7 +269,7 @@ public final class ReputationNetwork {
 
             Optional<CommunityKey> selected = resolveSelection(player, packet, gameTime);
             sendTo(player, buildSnapshot(player, selected, gameTime,
-                    contextOpinion(player, packet.contextEntityId(), selected)));
+                    contextOpinion(player, packet.contextEntityId(), selected), packet.page()));
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] snapshot request handler failed; ignoring", t);
         }
@@ -330,9 +343,18 @@ public final class ReputationNetwork {
         }
     }
 
-    /** One line of the deeds list. */
+    /**
+     * One line of the deeds list.
+     *
+     * <p>{@code contribution} is what this deed counts for <em>now</em>; {@code baseDelta} is what it
+     * counted for when it happened. The screen shows both when they differ, because a deed that has
+     * been made right or has faded is not the penalty it was, and presenting the original figure as
+     * the current one is the same lie in the other direction (§5 F16 row 1).
+     */
     public record IncidentSummary(UUID id, ResourceLocation type, Component display, long ageTicks,
-                                  int contribution, String status, String severity, boolean pinned) {
+                                  int contribution, String status, String severity, boolean pinned,
+                                  IncidentVisibility visibility, int baseDelta, boolean decays,
+                                  boolean superseded) {
 
         static void write(RegistryFriendlyByteBuf buf, IncidentSummary summary) {
             buf.writeUUID(summary.id);
@@ -343,6 +365,11 @@ public final class ReputationNetwork {
             buf.writeUtf(summary.status, MAX_STATUS_LENGTH);
             buf.writeUtf(summary.severity, MAX_SEVERITY_LENGTH);
             buf.writeBoolean(summary.pinned);
+            // Appended, so every field a reader already knew keeps the offset it had.
+            buf.writeEnum(summary.visibility);
+            buf.writeInt(summary.baseDelta);
+            buf.writeBoolean(summary.decays);
+            buf.writeBoolean(summary.superseded);
         }
 
         static IncidentSummary read(RegistryFriendlyByteBuf buf) {
@@ -354,7 +381,12 @@ public final class ReputationNetwork {
             String status = buf.readUtf(MAX_STATUS_LENGTH);
             String severity = buf.readUtf(MAX_SEVERITY_LENGTH);
             boolean pinned = buf.readBoolean();
-            return new IncidentSummary(id, type, display, age, contribution, status, severity, pinned);
+            IncidentVisibility visibility = buf.readEnum(IncidentVisibility.class);
+            int baseDelta = buf.readInt();
+            boolean decays = buf.readBoolean();
+            boolean superseded = buf.readBoolean();
+            return new IncidentSummary(id, type, display, age, contribution, status, severity, pinned,
+                    visibility, baseDelta, decays, superseded);
         }
     }
 
@@ -447,12 +479,23 @@ public final class ReputationNetwork {
      * The whole reply: every community the player is known in, plus the detail of the selected one.
      *
      * <p>Bounded on both sides (§27.3): at most {@link ReputationBounds#MAX_SYNCED_COMMUNITIES}
-     * communities and {@link ReputationBounds#MAX_SYNCED_INCIDENTS} incident lines, so a player with a
-     * maximal ledger cannot produce a packet large enough to disconnect them, and a hostile server
-     * cannot make a client allocate an unbounded one.
+     * communities <em>per page</em> and {@link ReputationBounds#MAX_SYNCED_INCIDENTS} incident lines,
+     * so a player with a maximal ledger cannot produce a packet large enough to disconnect them, and a
+     * hostile server cannot make a client allocate an unbounded one.
+     *
+     * <p>{@code totalCommunities} is the true count, not the page's: the screen must be able to say
+     * "64 of 210" rather than silently omitting the rest (§5 F16 row 3). The selected detail is
+     * carried whatever page this is, so paging never moves the selection.
      */
     public record SnapshotS2C(List<CommunitySummary> communities, Optional<SelectedDetail> selected,
-                              List<Component> globalTitles) implements CustomPacketPayload {
+                              List<Component> globalTitles, int page, int pageCount,
+                              int totalCommunities) implements CustomPacketPayload {
+
+        /** The single-page form, for callers that never page. */
+        public SnapshotS2C(List<CommunitySummary> communities, Optional<SelectedDetail> selected,
+                           List<Component> globalTitles) {
+            this(communities, selected, globalTitles, 0, 1, communities.size());
+        }
 
         public static final CustomPacketPayload.Type<SnapshotS2C> TYPE =
                 new CustomPacketPayload.Type<>(McaReputation.id("snapshot"));
@@ -471,6 +514,10 @@ public final class ReputationNetwork {
             writeOptional(buf, packet.selected, SelectedDetail::write);
             writeBoundedList(buf, packet.globalTitles, ReputationBounds.MAX_TITLES,
                     ReputationNetwork::writeComponent);
+            // Appended, so every field a reader already knew keeps the offset it had.
+            buf.writeVarInt(Math.max(0, packet.page));
+            buf.writeVarInt(Math.max(1, packet.pageCount));
+            buf.writeVarInt(Math.max(0, packet.totalCommunities));
         }
 
         private static SnapshotS2C read(RegistryFriendlyByteBuf buf) {
@@ -479,7 +526,11 @@ public final class ReputationNetwork {
             Optional<SelectedDetail> selected = readOptional(buf, SelectedDetail::read);
             List<Component> globalTitles = readBoundedList(buf, ReputationBounds.MAX_TITLES,
                     ReputationNetwork::readComponent, "global titles");
-            return new SnapshotS2C(communities, selected, globalTitles);
+            int page = buf.readVarInt();
+            int pageCount = Math.max(1, buf.readVarInt());
+            int total = buf.readVarInt();
+            return new SnapshotS2C(communities, selected, globalTitles,
+                    SnapshotPaging.clampPage(page, pageCount), pageCount, total);
         }
     }
 
@@ -610,13 +661,27 @@ public final class ReputationNetwork {
      */
     public static SnapshotS2C buildSnapshot(ServerPlayer player, Optional<CommunityKey> selected,
                                             long gameTime, Optional<OpinionSummary> opinion) {
+        return buildSnapshot(player, selected, gameTime, opinion, 0);
+    }
+
+    /**
+     * As above, for one page of the community list.
+     *
+     * <p>The page bounds the <b>summary list only</b>. The selected community's detail is built and
+     * sent whichever page was asked for, even when that community is not on it — paging is navigation
+     * through a list, never a way to change what the screen is looking at (DIAGNOSIS.md §2 hop 7b).
+     */
+    public static SnapshotS2C buildSnapshot(ServerPlayer player, Optional<CommunityKey> selected,
+                                            long gameTime, Optional<OpinionSummary> opinion, int page) {
         List<ReputationSnapshot> all = ReputationService.knownCommunities(player.server, player.getUUID(),
                 gameTime);
+        int perPage = ReputationBounds.MAX_SYNCED_COMMUNITIES;
+        int total = all.size();
+        int pageCount = SnapshotPaging.pageCount(total, perPage);
+        int clampedPage = SnapshotPaging.clampPage(page, pageCount);
         List<CommunitySummary> summaries = new ArrayList<>();
-        for (ReputationSnapshot snapshot : all) {
-            if (summaries.size() >= ReputationBounds.MAX_SYNCED_COMMUNITIES) {
-                break;
-            }
+        for (ReputationSnapshot snapshot : all.subList(SnapshotPaging.pageStart(clampedPage, perPage, total),
+                SnapshotPaging.pageEnd(clampedPage, perPage, total))) {
             summaries.add(new CommunitySummary(snapshot.community(),
                     snapshot.metadata().name(), snapshot.score(), snapshot.tierId()));
         }
@@ -630,7 +695,7 @@ public final class ReputationNetwork {
         // the player clicked, the village they asked for, or the one they are standing in when they
         // have no standing anywhere. It is a lie when it displaces a record they do have, which is
         // what it used to do; SnapshotSelection is where that is now decided, and why.
-        Optional<SelectedDetail> selectedDetail = detail.map(snapshot -> toDetail(snapshot, opinion));
+        Optional<SelectedDetail> selectedDetail = detail.map(snapshot -> toDetail(player, snapshot, opinion));
         if (selectedDetail.isEmpty() && selected.isPresent()) {
             selectedDetail = Optional.of(emptyDetail(player, selected.get(), gameTime, opinion));
         }
@@ -640,23 +705,30 @@ public final class ReputationNetwork {
                 .globalTitles(player.server, player.getUUID()).stream()
                 .map(ReputationNetwork::resolveTitleName)
                 .toList();
-        return new SnapshotS2C(summaries, selectedDetail, globalTitles);
+        return new SnapshotS2C(summaries, selectedDetail, globalTitles, clampedPage, pageCount, total);
     }
 
     private static Component resolveTitleName(ResourceLocation titleId) {
         return dev.otectus.mcareputation.reputation.Titles.getOrUnknown(titleId).name();
     }
 
-    private static SelectedDetail toDetail(ReputationSnapshot snapshot,
+    private static SelectedDetail toDetail(ServerPlayer player, ReputationSnapshot snapshot,
                                            Optional<OpinionSummary> opinion) {
         List<IncidentSummary> incidents = new ArrayList<>();
         for (ReputationIncidentView view : snapshot.incidents()) {
             if (incidents.size() >= ReputationBounds.MAX_SYNCED_INCIDENTS) {
                 break;
             }
+            // Whether ordinary fading applies is a property of the definition, not of the record, and
+            // supersession is read from the stored record: the view carries neither.
+            boolean decays = IncidentRegistry.getOrUnknown(view.type()).decay().decays();
+            boolean superseded = ReputationService
+                    .incident(player.server, player.getUUID(), snapshot.community(), view.id())
+                    .map(record -> record.isSuperseded())
+                    .orElse(false);
             incidents.add(new IncidentSummary(view.id(), view.type(), view.display(), view.ageTicks(),
                     view.currentContribution(), view.status().jsonName(), view.severity().jsonName(),
-                    view.pinned()));
+                    view.pinned(), view.visibility(), view.baseDelta(), decays, superseded));
         }
         return new SelectedDetail(
                 snapshot.community(),

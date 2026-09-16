@@ -111,6 +111,11 @@ test {
     // Digest of the artifact the surface in McaReflect was audited against. Empty until filled in;
     // the audit then skips the identity check rather than pinning to nothing. See gradle.properties.
     systemProperty 'mcareputation.mcaJarSha256', project.findProperty('mca_jar_sha256') ?: ''
+
+    // Forwarded so the golden saved-data fixture can be rewritten deliberately; see
+    // src/test/resources/fixtures/README.md. Absent, the regeneration test skips itself.
+    systemProperty 'mcareputation.regenerateFixtures',
+            System.getProperty('mcareputation.regenerateFixtures', 'false')
 }
 
 /**

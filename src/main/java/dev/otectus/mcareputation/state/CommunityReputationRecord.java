@@ -9,6 +9,7 @@ import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentStatus;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationMath;
+import dev.otectus.mcareputation.reputation.ReputationPolicy;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.StringTag;
@@ -60,6 +61,9 @@ public final class CommunityReputationRecord {
     private int baseline;
     private int score;
     private long lastReconciledGameTime;
+    // Bumped by the service on every real score change, so a consumer can tell one change from a
+    // repeat of the same one. Persisted since format 2, or a restart would replay old revisions.
+    private long revision;
 
     public CommunityReputationRecord(CommunityKey key) {
         this.key = key;
@@ -89,6 +93,16 @@ public final class CommunityReputationRecord {
         return lastReconciledGameTime;
     }
 
+    /** The in-memory change counter; zero for a record that has not moved since it was loaded. */
+    public long revision() {
+        return revision;
+    }
+
+    /** @return the new revision. Called by the service after a change it actually published. */
+    public long bumpRevision() {
+        return ++revision;
+    }
+
     public boolean isEmpty() {
         return baseline == 0 && incidents.isEmpty() && titles.isEmpty() && tierHighWater.isEmpty();
     }
@@ -98,10 +112,17 @@ public final class CommunityReputationRecord {
         return Collections.unmodifiableCollection(incidents.values());
     }
 
-    /** Newest first — the order the UI, the API's {@code recentIncidents}, and gossip selection want. */
+    /**
+     * Newest first — the order the UI, the API's {@code recentIncidents}, and gossip selection want.
+     *
+     * <p>By <em>occurrence</em> time, not insertion order: a backdated delivery arrives after deeds it
+     * predates, and history that reads out of order is history nobody can follow. The incident id is a
+     * stable tie-break so two deeds in the same tick always list the same way round.
+     */
     public List<IncidentRecord> incidentsNewestFirst() {
         List<IncidentRecord> ordered = new ArrayList<>(incidents.values());
-        Collections.reverse(ordered);
+        ordered.sort(Comparator.comparingLong(IncidentRecord::createdGameTime).reversed()
+                .thenComparing(IncidentRecord::id));
         return ordered;
     }
 
@@ -234,6 +255,90 @@ public final class CommunityReputationRecord {
     }
 
     /**
+     * The community half of a decay freeze: advance every incident's clock, and this record's, without
+     * ageing anything (§5 F07, DD2).
+     *
+     * <p>The score cannot move, so it is deliberately not recomputed here. What this buys is the
+     * no-catch-up guarantee: when the freeze is lifted, the paused interval has already been skipped
+     * rather than banked.
+     */
+    public void freezeTo(long gameTime) {
+        for (IncidentRecord incident : incidents.values()) {
+            incident.skipDecayTo(gameTime);
+        }
+        if (gameTime > lastReconciledGameTime) {
+            lastReconciledGameTime = gameTime;
+        }
+    }
+
+    /**
+     * Rebuilds the cached score and nothing else. The reconciliation gate needs the bounds re-applied
+     * after a freeze or a config change without ageing a single contribution.
+     */
+    public int refreshScoreOnly(int minScore, int maxScore) {
+        return recomputeScore(minScore, maxScore);
+    }
+
+    /**
+     * Whether this record may be dropped to make room (§5 F09).
+     *
+     * <p>Three things are not evictable at any cap. <b>Pinned</b> history, as before. Anything that
+     * still <b>contributes</b>, because folding live weight into the baseline preserves today's number
+     * while silently changing tomorrow's - the fold does not decay, so the trajectory, the per-villager
+     * opinion and the amends that were still available all move. And a recent <b>open negative</b>
+     * record, which is the case a player can still make right and a producer may still hold a receipt
+     * against; it becomes evictable once it has aged past the receipt horizon.
+     */
+    private boolean evictable(IncidentRecord incident, long gameTime, long receiptHorizonTicks) {
+        if (incident.pinned() || incident.contributes()) {
+            return false;
+        }
+        boolean open = incident.status() == IncidentStatus.ACTIVE && !incident.isSuperseded();
+        return !(open && incident.baseDelta() < 0
+                && incident.ageTicks(gameTime) < receiptHorizonTicks);
+    }
+
+    /**
+     * Whether one more incident can be admitted without exceeding the cap: either there is room, or
+     * something in the ledger is evictable. When this is false the deed is refused with
+     * {@code Reason.CAPACITY} <em>before</em> anything is written (D5), rather than the cap being
+     * quietly exceeded and live history evicted to pay for it.
+     */
+    public boolean canAdmit(int maxIncidents, long gameTime, long receiptHorizonTicks) {
+        if (incidents.size() < maxIncidents) {
+            return true;
+        }
+        return hasEvictableIncident(gameTime, receiptHorizonTicks);
+    }
+
+    /** How many records could be dropped to make room; what the capacity diagnostic reports (D5). */
+    public int evictableIncidentCount(long gameTime, long receiptHorizonTicks) {
+        int count = 0;
+        for (IncidentRecord incident : incidents.values()) {
+            if (evictable(incident, gameTime, receiptHorizonTicks)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Whether anything in this ledger could be dropped at all. */
+    public boolean hasEvictableIncident(long gameTime, long receiptHorizonTicks) {
+        for (IncidentRecord incident : incidents.values()) {
+            if (evictable(incident, gameTime, receiptHorizonTicks)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The cap sweep at the default receipt horizon. */
+    public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore) {
+        return prune(maxIncidents, gameTime, minScore, maxScore,
+                ReputationPolicy.DEFAULT_RECEIPT_RETENTION_TICKS);
+    }
+
+    /**
      * Enforces the per-community incident cap in the priority order of §13.5.
      *
      * <p>The ordering is the whole point: history is discarded in the order it stops mattering.
@@ -247,7 +352,8 @@ public final class CommunityReputationRecord {
      *
      * @return the incidents that were removed, oldest first
      */
-    public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore) {
+    public List<IncidentRecord> prune(int maxIncidents, long gameTime, int minScore, int maxScore,
+                                      long receiptHorizonTicks) {
         List<IncidentRecord> removed = new ArrayList<>();
         if (incidents.size() <= maxIncidents) {
             return removed;
@@ -274,13 +380,16 @@ public final class CommunityReputationRecord {
                 if (incidents.size() <= maxIncidents) {
                     break;
                 }
-                if (candidate.pinned() || !pass.test(candidate)) {
+                if (!evictable(candidate, gameTime, receiptHorizonTicks) || !pass.test(candidate)) {
                     continue;
                 }
-                // Fold before dropping: the score must not move because history was trimmed.
+                // Retained weight can no longer reach this point - evictable() rejects anything that
+                // still contributes - but the fold stays, because a pass must never be able to move
+                // the score by dropping what it admitted.
                 if (candidate.contributes()) {
                     folded += candidate.currentContribution();
-                    candidate.foldInto(null, gameTime);
+                    // Absorbed, not superseded: no successor took this weight over, the baseline did.
+                    candidate.absorbIntoBaseline(gameTime);
                 }
                 incidents.remove(candidate.id());
                 removed.add(candidate);
@@ -296,7 +405,8 @@ public final class CommunityReputationRecord {
         if (incidents.size() > maxIncidents) {
             McaReputation.LOGGER.warn(
                     "[MCA: Reputation] community {} holds {} incidents, above the cap of {}, because the "
-                            + "remainder are pinned. Clear a pin with /mcareputation incident pin <player> <uuid> false.",
+                            + "remainder are pinned, still count, or are still open. Clear a pin with "
+                            + "/mcareputation incident pin <player> <uuid> false.",
                     key.asString(), incidents.size(), maxIncidents);
         }
         if (!removed.isEmpty()) {
@@ -319,6 +429,10 @@ public final class CommunityReputationRecord {
         tag.putInt("baseline", baseline);
         tag.putInt("score", score);
         tag.putLong("reconciled", lastReconciledGameTime);
+        // Format 2: a consumer that caches by revision must not see it restart at zero after a reload.
+        if (revision != 0) {
+            tag.putLong("revision", revision);
+        }
 
         if (!incidents.isEmpty()) {
             ListTag list = new ListTag();
@@ -359,28 +473,27 @@ public final class CommunityReputationRecord {
         // setBaseline) must survive a save/load cycle bit-for-bit or the reload changes the score.
         record.baseline = ReputationMath.clampBaseline(tag.getInt("baseline"));
         record.lastReconciledGameTime = tag.getLong("reconciled");
+        record.revision = tag.getLong("revision");
 
         ListTag incidentList = tag.getList("incidents", Tag.TAG_COMPOUND);
-        for (int i = 0; i < incidentList.size()
-                && record.incidents.size() < ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY; i++) {
+        for (int i = 0; i < incidentList.size(); i++) {
+            CompoundTag entry = incidentList.getCompound(i);
             try {
-                IncidentRecord.load(incidentList.getCompound(i)).ifPresentOrElse(
+                IncidentRecord.load(entry).ifPresentOrElse(
                         record::addIncident,
-                        () -> McaReputation.LOGGER.debug(
-                                "[MCA: Reputation] skipping malformed incident in community {}",
-                                record.key.asString()));
+                        () -> {
+                            McaReputation.LOGGER.debug(
+                                    "[MCA: Reputation] quarantining malformed incident in community {}",
+                                    record.key.asString());
+                            SaveQuarantine.hold("community/" + record.key.asString() + "/incidents",
+                                    "unreadable incident entry", entry);
+                        });
             } catch (Throwable t) {
-                McaReputation.LOGGER.debug("[MCA: Reputation] skipping incident that threw while loading in {}",
-                        record.key.asString(), t);
+                McaReputation.LOGGER.debug("[MCA: Reputation] quarantining incident that threw while "
+                        + "loading in {}", record.key.asString(), t);
+                SaveQuarantine.hold("community/" + record.key.asString() + "/incidents",
+                        "incident threw while loading: " + t, entry);
             }
-        }
-        if (incidentList.size() > ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY) {
-            // §13.5/§34: the load path enforces the same ceiling as the write path, so a hand-edited
-            // or corrupted save cannot smuggle an unbounded ledger into memory.
-            McaReputation.LOGGER.warn("[MCA: Reputation] community {} carried {} incidents on disk, "
-                            + "above the {} cap; the oldest beyond the cap were not loaded",
-                    record.key.asString(), incidentList.size(),
-                    ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY);
         }
 
         CompoundTag hw = tag.getCompound("tierHighWater");
@@ -399,6 +512,23 @@ public final class CommunityReputationRecord {
             ResourceLocation title = ResourceLocation.tryParse(titleList.getString(i));
             if (title != null) {
                 record.titles.add(title);
+            }
+        }
+
+        // §5 F09: the load path applies the *runtime* admission policy rather than truncating. What a
+        // prune would have evicted anyway is absorbed into the baseline exactly as it would have been;
+        // what may not be evicted is kept even above the cap, because dropping it and calling the
+        // resulting score a repair is the defect this replaces.
+        int onDisk = record.incidents.size();
+        if (onDisk > ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY) {
+            record.recomputeScore(minScore, maxScore);
+            record.prune(ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY, record.lastReconciledGameTime,
+                    minScore, maxScore);
+            if (record.incidents.size() > ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY) {
+                McaReputation.LOGGER.warn("[MCA: Reputation] community {} carried {} incidents on disk and "
+                                + "{} of them may not be evicted, so the {} cap is exceeded rather than "
+                                + "history being discarded", record.key.asString(), onDisk,
+                        record.incidents.size(), ReputationBounds.MAX_INCIDENTS_PER_COMMUNITY);
             }
         }
 

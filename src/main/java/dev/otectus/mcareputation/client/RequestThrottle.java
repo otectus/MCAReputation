@@ -27,8 +27,18 @@ final class RequestThrottle {
     /** After this long with no reply the request is considered lost and the UI may say so. */
     static final int TIMEOUT_TICKS = 60;
 
-    /** What the caller wanted to ask. Latest wins while parked. */
-    record Request(int contextEntityId, Optional<CommunityKey> community) {
+    /**
+     * What the caller wanted to ask. Latest wins while parked.
+     *
+     * <p>The page is part of the request, not a client-side view of one reply: a page turn asks the
+     * server for a different slice of the community list, so two requests that differ only by page are
+     * two different questions and the newer one must not be mistaken for a repeat of the older.
+     */
+    record Request(int contextEntityId, Optional<CommunityKey> community, int page) {
+
+        Request(int contextEntityId, Optional<CommunityKey> community) {
+            this(contextEntityId, community, 0);
+        }
     }
 
     private final int cooldownTicks;

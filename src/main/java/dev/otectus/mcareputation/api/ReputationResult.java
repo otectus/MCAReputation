@@ -45,6 +45,11 @@ public record ReputationResult(
         UNWITNESSED,
         /** The request failed validation; nothing was written. */
         INVALID,
+        /**
+         * The ledger is full of history that may not be evicted, so the deed was refused rather than
+         * recorded over the cap (spec 5 F09, D5). Nothing was written; clearing a pin makes room.
+         */
+        CAPACITY,
         /** An unexpected failure was contained; nothing was written. */
         ERROR
     }

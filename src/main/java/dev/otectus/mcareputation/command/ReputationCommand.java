@@ -43,7 +43,9 @@ import dev.otectus.mcareputation.reputation.TitleService;
 import dev.otectus.mcareputation.reputation.Titles;
 import dev.otectus.mcareputation.state.CommunityReputationRecord;
 import dev.otectus.mcareputation.state.PlayerReputationRecord;
+import dev.otectus.mcareputation.state.OperationReceipt;
 import dev.otectus.mcareputation.state.ReputationSavedData;
+import dev.otectus.mcareputation.state.SaveQuarantine;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -959,6 +961,23 @@ public final class ReputationCommand {
                 .then(Commands.literal("witnesses").executes(ReputationCommand::debugWitnesses))
                 .then(Commands.literal("integrations").executes(ReputationCommand::debugIntegrations))
                 .then(Commands.literal("authorities").executes(ReputationCommand::debugAuthorities))
+                .then(Commands.literal("quarantine").executes(ReputationCommand::debugQuarantine))
+                .then(Commands.literal("receipts")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .executes(ctx -> debugReceipts(ctx,
+                                        EntityArgument.getPlayer(ctx, "player"), null))
+                                .then(Commands.argument("community", CommunityArgument.community())
+                                        .suggests(COMMUNITY_SUGGESTIONS)
+                                        .executes(ctx -> debugReceipts(ctx,
+                                                EntityArgument.getPlayer(ctx, "player"),
+                                                CommunityArgument.getCommunity(ctx, "community"))))))
+                .then(Commands.literal("supersede")
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .then(Commands.argument("community", CommunityArgument.community())
+                                        .suggests(COMMUNITY_SUGGESTIONS)
+                                        .executes(ctx -> debugSupersede(ctx,
+                                                EntityArgument.getPlayer(ctx, "player"),
+                                                CommunityArgument.getCommunity(ctx, "community"))))))
                 .then(Commands.literal("standing")
                         .executes(ctx -> debugStanding(ctx, self(ctx), null))
                         .then(Commands.argument("community", CommunityArgument.community())
@@ -1084,6 +1103,32 @@ public final class ReputationCommand {
                             .map(String::valueOf).orElse("(none)")), false);
         }
 
+        // Per incident: when it happened, when it was applied, how much decay clock it has actually
+        // accumulated, and what it is worth now against what it was worth then. Occurrence and
+        // application differ for a backdated delivery, and the decay clock is monotonic rather than
+        // "now - created", so all three have to be printed to tell a frozen number from a frozen clock.
+        data.player(subject.getUUID())
+                .flatMap(record -> record.community(community))
+                .ifPresent(record -> {
+                    for (IncidentRecord incident : record.incidentsNewestFirst()) {
+                        source.sendSuccess(() -> Component.translatable(
+                                "mcareputation.command.debug.standing.incident",
+                                incident.id().toString().substring(0, 8),
+                                incident.type().toString(),
+                                incident.createdGameTime(),
+                                incident.appliedGameTime(),
+                                incident.decayElapsedTicks()).withStyle(ChatFormatting.DARK_GRAY), false);
+                        source.sendSuccess(() -> Component.translatable(
+                                "mcareputation.command.debug.standing.incident_weight",
+                                incident.currentContribution(),
+                                incident.baseDelta(),
+                                incident.status().jsonName(),
+                                String.valueOf(incident.isSuperseded()),
+                                incident.visibility().jsonName())
+                                .withStyle(ChatFormatting.DARK_GRAY), false);
+                    }
+                });
+
         source.sendSuccess(() -> Component.literal("  mirrors: "
                 + (ReputationService.mirrors().isEmpty() ? "(none registered)"
                         : ReputationService.mirrors().stream()
@@ -1096,6 +1141,115 @@ public final class ReputationCommand {
                 + " (root " + McaReflect.root() + ", " + McaReflect.installedMca() + ")")
                 .withStyle(McaReflect.isAvailable() ? ChatFormatting.DARK_GRAY : ChatFormatting.RED), false);
         return snapshot.map(ReputationSnapshot::score).orElse(0);
+    }
+
+    /**
+     * Receipt coverage and ledger capacity for one player (D5).
+     *
+     * <p>The question this answers is "why was that deed refused with CAPACITY", which is otherwise
+     * invisible: the refusal happens before anything is written, so there is no record of it to look
+     * at. Printed per community are the ledger size against its cap, how many of those records could
+     * be evicted to make room, and the same {@code canAdmit} answer the transaction itself uses.
+     */
+    private static int debugReceipts(CommandContext<CommandSourceStack> ctx, ServerPlayer subject,
+                                     @Nullable String rawCommunity) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        MinecraftServer server = source.getServer();
+        long gameTime = server.overworld().getGameTime();
+        long horizon = McaReputationConfig.receiptRetentionTicks();
+        int maxIncidents = McaReputationConfig.maxIncidentsPerCommunity();
+        Optional<PlayerReputationRecord> player =
+                ReputationSavedData.get(server).player(subject.getUUID());
+
+        int receiptCount = player.map(PlayerReputationRecord::receiptCount).orElse(0);
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.receipts.header",
+                subject.getDisplayName(), receiptCount, ReputationBounds.MAX_RECEIPTS_PER_PLAYER,
+                horizon,
+                player.flatMap(record -> record.receiptFloor().stream().boxed().findFirst())
+                        .map(String::valueOf).orElse("-")), false);
+
+        CommunityKey only = rawCommunity == null ? null : resolveCommunity(ctx, rawCommunity);
+        int reported = 0;
+        for (CommunityReputationRecord record : player
+                .map(PlayerReputationRecord::communities).orElse(List.of())) {
+            if (only != null && !only.equals(record.key())) {
+                continue;
+            }
+            reported++;
+            int evictable = record.evictableIncidentCount(gameTime, horizon);
+            boolean canAdmit = record.canAdmit(maxIncidents, gameTime, horizon);
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.receipts.community",
+                    record.key().asString(), record.incidentCount(), maxIncidents, evictable,
+                    String.valueOf(canAdmit))
+                    .withStyle(canAdmit ? ChatFormatting.DARK_GRAY : ChatFormatting.YELLOW), false);
+        }
+        for (OperationReceipt receipt : player
+                .map(PlayerReputationRecord::receipts).orElse(List.of())) {
+            if (only != null && !only.equals(receipt.community())) {
+                continue;
+            }
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.receipts.receipt",
+                    receipt.producerNamespace(), receipt.operationKey(),
+                    receipt.community().asString(), receipt.outcome().name(),
+                    receipt.incidentId().map(id -> id.toString().substring(0, 8)).orElse("-"),
+                    receipt.recordedGameTime()).withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        if (reported == 0) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.receipts.none", subject.getDisplayName()), false);
+        }
+        return receiptCount;
+    }
+
+    /**
+     * Every record another deed absorbed, and what absorbed it.
+     *
+     * <p>A superseded record is terminal and is filtered out of the ordinary ledger, so it is
+     * unreachable from {@code history} and from the screen. The successor link and the story revision
+     * are what a correction-telling companion keys on, which makes a missing link a silent bug.
+     */
+    private static int debugSupersede(CommandContext<CommandSourceStack> ctx, ServerPlayer subject,
+                                      String rawCommunity) throws CommandSyntaxException {
+        CommandSourceStack source = ctx.getSource();
+        CommunityKey community = resolveCommunity(ctx, rawCommunity);
+        List<IncidentRecord> superseded = ReputationSavedData.get(source.getServer())
+                .player(subject.getUUID())
+                .flatMap(record -> record.community(community))
+                .map(record -> record.incidentsNewestFirst().stream()
+                        .filter(IncidentRecord::isSuperseded).toList())
+                .orElse(List.of());
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.supersede.header",
+                subject.getDisplayName(), community.asString(), superseded.size()), false);
+        for (IncidentRecord incident : superseded) {
+            source.sendSuccess(() -> Component.translatable(
+                    "mcareputation.command.debug.supersede.record",
+                    incident.id().toString().substring(0, 8), incident.type().toString(),
+                    incident.supersededBy().map(id -> id.toString().substring(0, 8)).orElse("-"),
+                    incident.storyRevision(), incident.baseDelta())
+                    .withStyle(ChatFormatting.DARK_GRAY), false);
+        }
+        return superseded.size();
+    }
+
+    /**
+     * What the last saved-data load had to hold back, and whether the store is writable at all.
+     *
+     * <p>The read-only latch is the one that matters most here: a store loaded from a newer format
+     * accepts every mutation and persists none of them, so standing appears to move for a session and
+     * is gone on restart. That is indistinguishable from a mutation bug without this line.
+     */
+    private static int debugQuarantine(CommandContext<CommandSourceStack> ctx) {
+        CommandSourceStack source = ctx.getSource();
+        ReputationSavedData data = ReputationSavedData.get(source.getServer());
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.quarantine.header",
+                SaveQuarantine.report()), false);
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.quarantine.format",
+                data.loadedVersion(), ReputationSavedData.FORMAT_VERSION,
+                String.valueOf(data.isReadOnly()))
+                .withStyle(data.isReadOnly() ? ChatFormatting.RED : ChatFormatting.DARK_GRAY), false);
+        return SaveQuarantine.size();
     }
 
     /**
@@ -1112,18 +1266,36 @@ public final class ReputationCommand {
         source.sendSuccess(() -> Component.literal(registered.isEmpty()
                 ? "no core incident authorities registered; this mod detects everything itself"
                 : "registered core incident authorities: " + String.join(", ", registered)), false);
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.debug.authority.header",
+                McaReputationConfig.coreAuthorityUndeclaredKinds().name()), false);
 
         int claimed = 0;
-        for (CoreIncidentKind kind : CoreIncidentKind.values()) {
-            List<String> claimants = CoreIncidentAuthorities.claimantsOf(kind);
-            if (!claimants.isEmpty()) {
-                claimed++;
+        for (CoreIncidentAuthorities.AuthorityStatus status : CoreIncidentAuthorities.inspect()) {
+            String kind = status.kind().name();
+            if (status.claimantId().isEmpty()) {
+                source.sendSuccess(() -> Component
+                        .translatable("mcareputation.command.debug.authority.native", kind)
+                        .withStyle(ChatFormatting.DARK_GRAY), false);
+                continue;
             }
-            String detail = claimants.isEmpty()
-                    ? "detected by MCA: Reputation"
-                    : "claimed by " + String.join(", ", claimants);
-            source.sendSuccess(() -> Component.literal("  " + kind.name() + " (" + kind.incidentType()
-                    + "): " + detail).withStyle(ChatFormatting.DARK_GRAY), false);
+            String claimant = status.claimantId().get();
+            String declared = Component.translatable(status.declared()
+                    ? "mcareputation.command.debug.authority.declared"
+                    : "mcareputation.command.debug.authority.legacy").getString();
+            if (status.claimed()) {
+                claimed++;
+                source.sendSuccess(() -> Component.translatable(
+                        "mcareputation.command.debug.authority.claimed",
+                        kind, claimant, declared, String.valueOf(status.canDeliver())), false);
+            } else {
+                source.sendSuccess(() -> Component.translatable(
+                        "mcareputation.command.debug.authority.suppressed",
+                        kind, claimant, declared, String.valueOf(status.canDeliver()))
+                        .withStyle(ChatFormatting.YELLOW), false);
+            }
+            status.unavailableReason().ifPresent(reason -> source.sendSuccess(() -> Component
+                    .translatable("mcareputation.command.debug.authority.unavailable", reason)
+                    .withStyle(ChatFormatting.DARK_GRAY), false));
         }
         return claimed;
     }

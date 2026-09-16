@@ -44,6 +44,7 @@ class IncidentNbtRoundTripTest {
         assertEquals(original.player(), loaded.player());
         assertEquals(original.community(), loaded.community());
         assertEquals(original.createdGameTime(), loaded.createdGameTime());
+        assertEquals(original.appliedGameTime(), loaded.appliedGameTime());
         assertEquals(original.updatedGameTime(), loaded.updatedGameTime());
         assertEquals(original.source(), loaded.source());
         assertEquals(original.dedupeKey(), loaded.dedupeKey());
@@ -61,6 +62,38 @@ class IncidentNbtRoundTripTest {
         assertEquals("Anna", loaded.subjects().get(0).displayName());
         assertEquals(Optional.of("victim"), loaded.subjects().get(0).role());
         assertEquals(SubjectKind.PLAYER, loaded.subjects().get(1).kind());
+    }
+
+    /** The three fields the superseded lifecycle and backdated delivery added. */
+    @Test
+    void supersessionAndTheApplicationTimeSurviveTheRoundTrip() {
+        UUID successor = UUID.fromString("99999999-8888-7777-6666-555555555555");
+        IncidentRecord backdated = IncidentRecord.create(UUID.randomUUID(), TestFixtures.ASSAULT,
+                TestFixtures.PLAYER_A, TestFixtures.OVERWORLD_3, 100L, 900L, TestFixtures.SOURCE,
+                Optional.empty(), -8, IncidentVisibility.VILLAGE, IncidentSeverity.MODERATE, List.of());
+        backdated.foldInto(successor, 900L);
+
+        IncidentRecord loaded = IncidentRecord.load(backdated.save()).orElseThrow();
+        assertEquals(100L, loaded.createdGameTime());
+        assertEquals(900L, loaded.appliedGameTime());
+        assertTrue(loaded.isSuperseded());
+        assertEquals(Optional.of(successor), loaded.supersededBy());
+        assertFalse(loaded.contributes());
+    }
+
+    /** Everything written before these fields existed reads as a live, never-superseded deed. */
+    @Test
+    void theNewFieldsDefaultSafelyWhenAbsent() {
+        CompoundTag legacy = fullyPopulated().save();
+        legacy.remove("applied");
+        legacy.remove("superseded");
+        legacy.remove("supersededBy");
+
+        IncidentRecord loaded = IncidentRecord.load(legacy).orElseThrow();
+        assertEquals(loaded.createdGameTime(), loaded.appliedGameTime(),
+                "a deed with no application time was filed when it happened");
+        assertFalse(loaded.isSuperseded());
+        assertTrue(loaded.supersededBy().isEmpty());
     }
 
     /**

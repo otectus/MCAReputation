@@ -5,11 +5,25 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] — unreleased
+## [0.5.0] — unreleased
 
-A build-only change: a versioned API artifact, so that sibling add-ons such as MCA:
-Conversations can compile against a versioned artifact instead of a class directory in a
-neighbouring checkout.
+There was no 0.4.1 release; the API-jar work below shipped as part of this one instead, alongside a
+reliability pass carried over from the Forge 0.5.0 review of how a deed is detected, delivered, retained,
+and displayed across the whole suite.
+
+**Splitting the claim, as that review asks:** everything below is something this mod now does correctly
+*on its own* — recording, deduplicating, reconciling, superseding, and displaying a deed the same way
+regardless of who else is installed. It is not a claim that the
+four-addon interaction is now fully correct: MCA: Crime's typed delivery outcomes, pre-link resolution
+queueing, NPC-offender filtering, and assault-to-killing parity through its own detection path; MCA:
+Quests' optional-delta preservation and bound restitution targets; and MCA: Conversations' incident-bound
+amends and status-aware acknowledgment all still need their own patch to adopt the seams this release adds.
+Runtime and built-jar certification against those companions is out of scope for this entry.
+
+**Numbers that moved:** the network protocol goes `"4"` → `"5"` — a client and server must run matching
+versions of this mod. The save format goes `1` → `2`; an existing world migrates automatically, once, the
+first time it loads, and the migration is idempotent. `McaReputationApi.getApiVersion()` stays at `2`;
+the new `capabilities()` query below is the additive alternative to a version bump.
 
 ### Added
 
@@ -20,6 +34,84 @@ neighbouring checkout.
   classes at runtime, and a bundled copy is a duplicate-class error, not a fallback. Classes
   outside `api/` are a read model of the current shape of these types, not a stability promise.
   A new `verifyApiJar` check is wired into `build`.
+
+- **Capability negotiation.** `McaReputationApi.capabilities(server)` returns a `ReputationCapabilities`
+  snapshot: the API version, whether the mod/decay/opinion features are enabled, a set of feature strings,
+  which `CoreIncidentKind`s this mod is still detecting itself, and who claims the rest.
+
+- **Per-kind detection authority.** `CoreIncidentAuthority` gains `declaredKinds()`, `canDeliver(kind)`,
+  and `onServerStopped()`. An authority that claims detection without declaring which kinds it detects
+  falls under the new `coreAuthorityUndeclaredKinds` config (`TRUST_LEGACY` / `ASSAULT_KILL_ONLY` /
+  `IGNORE`), default **`ASSAULT_KILL_ONLY`** — honouring only villager assault and killing, the two kinds
+  that existed before per-kind declaration was possible. `/mcareputation debug authorities` reports the
+  effective per-kind claim.
+
+- **Recoverable delivery.** `McaReputationApi.deliver(IncidentDelivery)` returns a `DeliveryOutcome`
+  carrying a typed `ReceiptOutcome`. Read-only lookups — `findReceipt`, `findIncident`, `receiptFloor` —
+  never create a record. Receipts are kept per player (capped at 512, retained for
+  `receiptRetentionTicks`, 14 in-game days (336000 ticks) by default). A ledger with nothing left to evict refuses a
+  new deed with `Reason.CAPACITY` instead of dropping older history to make room.
+
+- **One accounting seam for superseding.** `McaReputationApi.recordSuperseding(request, SupersedeSpec)`.
+
+- **Speaker-aware queries and bound resolution.** `selectIncidents`/`resolveBySelector` overloads take a
+  `SpeakerContext`; the speaker-less overloads now fail closed on `knownToSpeaker` instead of ignoring it.
+  `resolveBound(...)` resolves one exact incident idempotently, keyed by operation.
+
+- **Title consistency.** Village-scoped grants and revocations now reach registered mirrors
+  (`ReputationMirror.mirrorTitleRevoked`, `mirrorTitleState`, `TitleSnapshot`). `globalTitles(server,
+  player)` reads global titles without a community record. `highWaterTierId(...)` takes the ladder as a
+  parameter. A multi-tier jump grants each newly-crossed milestone once, with one notification.
+
+- **Gossip with a sense of what changed.** `McaReputationApi.gossipStory(...)` returns a `GossipStory`
+  carrying a semantic revision that moves only on resolution or supersession, never ordinary decay. The
+  existing `gossipCandidate(...)` path is unchanged.
+
+- **Standing screen: pagination and richer deed lines.** The community list pages at up to 64 per page,
+  with the true total community count carried alongside so the screen can say how many pages there are.
+  Each deed line now carries a visibility label (private / witnessed / village-known) and its original
+  value versus what it currently counts for.
+
+- **Debug subcommands**, all permission level 2: `/mcareputation debug receipts <player> [community]`,
+  `/mcareputation debug supersede <player> <community>`, `/mcareputation debug quarantine`.
+
+### Changed
+
+- **Network protocol version bumped to 5.** A 0.4.x client cannot join a 0.5.0 server and vice versa.
+
+- **Save format bumped to 2, migrating automatically on first load.** Retained incidents carrying a
+  dedupe key get a synthesised receipt returning their own ID on replay; existing `superseded_by` links
+  are marked terminal. A decay-immune community needs no stored freeze clock — the reconciliation gate
+  already advances its clock on every pass without ageing it. Migration is idempotent, and a save from a
+  future format is preserved untouched and opened read-only rather than rewritten.
+
+- **Decay immunity and the master/decay toggles hold on every path** — score reads, snapshots, opinion
+  queries, incident selection, and admin commands all route through one policy-aware reconciliation gate.
+
+- **Standing predicates no longer depend on `enableConversationsIntegration`.**
+  `getVillagerOpinionDetailed(...)` distinguishes a genuine zero opinion from `DISABLED`, `UNSUPPORTED`,
+  or `UNRESOLVED`; the existing `getVillagerOpinion` overloads delegate to it unchanged.
+
+- **Scoreboard objective ownership is proven before it is touched**: adopted only when its criteria is
+  `dummy` and its display name carries this mod's own marker; disabling the feature removes only the
+  objective this mod created.
+
+### Fixed
+
+- **A superseded (folded) incident can no longer regain a contribution** across fold → resolve →
+  reconcile → reload → reconcile again.
+
+- **A backdated deed is aged before it is announced**, instead of showing its full un-aged value for a
+  moment.
+
+- **Every semantic standing change publishes exactly one `StandingChange` envelope**; decay and reload are
+  marked quiet, so they reach mirrors and the displayed tier without a toast and never register as a
+  first-time tier celebration.
+
+### Notes
+
+- Recoverable duplicate delivery (`ReputationResult.duplicate(...)` returning the original incident ID)
+  already shipped here in 0.3.0 and is unchanged by this release.
 
 ## [0.4.0] — unreleased
 

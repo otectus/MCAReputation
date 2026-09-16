@@ -63,6 +63,8 @@ public final class ReputationFeedback {
         boolean scoreKnown;
         boolean tierChanged;
         boolean downward;
+        /** Set by a change the player earned. Background causes never raise it, and never speak. */
+        boolean loud;
         String newTierId;
         final List<String> milestoneTierIds = new ArrayList<>();
     }
@@ -77,7 +79,13 @@ public final class ReputationFeedback {
         if (event.delta() == 0) {
             return; // a zero-delta narrative record is not news (§28.3)
         }
+        if (event.quiet()) {
+            // Decay and reloads move the displayed tier without the player having done anything.
+            // StandingDisplay still follows them; an action bar line or a toast would be a lie.
+            return;
+        }
         Pending pending = pending(event.playerId(), event.community());
+        pending.loud = true;
         pending.totalDelta += event.delta();
         pending.newScore = event.newScore();
         pending.scoreKnown = true;
@@ -110,6 +118,9 @@ public final class ReputationFeedback {
             }
             communities.forEach((community, pending) -> {
                 try {
+                    if (!pending.loud) {
+                        return; // a tier that moved on its own is not the player's news
+                    }
                     Component communityName = communityName(player, community);
                     if (pending.totalDelta != 0 || pending.tierChanged) {
                         ReputationNetwork.sendTo(player, toChangePacket(communityName, pending));

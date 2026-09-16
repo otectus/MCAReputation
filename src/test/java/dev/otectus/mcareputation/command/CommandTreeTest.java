@@ -236,6 +236,55 @@ class CommandTreeTest {
                 path(assertParses(dispatcher, "mcareputation community here decay status", source(2))));
     }
 
+    // ------------------------------------------------------------------
+    // Diagnostics (§11): all under debug, all at permission 2
+    // ------------------------------------------------------------------
+
+    @Test
+    void theNewDiagnosticsParseUnderDebug() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertEquals(List.of("mcareputation", "debug", "quarantine"),
+                path(assertParses(dispatcher, "mcareputation debug quarantine", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "receipts", "player"),
+                path(assertParses(dispatcher, "mcareputation debug receipts Steve", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "receipts", "player", "community"),
+                path(assertParses(dispatcher,
+                        "mcareputation debug receipts Steve minecraft:overworld/3", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "supersede", "player", "community"),
+                path(assertParses(dispatcher,
+                        "mcareputation debug supersede Steve minecraft:overworld/3", source(2))));
+    }
+
+    /** The community is not optional for supersede: "which ledger" has no sensible default here. */
+    @Test
+    void supersedeWithoutACommunityIsNotExecutable() {
+        ParseResults<CommandSourceStack> parse =
+                dispatcher().parse("mcareputation debug supersede Steve", source(2));
+        assertNull(parse.getContext().getNodes().get(parse.getContext().getNodes().size() - 1)
+                .getNode().getCommand());
+    }
+
+    @Test
+    void debugStandingStillTakesAPlayerAndACommunity() {
+        assertEquals(List.of("mcareputation", "debug", "standing", "player", "community"),
+                path(assertParses(dispatcher(),
+                        "mcareputation debug standing Steve minecraft:overworld/3", source(2))));
+    }
+
+    /** Every diagnostic sits behind the one permission gate on the debug group. */
+    @Test
+    void aPlayerCannotReachTheDiagnostics() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        for (String input : List.of("mcareputation debug quarantine",
+                "mcareputation debug receipts Steve",
+                "mcareputation debug supersede Steve minecraft:overworld/3")) {
+            assertNull(dispatcher.parse(input, source(1)).getContext().getNodes().stream()
+                    .map(node -> node.getNode().getName())
+                    .filter("debug"::equals).findFirst().orElse(null),
+                    input + " must not be reachable below permission 2");
+        }
+    }
+
     @Test
     void titleGrantWithACommunityParses() {
         assertParses(dispatcher(),

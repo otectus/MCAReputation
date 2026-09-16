@@ -39,6 +39,18 @@ interface ServiceContext {
      */
     void post(Event event);
 
+    /**
+     * The current world time: "now", as distinct from the occurrence time a request carries. Backdated
+     * delivery needs the two to be separable, and only the context knows the live clock.
+     */
+    long now();
+
+    // The policy this transaction runs under, read once so a mid-transaction config reload cannot
+    // change the rules half way through. Tests inject a fixed snapshot instead.
+    default ReputationPolicy policy() {
+        return ReputationPolicy.fromConfig();
+    }
+
     static ServiceContext of(MinecraftServer server) {
         return new ServiceContext() {
             @Override
@@ -55,6 +67,11 @@ interface ServiceContext {
             @Nullable
             public ServerPlayer onlinePlayer(UUID playerId) {
                 return playerId == null ? null : server.getPlayerList().getPlayer(playerId);
+            }
+
+            @Override
+            public long now() {
+                return server.overworld().getGameTime();
             }
 
             @Override

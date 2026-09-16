@@ -1,6 +1,7 @@
 package dev.otectus.mcareputation.state;
 
 import dev.otectus.mcareputation.TestPaths;
+import dev.otectus.mcareputation.api.ReceiptOutcome;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.incident.IncidentRecord;
 import dev.otectus.mcareputation.incident.IncidentStatus;
@@ -13,6 +14,10 @@ import net.minecraft.nbt.NbtIo;
 import net.minecraft.resources.ResourceLocation;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -20,6 +25,7 @@ import java.nio.file.Path;
 import java.util.Optional;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -61,6 +67,21 @@ class GoldenSavedDataCompatibilityTest {
     private static final CommunityKey NETHER_3 = new CommunityKey(
             ResourceLocation.fromNamespaceAndPath("minecraft", "the_nether"), 3);
 
+    /**
+     * The format-2 golden file, written by the Forge 1.20.1 serializer and copied here byte for byte.
+     * Stored uncompressed, so the comparison below is over NBT and nothing else.
+     */
+    private static final Path FIXTURE_V2 = TestPaths.testResources()
+            .resolve("fixtures/mcareputation-format-2-1.20.1.nbt");
+
+    private static final UUID V2_ASSAULT =
+            UUID.fromString("11111111-1111-1111-1111-111111111111");
+    private static final UUID V2_KILLING = UUID.fromString("22222222-2222-2222-2222-222222222222");
+    private static final UUID V2_RESCUE = UUID.fromString("33333333-3333-3333-3333-333333333333");
+
+    private static final CommunityKey STONEBROOK = new CommunityKey(
+            ResourceLocation.fromNamespaceAndPath("minecraft", "overworld"), 7);
+
     /** The fixture is gzip-compressed, as {@code NbtIo.writeCompressed} left it. */
     private static CompoundTag readFixture() throws IOException {
         assertTrue(Files.isRegularFile(FIXTURE),
@@ -80,16 +101,74 @@ class GoldenSavedDataCompatibilityTest {
 
     @Test
     void theFixtureStillDeclaresFormatVersionOne() throws IOException {
-        assertEquals(1, readFixture().getInt("version"));
-        assertEquals(1, ReputationSavedData.FORMAT_VERSION,
-                "the loader port changed the API, not the schema");
+        assertEquals(1, readFixture().getInt("version"),
+                "the fixture is evidence of what 1.20.1 wrote; it must never be regenerated");
+        assertEquals(2, ReputationSavedData.FORMAT_VERSION,
+                "0.5.0 moved the schema to v2 (receipts and per-community revisions)");
         assertEquals("mcareputation", ReputationSavedData.DATA_NAME,
                 "the data file name is part of the save's identity and must not move");
     }
 
+    /**
+     * The stored version is read from the file, then carried forward. A v1 file is recognised as v1
+     * and migrated in place, which is why {@code loadedVersion()} reports v2 afterwards.
+     */
     @Test
     void loadingReportsTheStoredVersionRatherThanAssumingIt() throws IOException {
-        assertEquals(1, loadGolden().loadedVersion());
+        assertEquals(2, loadGolden().loadedVersion(),
+                "a v1 file is migrated on load, so the live store is at the current format");
+    }
+
+    // ------------------------------------------------------------------
+    // The v1 to v2 migration
+    // ------------------------------------------------------------------
+
+    /**
+     * Migration is additive: every retained incident that carries a dedupe key gains an
+     * {@code APPLIED} receipt naming that incident, and nothing else in the save moves.
+     */
+    @Test
+    void migrationGivesEveryKeyedIncidentAReceiptAndMovesNothingElse() throws IOException {
+        ReputationSavedData data = loadGolden();
+        PlayerReputationRecord ada = data.player(ADA).orElseThrow();
+        CommunityReputationRecord home = ada.community(OVERWORLD_3).orElseThrow();
+
+        for (IncidentRecord incident : home.incidents()) {
+            Optional<String> key = incident.dedupeKey();
+            if (key.isEmpty()) {
+                continue;
+            }
+            OperationReceipt receipt = ada.findReceipt(incident.source().getNamespace(),
+                    OVERWORLD_3, key.get()).orElseThrow(() ->
+                    new AssertionError("no receipt recovered for dedupe key " + key.get()));
+            assertEquals(ReceiptOutcome.APPLIED, receipt.outcome());
+            assertEquals(Optional.of(incident.id()), receipt.incidentId(),
+                    "a replayed operation key must name the incident it already produced");
+        }
+
+        // Totals, ids and baselines are exactly what the pre-migration assertions above expect.
+        assertEquals(2, data.playerCount());
+        assertEquals(6, home.incidentCount());
+        assertEquals(-70, data.score(ADA, OVERWORLD_3));
+        assertEquals(60, data.score(ADA, NETHER_3));
+        assertEquals(-80, data.score(BO, OVERWORLD_3));
+        assertEquals(25, home.baseline());
+        assertEquals(60, ada.community(NETHER_3).orElseThrow().baseline());
+        assertEquals(INC_ACTIVE, ada.findByDedupeKey(OVERWORLD_3, "dedupe-active").orElseThrow().id());
+    }
+
+    /** Idempotent: migrating an already-migrated store adds no second receipt and no second event. */
+    @Test
+    void migratingTwiceIsANoOp() throws IOException {
+        ReputationSavedData once = loadGolden();
+        int receipts = once.player(ADA).orElseThrow().receipts().size();
+        assertTrue(receipts > 0, "the fixture has keyed incidents, so migration must produce receipts");
+
+        ReputationSavedData twice =
+                ReputationSavedData.loadPayload(once.savePayload(new CompoundTag()));
+        assertEquals(2, twice.loadedVersion());
+        assertEquals(receipts, twice.player(ADA).orElseThrow().receipts().size(),
+                "a v2 file must not be migrated again");
     }
 
     // ------------------------------------------------------------------
@@ -217,13 +296,13 @@ class GoldenSavedDataCompatibilityTest {
     // ------------------------------------------------------------------
 
     /**
-     * Loading a 1.20.1 save and writing it back out must not lose or renumber anything, and must
-     * still declare format 1 — a world upgraded to 1.21.1 keeps the same schema.
+     * Loading a 1.20.1 save and writing it back out must not lose or renumber anything. It now
+     * declares format 2, because the load migrated it; the fixture on disk is untouched.
      */
     @Test
-    void reSavingLosesNothingAndStaysFormatOne() throws IOException {
+    void reSavingLosesNothingAndUpgradesToFormatTwo() throws IOException {
         CompoundTag rewritten = loadGolden().savePayload(new CompoundTag());
-        assertEquals(1, rewritten.getInt("version"));
+        assertEquals(2, rewritten.getInt("version"));
 
         ReputationSavedData reloaded = ReputationSavedData.loadPayload(rewritten);
         assertEquals(2, reloaded.playerCount());
@@ -246,5 +325,71 @@ class GoldenSavedDataCompatibilityTest {
         CompoundTag once = loadGolden().savePayload(new CompoundTag());
         CompoundTag twice = ReputationSavedData.loadPayload(once).savePayload(new CompoundTag());
         assertEquals(once, twice, "save(load(save(x))) must equal save(x)");
+    }
+
+    // ------------------------------------------------------------------
+    // The format-2 golden file
+    // ------------------------------------------------------------------
+
+    private static byte[] fixtureV2Bytes() throws IOException {
+        assertTrue(Files.isRegularFile(FIXTURE_V2),
+                () -> "the golden format-2 fixture is missing from " + FIXTURE_V2.toAbsolutePath());
+        return Files.readAllBytes(FIXTURE_V2);
+    }
+
+    private static CompoundTag readFixtureV2() throws IOException {
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(fixtureV2Bytes()))) {
+            return NbtIo.read(in);
+        }
+    }
+
+    private static byte[] encode(CompoundTag tag) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (DataOutputStream data = new DataOutputStream(out)) {
+            NbtIo.write(tag, data);
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * A v2 ledger written by Forge 1.20.1 reads on NeoForge 1.21.1 with exactly the totals the Forge
+     * {@code GoldenSavedDataTest} asserts against it. Same numbers, other loader.
+     */
+    @Test
+    void theFormatTwoFixtureLoadsWithTheExpectedTotals() throws IOException {
+        assertEquals(2, readFixtureV2().getInt("version"));
+        ReputationSavedData loaded = ReputationSavedData.loadPayload(readFixtureV2());
+
+        assertEquals(2, loaded.playerCount());
+        assertEquals(ReputationSavedData.FORMAT_VERSION, loaded.loadedVersion());
+        assertEquals(-25, loaded.score(ADA, OVERWORLD_3));
+        assertEquals(60, loaded.score(ADA, NETHER_3));
+        assertEquals(15, loaded.score(ADA, STONEBROOK));
+        assertEquals(-80, loaded.score(BO, OVERWORLD_3));
+        assertTrue(loaded.isDecayImmune(STONEBROOK));
+
+        PlayerReputationRecord ada = loaded.player(ADA).orElseThrow();
+        assertEquals(2, ada.receiptCount());
+        assertEquals(2L, ada.titleRevision());
+        assertTrue(ada.hasMigrated("mcaquests:legacy_reputation_v1"));
+
+        CommunityReputationRecord riverbend = ada.community(OVERWORLD_3).orElseThrow();
+        assertEquals(Optional.of("acquaintance"), riverbend.tierHighWater(ReputationTiers.DEFAULT_ID));
+        IncidentRecord folded = riverbend.incident(V2_ASSAULT).orElseThrow();
+        assertTrue(folded.isSuperseded());
+        assertEquals(Optional.of(V2_KILLING), folded.supersededBy());
+        assertEquals(1L, folded.storyRevision());
+        assertEquals(1L, riverbend.incident(V2_RESCUE).orElseThrow().storyRevision());
+    }
+
+    /**
+     * The cross-loader claim itself: re-saving that file on NeoForge produces the identical bytes.
+     * A difference here is a real incompatibility in the schema, never a reason to rewrite the file.
+     */
+    @Test
+    void reSavingTheFormatTwoFixtureMovesNoByte() throws IOException {
+        assertArrayEquals(fixtureV2Bytes(),
+                encode(ReputationSavedData.loadPayload(readFixtureV2()).savePayload(new CompoundTag())),
+                "NeoForge must write the same v2 bytes Forge 1.20.1 wrote");
     }
 }

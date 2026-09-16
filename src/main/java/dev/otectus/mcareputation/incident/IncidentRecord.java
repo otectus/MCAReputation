@@ -8,6 +8,7 @@ import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.resources.ResourceLocation;
 
+import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -57,7 +58,10 @@ public final class IncidentRecord {
     private final ResourceLocation type;
     private final UUID player;
     private final CommunityKey community;
+    /** When the deed happened, which for a backdated delivery is older than when it was filed. */
     private final long createdGameTime;
+    /** When the deed entered the ledger; equal to {@link #createdGameTime} for a live deed. */
+    private final long appliedGameTime;
     private final ResourceLocation source;
     private final Optional<String> dedupeKey;
     private final int baseDelta;
@@ -79,9 +83,14 @@ public final class IncidentRecord {
     private long decayElapsedTicks;
     private long lastReconciledGameTime;
     private boolean pinned;
+    private boolean superseded;
+    @Nullable
+    private UUID supersededBy;
+    private long storyRevision;
 
     private IncidentRecord(UUID id, ResourceLocation type, UUID player, CommunityKey community,
-                           long createdGameTime, ResourceLocation source, Optional<String> dedupeKey,
+                           long createdGameTime, long appliedGameTime, ResourceLocation source,
+                           Optional<String> dedupeKey,
                            int baseDelta, IncidentVisibility visibility, IncidentSeverity severity,
                            List<IncidentSubject> subjects) {
         this.id = id;
@@ -89,6 +98,7 @@ public final class IncidentRecord {
         this.player = player;
         this.community = community;
         this.createdGameTime = createdGameTime;
+        this.appliedGameTime = appliedGameTime;
         this.source = source;
         this.dedupeKey = dedupeKey;
         this.baseDelta = baseDelta;
@@ -102,6 +112,9 @@ public final class IncidentRecord {
         this.decayElapsedTicks = 0L;
         this.lastReconciledGameTime = createdGameTime;
         this.pinned = false;
+        this.superseded = false;
+        this.supersededBy = null;
+        this.storyRevision = 0L;
     }
 
     /**
@@ -113,7 +126,21 @@ public final class IncidentRecord {
                                         long gameTime, ResourceLocation source, Optional<String> dedupeKey,
                                         int delta, IncidentVisibility visibility, IncidentSeverity severity,
                                         List<IncidentSubject> subjects) {
-        return new IncidentRecord(id, type, player, community, gameTime, source,
+        return create(id, type, player, community, gameTime, gameTime, source, dedupeKey, delta,
+                visibility, severity, subjects);
+    }
+
+    /**
+     * As {@link #create}, for a deed whose occurrence time is older than the moment it was filed: a
+     * backdated delivery names both times, and the pair is what lets the ledger age the arriving
+     * contribution before it ever reaches the score.
+     */
+    public static IncidentRecord create(UUID id, ResourceLocation type, UUID player, CommunityKey community,
+                                        long occurredGameTime, long appliedGameTime,
+                                        ResourceLocation source, Optional<String> dedupeKey,
+                                        int delta, IncidentVisibility visibility, IncidentSeverity severity,
+                                        List<IncidentSubject> subjects) {
+        return new IncidentRecord(id, type, player, community, occurredGameTime, appliedGameTime, source,
                 boundDedupe(dedupeKey), delta, visibility, severity, subjects);
     }
 
@@ -148,6 +175,11 @@ public final class IncidentRecord {
 
     public long createdGameTime() {
         return createdGameTime;
+    }
+
+    /** When this record entered the ledger; equal to {@link #createdGameTime()} unless backdated. */
+    public long appliedGameTime() {
+        return appliedGameTime;
     }
 
     public long updatedGameTime() {
@@ -220,9 +252,31 @@ public final class IncidentRecord {
         return villager != null && witnesses.contains(villager);
     }
 
-    /** True when this incident currently counts toward the player's standing. */
+    /**
+     * True when this incident currently counts toward the player's standing. A superseded record never
+     * does: its weight was absorbed by the incident that replaced it (§5 F08, DD3).
+     */
     public boolean contributes() {
-        return currentContribution != 0;
+        return !superseded && currentContribution != 0;
+    }
+
+    /** True when another incident absorbed this one; terminal, and separate from {@link #status()}. */
+    public boolean isSuperseded() {
+        return superseded;
+    }
+
+    /** The incident that absorbed this one, when it is known. */
+    public Optional<UUID> supersededBy() {
+        return Optional.ofNullable(supersededBy);
+    }
+
+    /**
+     * How many times what the village believes about this deed has actually changed (§6 "Gossip
+     * story"). Resolution, supersession, and the rollback of one move it; decay never does, which is
+     * the whole distinction — a contribution shrinking by a point a day is not news.
+     */
+    public long storyRevision() {
+        return storyRevision;
     }
 
     /** The first subject carrying this role, if any. */
@@ -302,6 +356,10 @@ public final class IncidentRecord {
      *         nothing moved
      */
     public int reconcile(DecayPolicy policy, long gameTime) {
+        if (superseded) {
+            // Terminal: a folded record holds no weight, so there is nothing left to age.
+            return 0;
+        }
         if (gameTime > lastReconciledGameTime) {
             decayElapsedTicks += gameTime - lastReconciledGameTime;
             lastReconciledGameTime = gameTime;
@@ -319,6 +377,21 @@ public final class IncidentRecord {
     }
 
     /**
+     * Advances the decay clock without ageing anything: the per-record half of a decay freeze
+     * (§5 F07).
+     *
+     * <p>Forward only, and it moves {@code lastReconciledGameTime} alone. {@code decayElapsedTicks},
+     * {@code settledDelta}, {@code currentContribution} and {@code status} are left exactly where they
+     * were, which is what makes lifting a freeze cost no catch-up decay: the paused interval was never
+     * counted, so it can never be repaid.
+     */
+    public void skipDecayTo(long gameTime) {
+        if (gameTime > lastReconciledGameTime) {
+            lastReconciledGameTime = gameTime;
+        }
+    }
+
+    /**
      * Applies a resolution.
      *
      * <p>Rejected — returning empty and mutating nothing — when the transition is not strictly
@@ -331,11 +404,17 @@ public final class IncidentRecord {
      */
     public Optional<Integer> resolve(ResolutionPolicy resolution, DecayPolicy decay,
                                      IncidentStatus newStatus, long gameTime) {
+        if (superseded) {
+            // A superseded record is not an amends candidate: recomputing settledDelta from baseDelta
+            // would hand back weight the successor already carries (§5 F08).
+            return Optional.empty();
+        }
         if (newStatus == null || !status.canTransitionTo(newStatus)) {
             return Optional.empty();
         }
         int before = currentContribution;
         status = newStatus;
+        storyRevision++;
         // Always scaled from the ORIGINAL delta, never from the already-decayed value, so the outcome
         // of "atone" does not depend on how long the player took to get around to it.
         settledDelta = resolution == null
@@ -360,20 +439,74 @@ public final class IncidentRecord {
      *
      * <p>This is how a killing upgrades the assault that preceded it (§20.2) without the two stacking:
      * the assault's weight is folded into the killing so the pair totals the killing's target, and the
-     * assault line still appears in the ledger. It is also how §13.5 folds a contributing incident
-     * into the baseline before pruning it.
+     * assault line still appears in the ledger. The state is terminal (§5 F08): the record stops
+     * decaying, stops resolving, and never contributes again.
+     *
+     * @param successor the absorbing incident, or {@code null} when its id is not known yet — see
+     *                  {@link #linkSuccessor}
+     * @return the change to apply to the cached community score
+     */
+    public int foldInto(@Nullable UUID successor, long gameTime) {
+        int change = absorbIntoBaseline(gameTime);
+        superseded = true;
+        storyRevision++;
+        linkSuccessor(successor);
+        return change;
+    }
+
+    /**
+     * Zeroes this record's weight without the terminal supersede semantics: the §13.5 pruning fold,
+     * where the contribution moves into the baseline and the record itself is about to be dropped.
      *
      * @return the change to apply to the cached community score
      */
-    public int foldInto(UUID successor, long gameTime) {
+    public int absorbIntoBaseline(long gameTime) {
         int before = currentContribution;
         settledDelta = 0;
         currentContribution = 0;
-        if (successor != null) {
-            putContext("superseded_by", successor.toString());
-        }
         touch(gameTime);
         return -before;
+    }
+
+    /**
+     * Names the incident that absorbed this one, for the caller that learns the id only after the
+     * successor has been committed. The {@code superseded_by} context entry is written too, because
+     * readers older than this field still look for it.
+     */
+    public void linkSuccessor(@Nullable UUID successor) {
+        if (successor == null) {
+            return;
+        }
+        supersededBy = successor;
+        putContext(BuiltinIncidents.CONTEXT_SUPERSEDED_BY, successor.toString());
+    }
+
+    /**
+     * Adopts a supersession a pre-flag record carries only as a {@code superseded_by} context entry.
+     * The v1 to v2 saved-data migration calls this and nothing else does: the record's stored weight is
+     * left exactly as it is, so the migration cannot move a score.
+     *
+     * <p>A successor that has already been pruned, or a link that is not a UUID, is tolerated — §5 F08
+     * asks for links to be validated, not for a pruned successor to be required.
+     *
+     * @return true when this record was not already terminal
+     */
+    public boolean adoptLegacySupersession() {
+        if (superseded) {
+            return false;
+        }
+        Optional<String> link = context(BuiltinIncidents.CONTEXT_SUPERSEDED_BY);
+        if (link.isEmpty()) {
+            return false;
+        }
+        superseded = true;
+        storyRevision++;
+        try {
+            supersededBy = UUID.fromString(link.get());
+        } catch (IllegalArgumentException ignored) {
+            // a link we cannot parse still tells us the record is terminal; only the identity is lost
+        }
+        return true;
     }
 
     /**
@@ -386,6 +519,10 @@ public final class IncidentRecord {
     public void restoreContribution(int settledDelta, int currentContribution, long gameTime) {
         this.settledDelta = settledDelta;
         this.currentContribution = currentContribution;
+        this.superseded = false;
+        this.supersededBy = null;
+        this.storyRevision++;
+        context.remove(BuiltinIncidents.CONTEXT_SUPERSEDED_BY);
         touch(gameTime);
     }
 
@@ -432,6 +569,7 @@ public final class IncidentRecord {
         tag.putUUID("player", player);
         tag.put("community", community.save());
         tag.putLong("created", createdGameTime);
+        tag.putLong("applied", appliedGameTime);
         tag.putLong("updated", updatedGameTime);
         tag.putString("source", source.toString());
         dedupeKey.ifPresent(k -> tag.putString("dedupe", k));
@@ -445,6 +583,17 @@ public final class IncidentRecord {
         tag.putLong("reconciled", lastReconciledGameTime);
         if (pinned) {
             tag.putBoolean("pinned", true);
+        }
+        if (superseded) {
+            tag.putBoolean("superseded", true);
+        }
+        if (supersededBy != null) {
+            tag.putUUID("supersededBy", supersededBy);
+        }
+        // Format 2, written only when it has moved: a record that never changed its story is
+        // byte-identical to what the previous serializer produced.
+        if (storyRevision != 0L) {
+            tag.putLong("storyRevision", storyRevision);
         }
 
         if (!subjects.isEmpty()) {
@@ -490,7 +639,11 @@ public final class IncidentRecord {
 
         IncidentRecord record = new IncidentRecord(
                 tag.getUUID("id"), type, tag.getUUID("player"), community.get(),
-                tag.getLong("created"), source,
+                tag.getLong("created"),
+                // Absent for anything written before backdated delivery existed: the deed was filed
+                // when it happened, which is exactly what the two times being equal means.
+                tag.contains("applied") ? tag.getLong("applied") : tag.getLong("created"),
+                source,
                 // Same bounding as create(): a hand-edited or corrupt key must not round-trip wider
                 // than a fresh one could ever be, and a blank key must read as "no key".
                 boundDedupe(tag.contains("dedupe") ? Optional.of(tag.getString("dedupe")) : Optional.empty()),
@@ -510,6 +663,12 @@ public final class IncidentRecord {
                 ? tag.getLong("reconciled")
                 : record.createdGameTime;
         record.pinned = tag.getBoolean("pinned");
+        // Absent means "not superseded": a legacy record carrying only the superseded_by context entry
+        // keeps its stored weight until a migration decides otherwise.
+        record.superseded = tag.getBoolean("superseded");
+        record.supersededBy = tag.hasUUID("supersededBy") ? tag.getUUID("supersededBy") : null;
+        // Absent reads as zero: a record written before story revisions existed has told one story.
+        record.storyRevision = Math.max(0L, tag.getLong("storyRevision"));
 
         ListTag witnessList = tag.getList("witnesses", Tag.TAG_INT_ARRAY);
         for (int i = 0; i < witnessList.size() && record.witnesses.size() < ReputationBounds.MAX_WITNESSES; i++) {

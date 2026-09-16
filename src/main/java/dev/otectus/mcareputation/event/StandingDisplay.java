@@ -10,6 +10,7 @@ import dev.otectus.mcareputation.reputation.ReputationService;
 import dev.otectus.mcareputation.reputation.ReputationTier;
 import dev.otectus.mcareputation.reputation.ReputationTiers;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.scores.Objective;
@@ -22,10 +23,12 @@ import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -60,6 +63,9 @@ public final class StandingDisplay {
 
     private static final Map<UUID, Shown> SHOWN = new LinkedHashMap<>();
 
+    /** Objective names we have already refused to touch, so the refusal is logged once each (DD13). */
+    private static final Set<String> REFUSED = new HashSet<>();
+
     private static int tickCounter;
 
     private StandingDisplay() {
@@ -86,6 +92,11 @@ public final class StandingDisplay {
         String oldTier = old == null ? null : old.tierId();
         String nextTier = next == null ? null : next.tierId();
         return !Objects.equals(oldTier, nextTier);
+    }
+
+    /** The display name our objective wears, and the mark that proves the objective is ours. */
+    static Component objectiveMarker() {
+        return Component.translatable("mcareputation.scoreboard.objective");
     }
 
     /** The tab-list entry: whatever name was already built, plus the tier. */
@@ -176,7 +187,70 @@ public final class StandingDisplay {
     /** Clears every cached display on server stop; see {@code McaReputationMod.onServerStopped}. */
     public static void clearAll() {
         SHOWN.clear();
+        REFUSED.clear();
         tickCounter = 0;
+    }
+
+    // ------------------------------------------------------------------
+    // Config lifecycle (DD11)
+    // ------------------------------------------------------------------
+
+    /**
+     * Drops every cached display decision. Called when the config is reloaded: the objective name, the
+     * refresh interval and both switches may all have moved, and a cached decision made under the old
+     * values would keep a stale row alive until something else happened to the player.
+     */
+    public static void invalidateCache() {
+        SHOWN.clear();
+        REFUSED.clear();
+        tickCounter = 0;
+    }
+
+    /**
+     * Takes down the adornments of a feature that has just been switched off, and rebuilds the ones
+     * still on. Off then on must leave no stale suffix and no stale score (§5 F16 row 5).
+     *
+     * @param scoreboardWasEnabled whether the scoreboard row was on before this config change
+     * @param tabListWasEnabled    whether the tab-list suffix was on before this config change
+     */
+    public static void applyConfigChange(MinecraftServer server, boolean scoreboardWasEnabled,
+                                         boolean tabListWasEnabled) {
+        if (server == null) {
+            return;
+        }
+        boolean scoreboardNow = McaReputationConfig.scoreboardObjectiveEnabled();
+        boolean tabListNow = McaReputationConfig.tabListTierEnabled();
+        if (scoreboardWasEnabled && !scoreboardNow) {
+            removeOwnedObjective(server);
+        }
+        invalidateCache();
+        if (tabListWasEnabled && !tabListNow) {
+            // The suffix lives in the name itself, so the only way to take it off is to rebuild the
+            // name -- which the hook now declines to decorate.
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                player.refreshTabListName();
+            }
+        }
+        if (anyDisplayEnabled()) {
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                refresh(player);
+            }
+        }
+    }
+
+    /**
+     * Removes the configured objective, and with it every score we wrote, but only when it is provably
+     * ours. A foreign objective wearing the configured name is left exactly as it is (DD13).
+     */
+    static void removeOwnedObjective(MinecraftServer server) {
+        Scoreboard scoreboard = server.getScoreboard();
+        String name = McaReputationConfig.scoreboardObjectiveName();
+        Objective objective = scoreboard.getObjective(name);
+        if (decide(objective, false) != ScoreboardOwnership.Decision.REMOVE) {
+            return;
+        }
+        // Our rows go with it: removeObjective drops every score held against it.
+        scoreboard.removeObjective(objective);
     }
 
     // ------------------------------------------------------------------
@@ -226,20 +300,46 @@ public final class StandingDisplay {
     }
 
     /**
-     * Writes, or clears, one player's row. The objective is created on demand and an existing one with
-     * the configured name is reused as it is — a server that set up its own display slot keeps it, and
-     * nothing here ever calls {@code setDisplayObjective}: where standing is shown is the server's
+     * The ownership question for the objective with the configured name, asked of the live scoreboard
+     * and answered by {@link ScoreboardOwnership}.
+     */
+    private static ScoreboardOwnership.Decision decide(@Nullable Objective objective,
+                                                       boolean featureEnabled) {
+        return ScoreboardOwnership.decide(objective != null,
+                objective != null && objective.getCriteria() == ObjectiveCriteria.DUMMY,
+                objective != null && objectiveMarker().equals(objective.getDisplayName()),
+                featureEnabled);
+    }
+
+    /**
+     * Writes, or clears, one player's row. The objective is created on demand, and an existing one is
+     * adopted only when it is provably ours — dummy criteria and our own display-name marker (DD13).
+     * Anything else keeps the name and is never written to, never removed, and reported once.
+     *
+     * <p>Nothing here ever calls {@code setDisplayObjective}: where standing is shown is the server's
      * decision, not this mod's.
      */
     private static void writeScore(ServerPlayer player, @Nullable Shown shown) {
         Scoreboard scoreboard = player.server.getScoreboard();
         String name = McaReputationConfig.scoreboardObjectiveName();
         Objective objective = scoreboard.getObjective(name);
-        if (objective == null) {
+        ScoreboardOwnership.Decision decision = decide(objective, true);
+        if (decision == ScoreboardOwnership.Decision.REFUSE) {
+            if (REFUSED.add(name)) {
+                McaReputation.LOGGER.warn("[MCA: Reputation] the scoreboard objective '{}' already "
+                        + "exists and is not ours; leaving it alone and showing no standing on it. "
+                        + "Point scoreboardObjectiveName at a free name, or remove that objective.",
+                        name);
+            }
+            return;
+        }
+        if (!ScoreboardOwnership.mayWrite(decision)) {
+            return;
+        }
+        if (decision == ScoreboardOwnership.Decision.CREATE) {
             // 1.21 added the auto-update flag and the number format; neither is this mod's business,
             // so the row is a plain integer that only this class ever writes.
-            objective = scoreboard.addObjective(name, ObjectiveCriteria.DUMMY,
-                    Component.translatable("mcareputation.scoreboard.objective"),
+            objective = scoreboard.addObjective(name, ObjectiveCriteria.DUMMY, objectiveMarker(),
                     ObjectiveCriteria.RenderType.INTEGER, false, null);
         }
         if (shown == null) {

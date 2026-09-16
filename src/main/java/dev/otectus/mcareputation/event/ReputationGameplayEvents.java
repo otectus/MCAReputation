@@ -4,7 +4,7 @@ import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.CoreIncidentKind;
 import dev.otectus.mcareputation.api.ReputationRequest;
-import dev.otectus.mcareputation.api.ReputationResult;
+import dev.otectus.mcareputation.api.SupersedeSpec;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.community.CommunityMetadata;
 import dev.otectus.mcareputation.community.CommunityResolver;
@@ -15,6 +15,7 @@ import dev.otectus.mcareputation.incident.IncidentRegistry;
 import dev.otectus.mcareputation.incident.IncidentSubject;
 import dev.otectus.mcareputation.incident.WitnessResolver;
 import dev.otectus.mcareputation.reputation.ReputationService;
+import dev.otectus.mcareputation.reputation.TitleService;
 import dev.otectus.mcareputation.state.ReputationSavedData;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -269,48 +270,15 @@ public final class ReputationGameplayEvents {
         precursor.ifPresent(assault -> request.context(BuiltinIncidents.CONTEXT_PRECURSOR,
                 assault.id().toString()));
 
-        // Fold the assault BEFORE recording the killing, so the killing's own delta lands on a ledger
-        // that no longer double-counts the lead-up and the resulting score is the killing's target.
-        // The pre-fold contribution is snapshotted first: if the killing turns out to carry no public
-        // weight — refused, duplicate, or retained unwitnessed because nobody saw the death — the fold
-        // is rolled back. The village saw the beating; an unseen murder must not refund its penalty.
-        Optional<IncidentRecord> foldedAssault = precursor.filter(IncidentRecord::contributes);
-        int foldedSettled = foldedAssault.map(IncidentRecord::settledDelta).orElse(0);
-        int foldedCurrent = foldedAssault.map(IncidentRecord::currentContribution).orElse(0);
-        foldedAssault.ifPresent(assault -> {
-            assault.foldInto(null, gameTime);
-            recomputeCommunityScore(server, player.getUUID(), community);
-        });
-
-        ReputationResult result = ReputationService.record(request.build());
-
-        boolean killCarriesWeight = result.applied() && result.incidentId()
-                .flatMap(id -> ReputationService.incident(server, player.getUUID(), community, id))
-                .map(IncidentRecord::contributes)
-                .orElse(false);
-        if (killCarriesWeight) {
-            // Link the folded assault to the killing that absorbed it, now that the id exists.
-            result.incidentId().ifPresent(killingId -> precursor.ifPresent(assault ->
-                    assault.putContext(BuiltinIncidents.CONTEXT_SUPERSEDED_BY, killingId.toString())));
+        // The fold, the record, the link and the rollback are all one transaction, and it lives in the
+        // service: this path and any producer-owned crime path must supersede identically (§5 F05).
+        if (precursor.isPresent()) {
+            ReputationService.recordSuperseding(request.build(),
+                    SupersedeSpec.of(precursor.get().id(), McaReputationConfig.assaultCoalesceTicks(), true));
         } else {
-            foldedAssault.ifPresent(assault -> {
-                assault.restoreContribution(foldedSettled, foldedCurrent, gameTime);
-                recomputeCommunityScore(server, player.getUUID(), community);
-            });
-        }
-        if (foldedAssault.isPresent() || result.applied()) {
-            // The fold (and any rollback of it) mutates the store outside the transaction, so it needs
-            // its own dirty mark — "only when the kill applied" would lose a fold on a crash.
-            ReputationSavedData.get(server).setDirty();
+            ReputationService.record(request.build());
         }
         cacheMetadata(level, player.getUUID(), community, gameTime);
-    }
-
-    private static void recomputeCommunityScore(MinecraftServer server, UUID playerId, CommunityKey community) {
-        ReputationSavedData.get(server).player(playerId)
-                .flatMap(record -> record.community(community))
-                .ifPresent(record -> record.recomputeScore(McaReputationConfig.minimumScore(),
-                        McaReputationConfig.maximumScore()));
     }
 
     // ------------------------------------------------------------------
@@ -373,6 +341,10 @@ public final class ReputationGameplayEvents {
             data.player(player.getUUID())
                     .ifPresent(record -> record.setLastKnownName(player.getGameProfile().getName()));
             ReputationService.reconcile(server, player.getUUID(), gameTime);
+            // A fallback copy has had the whole time the player was away to drift, and a grants-only
+            // stream cannot repair a title that was revoked while they were offline (§6 "Title
+            // synchronization"). Nothing is created for a player with no record.
+            TitleService.syncTitles(server, player.getUUID());
             LegacyImportProviders.runFor(server, player, false);
         } catch (Throwable t) {
             McaReputation.LOGGER.error("[MCA: Reputation] login handling failed for {}; play continues",

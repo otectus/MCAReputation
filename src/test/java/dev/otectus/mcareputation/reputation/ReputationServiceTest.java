@@ -75,6 +75,9 @@ class ReputationServiceTest {
     }
 
     private ReputationResult record(String dedupeKey, Set<UUID> witnesses, long gameTime) {
+        // The request carries an occurrence time; the world clock has to have reached it for the deed
+        // to be a live one rather than a backdated delivery.
+        ctx.gameTime = Math.max(ctx.gameTime, gameTime);
         return ReputationService.recordWith(ctx, request(dedupeKey, witnesses, gameTime));
     }
 
@@ -153,7 +156,12 @@ class ReputationServiceTest {
         assertTrue(result.applied());
         assertTrue(result.newHighWater(), "0 -> 200 reaches honored for the first time");
         assertTrue(home().hasTitle(ResourceLocation.fromNamespaceAndPath("mcaquests", "honored_of_village")));
-        assertEquals(List.of("ReputationTitleGrantedEvent",
+        assertEquals(List.of(
+                        // The grant reaches mirrors as it happens (WP6): a title earned inside a
+                        // transaction used to be mirrored only by the score envelope that followed it,
+                        // and one earned outside a transaction reached no mirror at all.
+                        "mirrorVillageTitle:mcaquests:honored_of_village",
+                        "ReputationTitleGrantedEvent",
                         "mirrorScore:200:honored",
                         "mirrorVillageTitle:mcaquests:honored_of_village",
                         "ReputationIncidentCreatedEvent",
@@ -269,6 +277,30 @@ class ReputationServiceTest {
 
         assertFalse(unwitnessed.applied());
         assertTrue(unwitnessed.incidentId().isEmpty());
+    }
+
+    /**
+     * The refusal names the incident the first attempt created (F02).
+     *
+     * <p>A companion that commits its own record and then crashes before storing the id we returned
+     * can only repair itself if replaying the same dedupe key tells it what already exists. Without
+     * the id it either loses the link forever or files a second incident to get one.
+     */
+    @Test
+    void theDuplicateRefusalReturnsTheOriginalIncidentId() {
+        define(-8, IncidentVisibility.VILLAGE, DecayPolicy.NONE);
+        ReputationResult first = record("k1", Set.of(), 0L);
+        assertTrue(first.applied());
+        assertTrue(first.incidentId().isPresent());
+
+        ReputationResult second = record("k1", Set.of(), 10L);
+
+        assertFalse(second.applied());
+        assertEquals(0, second.appliedDelta());
+        assertEquals(ReputationResult.Reason.DUPLICATE, second.reason());
+        assertEquals(first.incidentId(), second.incidentId(),
+                "the replay must name the incident the first attempt produced");
+        assertEquals(1, home().incidentCount(), "and must not have created a second one");
     }
 
     // ------------------------------------------------------------------
