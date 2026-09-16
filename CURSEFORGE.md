@@ -49,6 +49,22 @@ opinion of you yet."*) up to **Revered** (*"Children here will grow up knowing y
 Climbing into a tier for the first time earns a toast; slipping down gets a quiet, subdued line
 instead — the village doesn't celebrate your fall, it just… cools.
 
+### 🩺 Known for something, not just liked
+Standing says how welcome you are. Your **profile** says what you're known *for*. Every village
+tracks how widely known you are there — from **Unknown** (*"Nobody here would know your face."*) up
+to **Famous** (*"What you have done here is told as a story."*) — and which traits your deeds have
+actually demonstrated: dependable, brave, kind, law-abiding, generous, merciful, violent. The two
+ladders are independent, so the local hero and the local killer can be equally famous and nothing
+like equally welcome, and becoming notorious never makes you less known.
+
+The Standing screen adds two lines for it plus a **Details** button that opens the traits and the
+evidence behind each. Ask a villager and you get *their* view — built only from what they saw or have
+heard about, so a villager who's heard nothing about you says exactly that instead of reciting the
+village's opinion. Repeating the same favour is worth steadily less inside its window; repeating harm
+never is. And what a deed was worth is frozen the moment it happens, so a datapack change shapes what
+happens next rather than rewriting the past. Server owners can switch the whole thing, or any part of
+it, off.
+
 ### 🎖️ Titles are earned, not rented
 Reaching Honored or Revered grants a permanent **title**. Titles are badges for what you *did*,
 not a live meter of what you *are* — if your standing later collapses, the title stays. Titles
@@ -167,9 +183,11 @@ says who currently holds what.
 Everything is toggleable. `config/mcareputation-common.toml` (server-authoritative) covers the
 core detection (assault/killing, self-defense window and multiplier, minimum damage), witnessing
 (radius, line of sight, rumor spread timing), score bounds and decay, storage limits, and each
-integration and the legacy migration independently. `config/mcareputation-client.toml` covers
-presentation only: the Standing button, toasts, action-bar feedback, and whether exact scores and
-deltas are shown.
+integration and the legacy migration independently — plus the profile layer: whether it runs at all,
+whether repeated services are discounted, and how much the traits a villager knows you for may colour
+their opinion. `config/mcareputation-client.toml` covers presentation only: the Standing button,
+toasts, action-bar feedback, whether exact scores and deltas are shown, and which parts of your
+profile the screen displays. Turning anything off changes behaviour only; no saved record is deleted.
 
 ## Commands
 

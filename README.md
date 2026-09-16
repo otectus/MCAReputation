@@ -83,6 +83,30 @@ visibility note — known only to those it involved, seen by whoever witnessed i
 village — and, once a deed has decayed, softened, or been absorbed by a later one, shows both what it was
 originally worth and what it counts for now.
 
+## What the village knows you for
+
+Standing answers how welcome you are. A **profile** answers the other question: what you are known
+for here. It has two halves — how widely known you are in this village, named on its own ladder from
+unknown up to famous, and the traits your deeds have actually demonstrated (dependable, brave, kind,
+law-abiding, generous, merciful, violent). The two are independent on purpose: a celebrated hero and an
+infamous killer can be equally famous in the same village while sitting at opposite ends of the
+standing ladder, and becoming notorious never makes you *less* known.
+
+The Standing screen shows it in two lines above your deeds — how well known you are, and what for —
+with a **Details** button that expands the traits and how much evidence each rests on. Open the screen
+from a villager and you also see what *that* villager knows you for, which is only ever the deeds they
+witnessed or have heard about: a villager who has heard nothing says so. A trait's direction is always
+written out, never just coloured, and a village that has simply never seen you do something does not
+count as having seen you do the opposite.
+
+Repeated services are worth progressively less inside their own window, so the tenth rescue of the
+same neighbour does not read like the first; repeated harm is never discounted. What a deed was worth
+is frozen onto it when it happens, so changing a datapack shapes future deeds instead of rewriting
+what people already did. Operators can switch the whole layer, its repeat-credit half, and its effect
+on villager opinion in `[profiles]` in the server config, and hide any of it client-side in the client
+config; nothing is deleted when it is switched off. `/mcareputation debug profile|credit|
+profileincident|profilemigration` are the operator-side views.
+
 ## Automatic deeds and who detects them
 
 Six things are detected without being asked: harming an MCA villager, killing one, saving one from the
@@ -128,6 +152,10 @@ needs permission level 2, and every change is written to the server log with who
 /mcareputation debug receipts <player> [community]     delivery receipts recorded for a player
 /mcareputation debug supersede <player> <community>    every incident folded into another, and by what
 /mcareputation debug quarantine                        malformed save entries and read-only status
+/mcareputation debug profile <player> <community>      the profile a village holds, and why
+/mcareputation debug credit <player> <community>       repeat-credit windows, peeked without consuming
+/mcareputation debug profileincident <player> <community> <incident>   one deed's frozen evidence
+/mcareputation debug profilemigration [run <budget>]   profile history coverage, and advancing it
 ```
 
 Communities are written `<dimension>/<villageId>`, e.g. `minecraft:overworld/3`, or the literal `here`.
@@ -172,7 +200,7 @@ it back are in **[MIGRATION.md](MIGRATION.md)**.
 | File | What is in it |
 |---|---|
 | [CONFIG.md](CONFIG.md) | every config option, default, range, and disabled behaviour |
-| [DATAPACK.md](DATAPACK.md) | incident, tier, and title schemas with examples |
+| [DATAPACK.md](DATAPACK.md) | incident, tier, title, facet, recognition, profile, and credit-policy schemas with examples |
 | [API.md](API.md) | the public Java API, the Forge events, threading and failure contracts |
 | [MIGRATION.md](MIGRATION.md) | legacy Quests import, removal, and rollback |
 | [CHANGELOG.md](CHANGELOG.md) | release notes |

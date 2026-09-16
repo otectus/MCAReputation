@@ -247,6 +247,15 @@ nothing, which is a real answer. The variant taking a `UUID` returns the opinion
 `getOpinionBias` answers the bounded check bias from that villager's opinion tier rather than the
 village's — same ±8 ceiling and the same two axes (`trust`, `respect`) as `getCheckBias`.
 
+**Since 0.6.0 this is the canonical resolved term.** Where a profile answer is available, the rung is
+picked from the villager's *facet-aware* final opinion (`VillagerProfileSnapshot.finalOpinion()`)
+rather than from their scalar one — the facet interpretation is already inside that opinion, so this
+stays exactly one term, replaced rather than added to. The ±8 clamp is unchanged and holds under the
+maximal facet term as much as under none: a larger facet contribution can only move the villager to a
+different rung, never add a second bias beside that rung's own. With profiles disabled, unpublished,
+or unresolvable the pre-0.6.0 answer is returned unchanged, and `enableVillagerOpinion` gates both —
+a facet-aware opinion is still an opinion.
+
 `getVillagerOpinionDetailed` answers the question the plain overload cannot: an
 `OpinionResult(OpinionAvailability, Optional<VillagerOpinion>)` where `AVAILABLE` covers a real
 answer, including a genuine zero for a villager who knows nothing about the player yet. Only
@@ -421,8 +430,12 @@ answered from the community profile. A villager who genuinely knows nothing is `
 empty profile and a zero opinion, and that valid zero must not be replaced by the village's view.
 The facet opinion term is one capped contribution (`maxFacetOpinionAdjustment`, default 25), never a
 third independent bonus, and the final external Trust/Respect check contribution still obeys ±8.
-In 0.6.0 the observer's interpretation weights are the authored neutral defaults, reported as
-`TraitBasis.NEUTRAL_DEFAULT`.
+The observer's own interpretation is read where it can be: a resolved MCA personality selects that
+facet's authored `personality_overrides` weight and reports `TraitBasis.RESOLVED`; an unresolved
+personality uses the authored default weight and reports `TraitBasis.NEUTRAL_DEFAULT`, which is why
+the fallback is neutral rather than optimistic; and `TraitBasis.DISABLED` says facet interpretation is
+switched off rather than that nothing moved it. A villager's profession is resolved and reported but
+weights nothing in this version — the facet schema authors no profession override.
 
 **`deliverProfiled`.** The same canonical commit as `deliver`/`recordSuperseding`: one dedupe rule, one
 receipt index, one admission decision, one publication order. `profileSelection` picks an *authored*
@@ -600,6 +613,14 @@ rather than a deed recorded by nobody. Closing the registration is the only way 
 and it is idempotent.
 
 `/mcareputation debug authorities` shows what is registered and which kinds are currently claimed.
+
+**Overlapping claims are reported at registration.** `CoreIncidentAuthorities` already prefers
+`canDeliver(kind)` over a bare `owns`; since 0.6.0, registering an authority for a kind another active
+authority also claims logs one DEBUG line per kind naming both authorities — once per kind per JVM, at
+registration rather than from inside the damage path, where a per-event line would be a log flood. An
+authority that declares nothing is compared on the kinds `coreAuthorityUndeclaredKinds` could still
+trust it with, which is the widest set it can end up owning. The line is a diagnostic, not a refusal:
+the first claimant that can deliver the kind wins and this mod stands down either way.
 
 Registering an authority is **additive to API version 1** — `getApiVersion()` deliberately does not
 move, because a bridge written against the original version is still fully compatible.

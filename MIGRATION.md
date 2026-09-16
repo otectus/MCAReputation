@@ -6,9 +6,106 @@ Nothing to do. Everyone begins as a stranger everywhere, which is the intended s
 
 ---
 
+## Save format 2 → 3
+
+Format 3 adds the profile layer: frozen profile evidence per deed, a second per-deed clock for aging
+it, and the bounded repeat-credit window accounting. A world last opened by 0.5.x is upgraded in
+place, once, the next time it loads.
+
+A ledger with no profile content still serializes to the byte-identical player subtrees format 2
+produced, which is what lets an existing world load unchanged.
+
+### The structural half, at load
+
+Deterministic, and it moves no score, title, receipt, or revision. Every **retained, non-private**
+incident whose definition names a `social_profile` gets an *unenriched stub* — a marked placeholder
+carrying no quantities — and starts its profile clock from the scalar age that was actually observed
+for that record, rather than from zero (which would hand a decade-old killing a fresh lifetime) or
+from now-minus-created (which would bank every interval nobody ever charged).
+
+A missing field is read as "we do not know what this was socially worth", never as "this was
+unremarkable" and never as a configured profile: the first would mislabel every pre-upgrade rescue,
+the second would award quantities nobody earned.
+
+### The enrichment half, resumable and budgeted
+
+Filling those stubs in cannot honestly happen at load time, because the content it needs comes from
+the datapack reload, which may not have published yet. So it runs afterwards, in bounded passes of
+eight players, from the same periodic sweep that reconciles decay, and defers entirely while the
+registries are still empty (`state/ReputationSavedData.advanceProfileMigration`).
+
+- Progress is a cursor in `state/ProfileMigrationState`. **Correctness does not depend on it**:
+  enrichment only ever upgrades an unenriched stub, so a pass whose progress never reached disk is
+  simply performed again, and an interruption half way through is harmless.
+- What it is allowed to speak for is narrow, twice over. A frozen manifest
+  (`profile/LegacyEnrichmentManifest`, version 1) names the built-in incident types it may enrich —
+  assault, killing, rescue, cure, raid repelled, promise kept, promise broken — rather than reading
+  the live `social_profile` field, because otherwise every `/reload` would rewrite history: a pack
+  repointing `villager_rescued` at a more generous profile would retroactively award the difference.
+  Custom types, and the generic completion incidents (`quest_completed`, `project_completed`,
+  `situation_resolved`) whose meaning the old save never recorded, stay explicitly unenriched.
+- Only the `recognition` and `historical` channels are reconstructed. An old killing therefore
+  contributes the recognition and the violence it factually demonstrated, and nothing about how
+  culpable or sorry anybody was — that was never stored and cannot be inferred.
+- Credit is 100%, the window trackers start empty, and no standing, title, receipt, or revision moves.
+
+### Coverage, and why it stays partial
+
+| Coverage | Meaning |
+|---|---|
+| `COMPLETE` | The save never needed migrating; every payload was created live. |
+| `MIGRATING` | A budgeted pass is still owed. Profile answers are provisional. |
+| `PARTIAL_LEGACY` | There is legacy history, or a quarantined payload. Positive evidence is displayable; **absence proves nothing**. |
+
+A finished conservative pass is partial history, not complete history, and it stays `PARTIAL_LEGACY`
+for good. That distinction is the whole point: an authored gate asking "no evidence of violence" must
+keep respecting a save that cannot prove it, and the Standing screen says "recognition history is
+incomplete" rather than "nobody knows you".
+
+### Malformed profile payloads are quarantined, and the deed is kept
+
+Every bound is checked on the read path, not only the write one. A profile payload that fails
+validation — an out-of-range quantity, credited above authored, current above credited, disagreeing
+signs, a non-monotonic resolution progression, an unknown origin or credit reason, a stub that
+nonetheless carries quantities — is held in the existing quarantine and its **scalar incident is
+kept**. An unrecognised credit reason is refused rather than read as "full credit": that would invent
+an explanation for a number a player can see. Profile payloads are counted separately from player and
+incident entries, and the counter keeps counting past the bound on held copies, because "we stopped
+keeping copies" must not read as "there was nothing wrong". `/mcareputation debug quarantine` reports
+them.
+
+### A file from a newer format
+
+Unchanged, and it now covers the new work too: a format-4 file latches the store **read-only**, loads
+nothing, refuses to migrate *and* refuses to enrich, and is handed back verbatim — including keys this
+build has never heard of. Every write path refuses retryably in that state rather than applying a
+mutation in memory that will never be saved.
+
+### Running it by hand
+
+```
+/mcareputation debug profilemigration              coverage, cursor, counters, quarantined payloads
+/mcareputation debug profilemigration run <budget>  enrich up to <budget> players now
+```
+
+`run` is the one mutating diagnostic here, and it is bounded, resumable, and idempotent for the same
+reason the automatic pass is. It awards no standing, titles, or rewards.
+
+### Fixtures
+
+The suite carries a real `mcareputation-format-3-1.20.1.nbt` fixture generated by the existing gated
+mechanism, holding one of each kind — a live payload credited at 50%, an enriched legacy payload, a
+stub, a live credit group and subject window, and an unfinished cursor — because a fixture with only
+the easy case would not notice a serializer that dropped the hard one. The format-1 and format-2
+fixtures are untouched; format 2 can no longer be compared whole after an upgrade, so its player
+subtrees are compared instead, which is the statement that actually matters.
+
+---
+
 ## Save format 1 → 2
 
-Since this version the on-disk schema is format 2. A world last opened by an older build has a format-1
+Format 2 was the 0.5.0 schema; a world coming from further back passes through this step first, in
+order, on its way to format 3. A world last opened by an older build has a format-1
 `<world>/data/mcareputation.dat`; this build migrates it in place, once, the next time it loads — before
 anything else touches the store.
 
@@ -26,7 +123,8 @@ anything else touches the store.
 - Nothing is invented for history that was already pruned before the upgrade.
 
 The migration is idempotent — running it again changes nothing — and it writes no event, toast, mirror
-call, or reward, and never moves a score. The file is saved back as format 2 on the next write.
+call, or reward, and never moves a score. The file is saved back at this build's format on the next
+write, so a format-1 world that loads here lands at format 3 having run both steps in order.
 
 ### Quarantine instead of silent loss
 
@@ -49,10 +147,10 @@ downgrade — the file itself is never touched destructively.
 ### Backing up and rolling back
 
 Back up `<world>/data/mcareputation.dat`, and the rest of `<world>/data/` alongside it, before
-upgrading. After a save has been written as format 2, an older build cannot read the new receipts or the
-terminal-supersede flag; its loader keeps only what it recognises and warns rather than crashing. The
-supported rollback is restoring that pre-upgrade backup — not opening a format-2 file with an older
-build and hoping.
+upgrading. Rolling back across a format bump is **restoring that backup**, not opening the newer file
+with the older build: a 0.5.0 build meets a format-3 file as a future format and latches its store
+read-only, exactly as this build does for a format-4 file, so that session neither loads nor saves
+anything. Pre-0.5.0 builds, which had no such latch, keep only what they recognise and warn.
 
 ### What changes on the ground
 

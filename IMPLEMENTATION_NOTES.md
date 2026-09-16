@@ -224,6 +224,12 @@ thrown-potion, and tamed-pet cases in §20.1 without any per-source special casi
 > quarantined package still meant a server-killing `NoClassDefFoundError`. `OptionalClassloadTest`
 > now asserts the stronger rule — *nothing* imports MCA — and `compat/McaReflect` resolves every
 > MCA class and method by name at runtime across both package roots.
+>
+> **0.6.0 adds the profile layer**, which this section predates entirely: the new `profile/`,
+> `credit/` and `api/profile/` packages, `reputation/ProfileService` behind the same
+> reconciliation gate, `ReputationContext` as the read half of `ServiceContext` promoted to an
+> internal SPI, protocol `"5"` and save format `3`. Cross-check the package list below against
+> `MODMAP.md`.
 
 Follows §11 exactly, with these concrete additions:
 

@@ -5,6 +5,154 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-09-16
+
+Public **profiles**: what a village knows you *for*, as distinct from how much it likes you. Standing
+answered one question — how welcome are you here. This release adds the second one — what are you
+known for here — and keeps the two apart on purpose: a celebrated hero and an infamous murderer can
+be equally well known while sitting at opposite ends of the standing ladder.
+
+The work follows `docs/MCA_Reputation_0.6.0_Phase_1_Implementation_Plan.md`. Nothing about scalar
+standing, its ladder, its decay, or its screen changed meaning; profile evidence is a second channel
+with its own authored lifetimes, its own clock, and its own freeze rules.
+
+**Numbers that moved:** the network protocol goes `"4"` → `"5"` (NeoForge `"5"` → `"6"`) — a client
+and server must run matching versions of this mod, same as any earlier protocol bump. The save format
+goes `2` → `3`; an existing world migrates automatically on first load, and the migration is
+idempotent. `McaReputationApi.getApiVersion()` is **unchanged** (Forge stays at `1`, NeoForge at `2`):
+every profile operation is additive, so a companion that already compiles against this API keeps
+working untouched.
+
+### Added
+
+- **Recognition and facets.** Recognition is how widely known you are in one village — non-negative,
+  on its own tier ladder, with no conversion from standing, because two opposing deeds that cancel
+  each other's standing still both make you *more* widely known. Facets are what you are known for:
+  seven ship (reliability, bravery, compassion, lawfulness, generosity, mercy, violence), each with an
+  authored range that decides whether zero is a real balance or simply nothing observed. Neither is
+  spendable currency: a facet value exists only as the aggregate of evidence frozen onto deeds you
+  actually did.
+
+- **Incident profiles and credit policies, both datapack-authored.** An incident definition's new
+  optional `social_profile` field names the profile that says what that kind of deed is socially worth:
+  how much recognition it creates, which facets it evidences, how long each lasts, and how an apology,
+  atonement, forgiveness, or disproof affects it per channel. A credit policy is the anti-grind half —
+  an explicit, finite, non-increasing percentage schedule per repeat-credit group, with an optional
+  second ceiling on one beneficiary, so a tenth rescue of the same villager is worth less than the
+  first. Only a `commendable` profile may be discounted: repetition never makes harm cheaper. The
+  quantities a deed was worth are **frozen onto the accepted deed**, so editing a pack changes future
+  deeds and never rewrites what a player already did. Schemas, bounds, and every shipped number are in
+  [DATAPACK.md](DATAPACK.md).
+
+- **A knowledge-filtered villager view.** What one villager knows you for is aggregated from the deeds
+  *that villager* knows about — filtered per deed through the existing witness and rumour rules before
+  anything is summed, never as a discount over the village's own vector, which would leak the shape of
+  evidence they never learned. Their reading of it is theirs too: a resolved MCA personality can weight
+  a facet up or down within the pack's authored bound, an unresolved one falls back to the authored
+  default, and a villager who has heard nothing is a real, empty answer rather than the village's view
+  in disguise.
+
+- **The Standing screen says it.** Two compact header lines — how well known you are here, and what
+  for — plus a **Details** button beside the village arrows that expands one pane of up to eight traits
+  with their evidence counts. It is a real, keyboard-reachable button, starts collapsed every time the
+  screen opens, and expanding it sends nothing: the details arrived with the standing. A facet's
+  direction is always a word, never a colour alone, and zero on a one-sided facet reads as "known both
+  ways" rather than as its opposite. When the screen was opened from a villager, that villager's own
+  view is shown beneath the village's. Five states are told apart instead of blurred into a zero:
+  unreadable store, read-only store, migration still running, incomplete legacy history, and a genuine
+  stranger — an incomplete import never reads as "nobody knows you".
+
+- **Eight new config keys.** COMMON `[profiles]`: `enableProfiles`, `enableRepeatCredit`,
+  `enableFacetOpinion`, `maxFacetOpinionAdjustment`. CLIENT `[profiles]`: `showRecognition`,
+  `showKnownFor`, `showObserverProfile`, `showExactProfileValues`. The split is deliberate — a client
+  preference can never change what the server records. Turning profiles off deletes nothing: stored
+  evidence is retained and its clock freezes. See [CONFIG.md](CONFIG.md).
+
+- **Four debug subcommands**, all at the existing permission level 2: `/mcareputation debug profile
+  <player> <community>` (capabilities, availability, raw subunits beside the public integer, per-facet
+  evidence, payload origins, suppressed credit decisions, and a bounded explanation computed for a
+  neutral observer — read strictly read-only, so a diagnostic cannot age the evidence it prints);
+  `debug credit <player> <community>` (the repeat-credit windows, peeked without consuming);
+  `debug profileincident <player> <community> <incident>` (all four channel quantities, so a faded deed
+  and a discounted one are distinguishable); and `debug profilemigration [run <budget>]` (coverage and
+  quarantine, with one explicitly mutating branch).
+
+- **API: nine profile operations on `McaReputationApi`** — `profileCapabilities`, `getProfileDetailed`,
+  `inspectStoredProfile`, `getVillagerProfileDetailed` (UUID and entity), `matchesProfile`,
+  `matchesSpeakerProfile` (community-scoped and entity), and `deliverProfiled` — plus twelve immutable
+  types in `api/profile/`, the `ReputationProfileChangedEvent` on the FORGE bus (published for an
+  accepted deed that carried live evidence, and for a reconciliation pass that moved profile evidence
+  and nothing else), and five new `ReputationCapabilities.FEATURE_*` strings
+  (`profile_snapshot_v1`, `speaker_profile_v1`, `repeat_credit_v1`, `profiled_delivery_v1`,
+  `profile_change_v1`), advertised only while the feature is actually live. Every answer is a
+  `ProfileQueryResult`, never a convenience zero: "no recognition here" and "we cannot say" are
+  different facts, and an authored gate that reads a zero fallback eventually admits a player on the
+  strength of a disabled feature. Registering a core incident authority now also logs an overlapping
+  claim once per kind, at debug, from registration rather than from inside the damage path. Details in
+  [API.md](API.md).
+
+### Changed
+
+- **Network protocol version bumped to 5.** A 0.5.x client cannot join a 0.6.0 server and vice versa.
+  The profile panes ride on the existing selected-community detail with per-field bounds and a byte
+  budget over the pair; over budget, both panes degrade to their state fields rather than travelling.
+  Every label crosses the wire already resolved, because a client holds the facets and ladder it
+  shipped with rather than the ones the world is running. Paging, throttling, and the selection
+  guarantees are untouched.
+
+- **Save format bumped to 3, migrating automatically on first load.** The structural half is
+  deterministic and moves no score: every retained public deed whose definition names a profile gets an
+  unenriched stub and starts its profile clock. Reconstructing what those stubs stood for is a separate,
+  resumable, budgeted pass, because the content it needs comes from the datapack reload. See
+  [MIGRATION.md](MIGRATION.md).
+
+- **`getOpinionBias` answers from the canonical resolved opinion.** Where a profile answer exists, the
+  rung is picked from the villager's facet-aware final opinion rather than their scalar one — one term,
+  replaced rather than added to, and still hard-clamped to ±8, which holds under the maximal facet term
+  exactly as under none. With profiles disabled, unpublished, or unresolvable the pre-0.6.0 answer is
+  returned unchanged, and the villager-opinion switch gates both.
+
+- **Acceptance is staged before anything is written.** The profile payload and the credit reservation
+  for a deed are computed while nothing is mutated, then applied inside the one canonical mutation that
+  accepts it; the receipt lands after that, and the publication after the receipt. A synchronous
+  listener can no longer see an accepted deed with no receipt behind it, and a producer that re-delivers
+  from inside the event gets a duplicate rather than a second deed.
+
+- **Every write path refuses a read-only store.** A store latched read-only by a future save format
+  used to accept a mutation, apply it in memory, and never persist it. Delivery, plain recording,
+  supersession, resolution, receipt filing, decay-immunity changes, the administrative set/add, and a
+  non-dry-run legacy import now all refuse, retryably, before anything is created. A dry-run import
+  still answers, because it writes nothing by definition.
+
+- **`ReputationContext`** is the read half of the transaction seam — the operation's own policy
+  snapshot, its evaluation time, and its store — promoted to an internal SPI so the profile and credit
+  calculators evaluate against the transaction rather than re-reading the config and the clock
+  mid-operation. Writing stays package-private and nothing from it enters the API jar.
+
+### Fixed
+
+- **Admission and eviction now use the configured receipt retention.** The whole-player cap sweep
+  passed the *default* receipt horizon rather than the one an operator actually configured, so on a
+  tuned server the preflight and the pruning it authorised disagreed about which records were still
+  protected. Both halves now read one snapshot, which also carries the new rule that a record holding
+  live profile evidence is never pruned to make room.
+
+- **A refused supersession is no longer visible to consumers.** Rolling one back restores the whole
+  lifecycle, rather than two scalar fields while the story revision and update clock had already moved
+  on.
+
+- **Refusals no longer grow the store.** A deed refused for capacity, or for being unwitnessed and not
+  retained, no longer creates the player and community records it declined to write to.
+
+### Known limitation
+
+An interval of **per-community** decay immunity that no query observed ages in one step the next time
+anything reads that community, in the profile channel exactly as it already does for the scalar score.
+The global switches (master, decay, `enableProfiles`) do not behave that way — those intervals are
+recorded as bounded policy epochs and subtracted, so a disabled month is never paid out as a catch-up
+burst. Per-community immunity is deliberately left out of that log: one protected village must not
+freeze every other village's profile aging.
+
 ## [0.5.0] — 2026-9-8
 
 There was no 0.4.1 release; the API-jar work below shipped as part of this one instead, alongside a

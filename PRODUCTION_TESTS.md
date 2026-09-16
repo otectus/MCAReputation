@@ -19,7 +19,7 @@ tested in a production-style instance — not that compilation and unit tests pa
 |---|---|---|
 | Phase 0 audit and reconciliation | ✅ | [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) |
 | MCA 7.6 / 7.7 signature parity | ✅ | `javap` over both deobf jars; every consumed signature byte-identical |
-| MCA: Reputation compiles and unit tests | ✅ | 240+ tests, 0 failures |
+| MCA: Reputation compiles and unit tests | ✅ | 814 tests, 0 failures, 1 intentional skip (as recorded in the 0.6.0 P7 commit) |
 | MCA: Quests compiles and regression suite | ✅ | all green, including the dimension-keyed title store and Journal-link packets |
 | MCA: Conversations compiles and regression suite | ✅ | all green, including the gossip merge, the standing topic, and chat-intent parity |
 | Reobfuscated jar contains no shaded companion classes | ✅ | `checkJarContents` gradle task, run as part of `build` |
@@ -239,6 +239,20 @@ given, and gate the release the same way the rest of this document does.
 | Raid victory timing | Verify hero-effect/raid-victory timing, raid state, player position, multiple defenders, and that a duplicate effect application does not double-credit | ⬜ |
 | Rescue attribution | Verify real rescue vs. incidental mob kill vs. repeated staged combat, projectile/pet attribution, and two players present; credit once, with the bounded cooldown holding | ⬜ |
 | MCA reflection binding, per supported MCA line | `McaReflect` resolves MCA by name at runtime; verify against production names/remapping for every MCA build the release actually claims to support, not just the one used in development | ⬜ |
+
+## 7. 0.6.0 profile track — runtime-only verification
+
+The profile layer's logic is covered by loader-independent unit tests. The gates below need a real
+client, a real server, or a real world, and the unit suite cannot settle them.
+
+| Item | Why it needs a real run | ⬜ |
+|---|---|:---:|
+| Protocol mismatch at `"5"` | A 0.5.0 client against a 0.6.0 server must be refused at the handshake, and the reverse too; only a real handshake proves it | ⬜ |
+| Profile expansion renders and toggles | The two header lines and the **Details** button must draw, expand, and collapse without crowding the deed list, at GUI scales 1–4 and with long village, player, and translated trait names | ⬜ |
+| Observer pane | Opening the screen from a villager must show that villager's own view, including the honest "has heard nothing" case, and never the village's view in its place | ⬜ |
+| `/reload` with `enableProfiles` toggled | Turning profiles off and reloading must freeze profile aging and report the transition; turning it back on must resume without a catch-up burst. Needs a live reload listener and real registries | ⬜ |
+| Format 2 → 3 upgrade in a real world | A format-2 world must upgrade in place, stub its profiled public deeds, and complete enrichment across the periodic passes, with coverage settling at `PARTIAL_LEGACY` and no score, title, or receipt moved | ⬜ |
+| The four debug commands | `debug profile`, `debug credit`, `debug profileincident`, and `debug profilemigration [run <budget>]` must parse, respect permission level 2, and — for the first three — move neither clock | ⬜ |
 
 ### Addon combination matrix
 

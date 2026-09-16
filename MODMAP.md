@@ -23,18 +23,21 @@ Machine-generated map of this mod. Read this first when picking the project up.
 ```
 dev.otectus.mcareputation                            3 files
 dev.otectus.mcareputation.api                        29 files
-dev.otectus.mcareputation.api.event                  6 files
-dev.otectus.mcareputation.client                     12 files
+dev.otectus.mcareputation.api.event                  7 files
+dev.otectus.mcareputation.api.profile                12 files
+dev.otectus.mcareputation.client                     14 files
 dev.otectus.mcareputation.command                    2 files
 dev.otectus.mcareputation.community                  3 files
 dev.otectus.mcareputation.compat                     3 files
+dev.otectus.mcareputation.credit                     3 files
 dev.otectus.mcareputation.data                       4 files
 dev.otectus.mcareputation.event                      10 files
 dev.otectus.mcareputation.incident                   15 files
-dev.otectus.mcareputation.network                    5 files
-dev.otectus.mcareputation.reputation                 15 files
-dev.otectus.mcareputation.state                      6 files
-dev.otectus.mcareputation.util                       2 files
+dev.otectus.mcareputation.network                    7 files
+dev.otectus.mcareputation.profile                    8 files
+dev.otectus.mcareputation.reputation                 20 files
+dev.otectus.mcareputation.state                      10 files
+dev.otectus.mcareputation.util                       3 files
 ```
 
 ## Registered content (2 entries)
@@ -43,13 +46,13 @@ dev.otectus.mcareputation.util                       2 files
 
 | id | field | type | declared in |
 |---|---|---|---|
-| `standing` | `STANDING_CONDITION` | `LootItemConditionType` | src\main\java\dev\otectus\mcareputation\McaReputationMod.java |
+| `standing` | `STANDING_CONDITION` | `LootItemConditionType` | src/main/java/dev/otectus/mcareputation/McaReputationMod.java |
 
 ### Command Argument Type (1)
 
 | id | field | type | declared in |
 |---|---|---|---|
-| `community` | `STANDING_CONDITION` | `LootItemConditionType` | src\main\java\dev\otectus\mcareputation\McaReputationMod.java |
+| `community` | `STANDING_CONDITION` | `LootItemConditionType` | src/main/java/dev/otectus/mcareputation/McaReputationMod.java |
 
 ## Data generation
 
@@ -76,20 +79,62 @@ Run `check_mod.py` for a full consistency check (missing models, lang keys, text
 <!-- MODMAP:AUTO:END — everything below is hand-maintained and preserved -->
 
 
-
 ## Current focus
 
-_What you are working on right now. One or two lines._
+0.6.0 public profiles: shipped through P7 (protocol 5, screen expansion, config and debug commands).
+P9 is documentation; independent runtime verification is still owed — see PRODUCTION_TESTS.md §7.
 
 ## Roadmap
 
-- [ ] …
+- [ ] Run the 0.6.0 runtime gates in PRODUCTION_TESTS.md §7 (protocol-5 handshake refusal, screen
+      expansion at GUI scales 1–4, observer pane, `/reload` freeze/unfreeze, format 2→3 upgrade,
+      the four debug commands)
+- [ ] Companion adoption of the profile surface (Quests, Conversations, Crime); nothing compiles
+      against them and nothing here waits on them
 
 ## Decisions
 
-_Choices that should not be re-litigated every session (why a system was built a
-certain way, APIs deliberately avoided, balance rules, naming rules)._
+- **Two ladders, not one.** Recognition (`profile/RecognitionTierSet`) is non-negative with no
+  conversion from standing, because two opposing deeds that cancel each other's deltas still both
+  make a player more widely known. `reputation/ReputationTierSet` is not reused: its thresholds are
+  signed and its rungs carry Trust/Respect biases, neither of which recognition has.
+- **`profile/` and `credit/` are leaves.** They import nothing from `reputation/` (which depends on
+  them); policy values arrive as parameters. That keeps them runnable in plain JUnit and keeps the
+  dependency acyclic. `profile/ProfileMath` is the fixed point: 10 000 subunits per authored point,
+  saturating intermediates, quantize and clamp last.
+- **Evidence is frozen at acceptance** (`profile/IncidentProfileEvidence`). A datapack edit changes
+  future deeds and never rewrites what a player already did, which is only true because the authored
+  quantities are copied onto the accepted deed rather than looked up again.
+- **Acceptance is staged, then applied inside one mutation.** The profile payload and the credit
+  reservation are computed while nothing is written (`reputation/PendingProfilePayload`,
+  `PendingCreditReservation`, `StagedOperation`), applied inside the canonical mutation, then the
+  receipt, then the publication — in that order. A re-entrant delivery from inside the event is a
+  duplicate, not a second deed.
+- **Profile aging is the gate's second clock.** `ReconciliationService` advances both channels from
+  one policy snapshot and one evaluation time; `INSPECT` moves neither. Global switches are handled
+  as bounded policy epochs (`state/ProfileFreezeLog`) rather than a lazy skip, so an unobserved
+  disabled interval is not paid out as catch-up. Per-community immunity deliberately keeps the
+  scalar channel's lazy-skip semantics — a known, recorded limitation.
+- **Numbers.** Protocol `"5"` (`network/ReputationNetwork`), save format `3`
+  (`state/ReputationSavedData`), API version `1` unchanged — every profile operation is additive,
+  because Quests and Conversations hard-refuse any other API version. Values themselves live in
+  `gradle.properties`.
+- **Labels cross the wire resolved.** A dedicated-server client holds the facets and ladder it
+  shipped with, not the ones the world is running, so `network/ProfileProjection` resolves them
+  server-side; the pair is measured against a byte budget and degrades to its state fields rather
+  than travelling over it.
+- **Read-only means refuse.** A store latched by a future save format refuses every write path
+  retryably instead of applying a mutation in memory that will never be saved.
 
 ## Known issues
 
-_Bugs you know about but have not fixed, with the symptom and any lead._
+- An interval of **per-community** decay immunity that no query observed ages in one step at the next
+  read, in the profile channel as in the scalar one. Documented in CHANGELOG.md and in
+  `ReconciliationService`'s class javadoc; closing it needs per-community freeze accounting.
+- `ProfileMigrationState`'s enriched/unenrichable counters are best-effort: `setDirty` is not a
+  durable commit, so a repeated pass can count a record twice. No answer depends on them — coverage
+  reads them only as "was there ever legacy history", which over-counting can only keep
+  `PARTIAL_LEGACY`.
+- Villager **profession** is resolved and reported but weights nothing: the shipped facet schema
+  authors no profession override, and adding one is a datapack schema change.
+- `IMPLEMENTATION_NOTES.md` is pre-implementation and stale in the ways its own drift note lists.
