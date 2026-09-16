@@ -25,6 +25,12 @@ import net.minecraftforge.server.ServerLifecycleHooks;
  * tell "this just changed" from "this was always so", and the whole point of the work below is that it
  * runs on the <em>transition</em>: a feature that has just been switched off has adornments left on
  * screen that nothing else will ever take down.
+ *
+ * <p>Since 0.6.0 the same argument carries {@code enableProfiles}. {@link #latch()} rereads the whole
+ * policy — which now includes §20's profile switches — and the reload, not the next query, is what
+ * records that a disabled interval was disabled. That ordering matters: {@code latch()} runs first so
+ * the transition is reported against the policy that is now in force, and a record nobody reads during
+ * the disabled interval still loses only the ticks the freeze log says were active (§12.2).
  */
 public final class ReputationConfigLifecycle {
 

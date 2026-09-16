@@ -259,8 +259,8 @@ best-known community — the correct answer.
 - **Fail-closed defaults.** Nothing was loosened. `SnapshotSelection.unprompted` still answers "you
   are a stranger here" when that is genuinely true; it just no longer answers it when it is not.
 - **No protocol change required by this diagnosis.** `PROTOCOL_VERSION` was `"2"` at the time of this
-  report; it has since moved to `"4"` for unrelated reasons (`network/ReputationNetwork.java:57`). The
-  diagnosis itself did not require a protocol bump.
+  report; it has since moved to `"5"` for unrelated reasons (`network/ReputationNetwork.java`, the
+  `PROTOCOL_VERSION` constant). The diagnosis itself did not require a protocol bump.
 
   **2026-09-08 addendum.** `buildSnapshot` and `RequestSnapshotC2S.resolveSelection` gained community
   pagination: `RequestSnapshotC2S` carries a `page` index, `SnapshotS2C` carries `page`, `pageCount`,
@@ -271,6 +271,14 @@ best-known community — the correct answer.
   is built and sent for whichever page was requested, even when that community is not on it, so paging
   can never become a fourth way to lose the read-key/write-key selection (`network/SnapshotPaging.java`,
   `network/SnapshotSelection.java`).
+
+  **2026-09-16 addendum.** Protocol 5 adds a bounded profile subpayload to the *same* `SelectedDetail`,
+  built for whichever community `resolveSelection` chose and for no other, so it cannot introduce a
+  fifth way to lose the selection either. Two things were added specifically to keep the read key and
+  the displayed answer together: the reply echoes the client's request stamp, so a late reply about the
+  previous selection is dropped rather than applied (`client/SnapshotIdentity.java`), and the screen
+  suppresses both the profile and the observer pane while a different selection is outstanding — the
+  same rule 0.5.0 already applied to the villager's opinion.
 
 ---
 

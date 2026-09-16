@@ -111,6 +111,30 @@ public final class ReputationScreen extends Screen {
 
     private final List<HeaderLine> headerLines = new ArrayList<>();
     private final List<DeedLine> deedLines = new ArrayList<>();
+
+    /**
+     * The profile block, laid out at the top of the scrollable well rather than in the header.
+     *
+     * <p>§18.1 asks for one compact expansion and for secondary explanations to move into scrollable
+     * content "before they crowd out the existing screen". The header therefore keeps only the two
+     * lines a player reads at a glance — how well known they are, and what for — and everything
+     * else lives here, where it competes with the deed list for scroll rather than with the deed list
+     * for the panel. At a punishing GUI scale the well shrinks and this scrolls; the header lines do
+     * not, which is why only two of them are allowed up there.
+     */
+    private final List<FormattedCharSequence> profileNotes = new ArrayList<>();
+    private final List<DeedLine> profileRows = new ArrayList<>();
+
+    /**
+     * The "nothing here yet" ledger message, laid out rather than measured at draw time.
+     *
+     * <p>It used to be wrapped inside {@code renderDeeds} and given the whole well, on the reasoning
+     * that an empty list reserves no scroller. With a profile block above it the well can now scroll
+     * while the ledger is empty, so the message is laid out with everything else and at the same width
+     * — which is also the only way the drawn height and the scrolled height stay the same number.
+     */
+    private final List<FormattedCharSequence> emptyLedgerLines = new ArrayList<>();
+
     @Nullable
     private FormattedCharSequence truncationNote;
 
@@ -140,8 +164,13 @@ public final class ReputationScreen extends Screen {
      * <p>The villager's opinion belongs to the community it was sent with. While a different one is
      * being asked for, the cached opinion describes the previous selection, so it is not drawn —
      * "selecting another community clears the contextual opinion" (§5 F16 row 4).
+     *
+     * <p>0.6.0's profile panes are selection-scoped for exactly the same reason and are suppressed by
+     * the same flag. §18.2 puts it plainly: a profile query error must not show the previous
+     * villager's or village's answer. {@link SnapshotIdentity} is the other half of this — it rejects
+     * a late reply outright, while this covers the interval before any reply has landed.
      */
-    private boolean opinionStale;
+    private boolean selectionStale;
     private boolean requestedOnce;
     private boolean draggingScroll;
     private double dragOffset;
@@ -186,12 +215,24 @@ public final class ReputationScreen extends Screen {
         // Content is measured here — not lazily during render — so a wheel event that arrives before
         // the first paint clamps against the real height, and stale scroll is clamped on refresh.
         deedLines.clear();
+        profileNotes.clear();
+        profileRows.clear();
+        emptyLedgerLines.clear();
         truncationNote = null;
+        layoutProfile();
         detail.ifPresent(this::layoutDeeds);
         contentHeight = 0;
+        contentHeight += profileNotes.size() * LINE;
+        for (DeedLine row : profileRows) {
+            contentHeight += row.height() + 3;
+        }
+        if (!profileNotes.isEmpty() || !profileRows.isEmpty()) {
+            contentHeight += 3; // the gap between the profile block and the ledger
+        }
         for (DeedLine deed : deedLines) {
             contentHeight += deed.height() + 3;
         }
+        contentHeight += emptyLedgerLines.size() * LINE;
         if (truncationNote != null) {
             contentHeight += LINE + 3;
         }
@@ -229,6 +270,22 @@ public final class ReputationScreen extends Screen {
         int closeWidth = Math.min(80, panelWidth / 3);
         int closeLeft = panelLeft + panelWidth - PADDING - closeWidth;
         footerTextRight = closeLeft - 4;
+
+        // The one expansion §18.1 allows, as a real button rather than a clickable line: a button is
+        // reachable by keyboard and read by a narrator, and both are §28.2 requirements. It is drawn
+        // only when there is something behind it and room for it; at a punishing GUI scale the arrows
+        // and Done win, and no control at all beats one drawn over another.
+        if (!selectionStale && ProfilePresentation.hasDetails(ClientReputationData.profile())) {
+            Component label = ProfilePresentation.detailsToggle(ClientReputationData.profileExpanded());
+            int toggleWidth = Math.min(90, font.width(label) + 8);
+            if (footerTextRight - cursorX >= toggleWidth + FOOTER_GAP) {
+                addRenderableWidget(Button.builder(label, button -> toggleDetails())
+                        .bounds(cursorX, arrowY, toggleWidth, BUTTON_HEIGHT)
+                        .build());
+                cursorX += toggleWidth + FOOTER_GAP;
+                footerTextLeft = cursorX;
+            }
+        }
         addRenderableWidget(Button.builder(CommonComponentsCompat.done(), button -> onClose())
                 .bounds(closeLeft, panelTop + panelHeight - 22, closeWidth, BUTTON_HEIGHT)
                 .build());
@@ -289,7 +346,7 @@ public final class ReputationScreen extends Screen {
         selectedCommunityIndex =
                 SelectorMath.nextIndex(communities.size(), selectedCommunityIndex, direction);
         scroll = 0;
-        opinionStale = true;
+        selectionStale = true;
         ClientReputationData.requestSelected(communities.get(selectedCommunityIndex).key());
     }
 
@@ -306,13 +363,26 @@ public final class ReputationScreen extends Screen {
         if (next == ClientReputationData.page()) {
             return;
         }
-        opinionStale = true;
+        selectionStale = true;
         ClientReputationData.requestPage(next);
+    }
+
+    /**
+     * Opens or closes the profile details expansion.
+     *
+     * <p>No request goes out: the details arrived with the snapshot already, bounded to eight entries
+     * (§18.3). Expanding is a layout change, and §18.3's "do not poll every player or villager
+     * continuously" rules out asking the server for something it has already sent.
+     */
+    private void toggleDetails() {
+        ClientReputationData.toggleProfileExpanded();
+        scroll = 0;
+        rebuildWidgets();
     }
 
     /** Called when a fresh snapshot lands, so the layout follows the new content. */
     void onDataRefreshed() {
-        opinionStale = false;
+        selectionStale = false;
         syncSelectedIndex();
         rebuildWidgets();
     }
@@ -351,13 +421,34 @@ public final class ReputationScreen extends Screen {
 
         // What the one villager the player is looking at makes of them, when the server sent it --
         // and which village that view is about, so it cannot be read as a general opinion.
-        boolean showOpinion = McaReputationConfig.showVillagerOpinion() && !opinionStale;
+        boolean showOpinion = McaReputationConfig.showVillagerOpinion() && !selectionStale;
         opinionLine(detail.opinion(), showOpinion).ifPresent(line -> {
             headerLines.add(new HeaderLine(line.getVisualOrderText(), GuiPalette.TEXT_MUTED, LINE));
             relationshipLine(detail.opinion(), showOpinion, communityName).ifPresent(relationship ->
                     headerLines.add(new HeaderLine(relationship.getVisualOrderText(),
                             GuiPalette.TEXT_MUTED, LINE)));
         });
+
+        // The two lines §18.1 puts in the concise default: how well known the player is here, and
+        // what for. Both are suppressed while another selection is being fetched, because they
+        // describe the village the last reply was about (§18.2).
+        if (!selectionStale) {
+            Optional<ReputationNetwork.ProfileSummary> profile = detail.profile();
+            if (ProfilePresentation.drawable(profile)) {
+                ProfilePresentation.recognitionLine(profile.get(),
+                                McaReputationConfig.showRecognition(),
+                                McaReputationConfig.showExactProfileValues())
+                        .ifPresent(line -> headerLines.add(new HeaderLine(
+                                line.getVisualOrderText(), GuiPalette.TEXT, LINE)));
+                ProfilePresentation.knownForLine(profile.get(), McaReputationConfig.showKnownFor())
+                        .ifPresent(line -> {
+                            List<FormattedCharSequence> wrapped = font.split(line, textWidth);
+                            if (!wrapped.isEmpty()) {
+                                headerLines.add(new HeaderLine(wrapped.get(0), GuiPalette.TEXT, LINE));
+                            }
+                        });
+            }
+        }
 
         headerLines.add(new HeaderLine(null, 0, PROGRESS_GAP));
 
@@ -427,6 +518,51 @@ public final class ReputationScreen extends Screen {
         return builder;
     }
 
+    /**
+     * Wraps the profile block once: the honest state line, what the villager in front of the player
+     * knows them for, and — when the expansion is open — one row per facet.
+     *
+     * <p>Nothing here is drawn when the selection is being refetched or when the feature is switched
+     * off. Everything that is drawn came from the server in the same reply as the standing beside it,
+     * so the two cannot describe different moments.
+     */
+    private void layoutProfile() {
+        Optional<ReputationNetwork.SelectedDetail> selected = ClientReputationData.selected();
+        if (selected.isEmpty() || selectionStale) {
+            return;
+        }
+        Optional<ReputationNetwork.ProfileSummary> profile = selected.get().profile();
+        if (!ProfilePresentation.drawable(profile)) {
+            return;
+        }
+        int width = Math.max(1, wellRight - 3 - deedLeft);
+        ProfilePresentation.stateLine(profile.get())
+                .ifPresent(line -> note(line, width));
+
+        boolean showObserver = McaReputationConfig.showObserverProfile();
+        Optional<ReputationNetwork.VillagerProfileSummary> observer = selected.get().villagerProfile();
+        ProfilePresentation.observerLine(observer, showObserver).ifPresent(line -> note(line, width));
+        ProfilePresentation.observerKnowledgeLine(observer, showObserver)
+                .ifPresent(line -> note(line, width));
+        ProfilePresentation.observerAdjustmentLine(observer, showObserver,
+                        McaReputationConfig.showExactProfileValues())
+                .ifPresent(line -> note(line, width));
+
+        if (!ClientReputationData.profileExpanded()) {
+            return;
+        }
+        boolean showExact = McaReputationConfig.showExactProfileValues();
+        for (ReputationNetwork.FacetSummary facet : profile.get().details()) {
+            profileRows.add(new DeedLine(font.split(ProfilePresentation.facetLine(facet), deedWidth),
+                    ProfilePresentation.facetMeta(facet, showExact).getVisualOrderText()));
+        }
+    }
+
+    /** One wrapped note line in the profile block; every wrapped line counts toward the scroll. */
+    private void note(Component line, int width) {
+        profileNotes.addAll(font.split(line, width));
+    }
+
     /** Wraps the ledger once. {@link #renderDeeds} walks this list at the same row heights. */
     private void layoutDeeds(ReputationNetwork.SelectedDetail detail) {
         for (ReputationNetwork.IncidentSummary incident : detail.incidents()) {
@@ -438,6 +574,10 @@ public final class ReputationScreen extends Screen {
             // all that fits" — a silently truncated ledger reads as a shorter life than they led.
             truncationNote = Component.translatable("mcareputation.screen.deeds_truncated",
                     detail.incidents().size(), detail.totalIncidents()).getVisualOrderText();
+        }
+        if (deedLines.isEmpty() && truncationNote == null) {
+            emptyLedgerLines.addAll(font.split(
+                    Component.translatable("mcareputation.screen.no_deeds"), deedWidth));
         }
     }
 
@@ -483,7 +623,8 @@ public final class ReputationScreen extends Screen {
                 .orElse(changed);
     }
 
-    private static String signed(int value) {
+    /** Shared with {@link ProfilePresentation}: one rendering of a signed figure, not two. */
+    static String signed(int value) {
         return value > 0 ? "+" + value : Integer.toString(value);
     }
 
@@ -608,32 +749,28 @@ public final class ReputationScreen extends Screen {
         }
         GuiTextures.well(graphics, wellLeft, wellTop, wellRight - wellLeft, wellBottom - wellTop);
 
-        if (deedLines.isEmpty() && truncationNote == null) {
-            // Nothing to scroll, so no channel is reserved and the message gets the whole well.
-            List<FormattedCharSequence> empty =
-                    font.split(Component.translatable("mcareputation.screen.no_deeds"),
-                            wellRight - 3 - deedLeft);
-            int y = listTop + 2;
-            for (FormattedCharSequence line : empty) {
-                graphics.drawString(font, line, deedLeft, y, GuiPalette.TEXT_MUTED, false);
-                y += LINE;
-            }
-            return;
-        }
-
         // Scissor to the list box so a long ledger can never draw over the header or the buttons,
-        // however small the GUI scale is.
+        // however small the GUI scale is. Everything scrollable is drawn inside it, in the order it
+        // was laid out: the profile block, then the ledger — measured height and drawn height are the
+        // same walk over the same lists.
         graphics.enableScissor(wellLeft + 1, listTop, wellRight - 1, listBottom);
         int y = listTop - (int) scroll;
+        for (FormattedCharSequence note : profileNotes) {
+            graphics.drawString(font, note, deedLeft, y, GuiPalette.TEXT_MUTED, false);
+            y += LINE;
+        }
+        for (DeedLine row : profileRows) {
+            y = renderRow(graphics, row, y);
+        }
+        if (!profileNotes.isEmpty() || !profileRows.isEmpty()) {
+            y += 3;
+        }
         for (DeedLine deed : deedLines) {
-            int used = 0;
-            for (FormattedCharSequence line : deed.body()) {
-                graphics.drawString(font, line, deedLeft, y + used, GuiPalette.TEXT, false);
-                used += LINE;
-            }
-            graphics.drawString(font, deed.meta(), deedLeft + 4, y + used,
-                    GuiPalette.TEXT_MUTED, false);
-            y += deed.height() + 3;
+            y = renderRow(graphics, deed, y);
+        }
+        for (FormattedCharSequence line : emptyLedgerLines) {
+            graphics.drawString(font, line, deedLeft, y, GuiPalette.TEXT_MUTED, false);
+            y += LINE;
         }
         if (truncationNote != null) {
             graphics.drawString(font, truncationNote, deedLeft, y, GuiPalette.TEXT_MUTED, false);
@@ -641,6 +778,17 @@ public final class ReputationScreen extends Screen {
         graphics.disableScissor();
 
         renderScrollbar(graphics);
+    }
+
+    /** One body-plus-meta row, drawn at the height {@link DeedLine#height()} reserved for it. */
+    private int renderRow(GuiGraphics graphics, DeedLine row, int y) {
+        int used = 0;
+        for (FormattedCharSequence line : row.body()) {
+            graphics.drawString(font, line, deedLeft, y + used, GuiPalette.TEXT, false);
+            used += LINE;
+        }
+        graphics.drawString(font, row.meta(), deedLeft + 4, y + used, GuiPalette.TEXT_MUTED, false);
+        return y + row.height() + 3;
     }
 
     /**

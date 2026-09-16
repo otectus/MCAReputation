@@ -45,9 +45,10 @@ class ReputationPolicyTest {
         assertEquals(ReputationPolicy.UndeclaredAuthorityMode.ASSAULT_KILL_ONLY,
                 policy.undeclaredAuthorityMode());
 
-        // §20's profile table, as policy rather than as a live config read. P7 wires these to the
-        // spec; until then the snapshot carries the documented defaults, which is what the profile
-        // arithmetic and the cap paths are decided against.
+        // §20's profile table, read from the spec through the guarded accessors. With no spec loaded
+        // — which is every pure test, datagen, and a client that never joined a server — those
+        // accessors answer with the documented defaults, which is what the profile arithmetic and the
+        // cap paths are decided against.
         assertTrue(policy.profilesEnabled());
         assertTrue(policy.repeatCreditEnabled());
         assertTrue(policy.facetOpinionEnabled());
@@ -56,6 +57,47 @@ class ReputationPolicyTest {
         assertEquals(100, policy.facetPointCap());
         assertTrue(policy.protectProfileEvidence(),
                 "§12.3: live profile evidence is not prunable, and the cap paths read that from here");
+    }
+
+    /**
+     * The wiring P7 added: §20's four COMMON profile settings, read through the guarded accessors.
+     *
+     * <p>Until this existed the policy carried the documented defaults and an operator switching
+     * profiles off changed nothing at all — the switch was in {@code CONFIG.md} and in the spec, and
+     * nowhere in the code path that decides anything.
+     */
+    @Test
+    void theProfileSwitchesFollowTheConfig() {
+        McaReputationConfig.TestOverrides.profiles = false;
+        McaReputationConfig.TestOverrides.repeatCredit = false;
+        McaReputationConfig.TestOverrides.facetOpinion = false;
+        McaReputationConfig.TestOverrides.maxFacetOpinionAdjustment = 7;
+
+        ReputationPolicy policy = McaReputationConfig.snapshot();
+        assertFalse(policy.profilesEnabled());
+        assertFalse(policy.repeatCreditEnabled());
+        assertFalse(policy.facetOpinionEnabled());
+        assertEquals(7, policy.maxFacetOpinionAdjustment());
+        assertNotEquals(ReputationPolicy.defaults(), policy);
+
+        // The two quantities §20 does not offer as settings stay where the stored subunits are
+        // interpreted: an operator lowering either would reinterpret evidence a player already earned.
+        assertEquals(ReputationPolicy.DEFAULT_RECOGNITION_CAP, policy.recognitionCap());
+        assertEquals(ReputationPolicy.DEFAULT_FACET_POINT_CAP, policy.facetPointCap());
+        assertTrue(policy.protectProfileEvidence());
+    }
+
+    /** §20's 0..100 range holds even against a hand-edited TOML: config tightens, never loosens. */
+    @Test
+    void theFacetAdjustmentCapIsClampedToItsDocumentedRange() {
+        McaReputationConfig.TestOverrides.maxFacetOpinionAdjustment = 5000;
+        assertEquals(ReputationPolicy.MAX_FACET_OPINION_ADJUSTMENT_LIMIT,
+                McaReputationConfig.snapshot().maxFacetOpinionAdjustment());
+
+        McaReputationConfig.TestOverrides.maxFacetOpinionAdjustment = -40;
+        assertEquals(0, McaReputationConfig.snapshot().maxFacetOpinionAdjustment(),
+                "zero is a legal answer: it switches the facet term off without switching the "
+                        + "interpretation's reporting off with it");
     }
 
     @Test

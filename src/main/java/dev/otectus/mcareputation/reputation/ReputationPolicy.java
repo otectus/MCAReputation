@@ -29,8 +29,8 @@ public record ReputationPolicy(
         boolean conversationsIntegrationEnabled,
         // The two profile switches of §20, as policy rather than as a live config read: one snapshot
         // per operation is what stops a mid-transaction reload from creating evidence under one rule
-        // and accounting for it under another (I09). P7 wires them to McaReputationConfig; until then
-        // they carry the documented defaults, which is why fromConfig() names the constants below.
+        // and accounting for it under another (I09). Both now follow the COMMON config through the
+        // guarded accessors, so a reload moves them exactly where it moves every other field here.
         boolean profilesEnabled,
         boolean repeatCreditEnabled,
         // The rest of §20's profile table that is policy rather than presentation. The four show*
@@ -70,8 +70,11 @@ public record ReputationPolicy(
     /** §20: the bounded facet interpretation is on, and it is an opinion adjustment, not a write. */
     public static final boolean DEFAULT_FACET_OPINION_ENABLED = true;
 
-    /** §20's documented default and hard range 0..100 for the combined facet adjustment. */
+    /** §20's documented default for the combined facet adjustment. */
     public static final int DEFAULT_MAX_FACET_OPINION_ADJUSTMENT = 25;
+
+    /** §20's hard upper end of that setting's 0..100 range; the config spec cannot exceed it. */
+    public static final int MAX_FACET_OPINION_ADJUSTMENT_LIMIT = 100;
 
     /** §7.1: public recognition is 0..1000, with no conversion from standing. */
     public static final int DEFAULT_RECOGNITION_CAP = ProfileMath.MAX_RECOGNITION;
@@ -113,10 +116,12 @@ public record ReputationPolicy(
                 McaReputationConfig.receiptRetentionTicks(),
                 McaReputationConfig.coreAuthorityUndeclaredKinds(),
                 McaReputationConfig.conversationsIntegrationEnabled(),
-                DEFAULT_PROFILES_ENABLED,
-                DEFAULT_REPEAT_CREDIT_ENABLED,
-                DEFAULT_FACET_OPINION_ENABLED,
-                DEFAULT_MAX_FACET_OPINION_ADJUSTMENT,
+                McaReputationConfig.profilesEnabled(),
+                McaReputationConfig.repeatCreditEnabled(),
+                McaReputationConfig.facetOpinionEnabled(),
+                McaReputationConfig.maxFacetOpinionAdjustment(),
+                // Not config settings: §20 offers neither, and both are the units the stored subunits
+                // are interpreted in, so an operator lowering one would reinterpret earned evidence.
                 DEFAULT_RECOGNITION_CAP,
                 DEFAULT_FACET_POINT_CAP,
                 DEFAULT_PROTECT_PROFILE_EVIDENCE);

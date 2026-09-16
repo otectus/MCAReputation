@@ -98,6 +98,48 @@ class ProfileCapabilityTest {
         assertEquals(1, McaReputationApi.capabilities(null).apiVersion());
     }
 
+    /**
+     * The config switch reaching the advertised feature set, which is the end of P7's wiring: a
+     * companion negotiating through {@code capabilities()} must see the operator's decision, not the
+     * shipped default.
+     */
+    @Test
+    void switchingProfilesOffInTheConfigWithdrawsTheAdvertisedFeatures() {
+        TestFixtures.publishProfile(TestFixtures.profile(null), null,
+                Map.of(TestFixtures.FACET, TestFixtures.facet()));
+        assertTrue(features().contains(ReputationCapabilities.FEATURE_PROFILE_SNAPSHOT));
+
+        McaReputationConfig.TestOverrides.profiles = false;
+        Set<String> disabled = features();
+        for (String feature : ProfileService.FEATURES) {
+            assertFalse(disabled.contains(feature),
+                    feature + " cannot answer while profiles are switched off in the config");
+        }
+        assertEquals(13, disabled.size(), "and the 0.5.0 surface is untouched by that switch");
+
+        // The static half still reports support, and now reports the operator's switches too.
+        ProfileCapabilities report = McaReputationApi.profileCapabilities(null);
+        assertTrue(report.supported());
+        assertFalse(report.enabled());
+        assertTrue(report.readinessReason().isPresent());
+    }
+
+    /** The two other COMMON switches are reported from the config rather than from the defaults. */
+    @Test
+    void theRepeatCreditAndFacetOpinionSwitchesAreReportedFromTheConfig() {
+        TestFixtures.publishProfile(TestFixtures.profile(null), null,
+                Map.of(TestFixtures.FACET, TestFixtures.facet()));
+        McaReputationConfig.TestOverrides.repeatCredit = false;
+        McaReputationConfig.TestOverrides.facetOpinion = false;
+        McaReputationConfig.TestOverrides.maxFacetOpinionAdjustment = 11;
+
+        ProfileCapabilities report = McaReputationApi.profileCapabilities(null);
+        assertFalse(report.repeatCreditEnabled());
+        assertFalse(report.facetOpinionEnabled());
+        assertEquals(11, report.maxFacetOpinionAdjustment());
+        assertTrue(report.enabled(), "and none of those three is the profile master switch");
+    }
+
     @Test
     void switchedOffProfilesAreNotLiveEvenWithContentPublished() {
         TestFixtures.publishProfile(TestFixtures.profile(null), null);

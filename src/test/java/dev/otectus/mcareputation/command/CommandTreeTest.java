@@ -248,6 +248,71 @@ class CommandTreeTest {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Profile diagnostics (§21.1): four more children of the same debug group
+    // ------------------------------------------------------------------
+
+    @Test
+    void theProfileDiagnosticsParseUnderDebug() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertEquals(List.of("mcareputation", "debug", "profile", "player", "community"),
+                path(assertParses(dispatcher,
+                        "mcareputation debug profile Steve minecraft:overworld/3", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "credit", "player", "community"),
+                path(assertParses(dispatcher, "mcareputation debug credit Steve here", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "profileincident", "player", "community",
+                        "incident"),
+                path(assertParses(dispatcher, "mcareputation debug profileincident Steve here "
+                        + "00000000-0000-0000-0000-00000000000a", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "profilemigration"),
+                path(assertParses(dispatcher, "mcareputation debug profilemigration", source(2))));
+        assertEquals(List.of("mcareputation", "debug", "profilemigration", "run", "budget"),
+                path(assertParses(dispatcher, "mcareputation debug profilemigration run 8",
+                        source(2))));
+    }
+
+    /**
+     * The community is not optional for a profile read, for the same reason it is not for supersede:
+     * "which village knows you" has no sensible default, and defaulting it would answer about a
+     * village the operator never named.
+     */
+    @Test
+    void aProfileReadWithoutACommunityIsNotExecutable() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        for (String input : List.of("mcareputation debug profile Steve",
+                "mcareputation debug credit Steve",
+                "mcareputation debug profileincident Steve here")) {
+            ParseResults<CommandSourceStack> parse = dispatcher.parse(input, source(2));
+            assertNull(parse.getContext().getNodes().get(parse.getContext().getNodes().size() - 1)
+                    .getNode().getCommand(), input + " must not be executable");
+        }
+    }
+
+    /** The enrichment budget is bounded at parse time, not merely clamped in the handler. */
+    @Test
+    void theMigrationBudgetIsBoundedAtParseTime() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        assertFalse(dispatcher.parse("mcareputation debug profilemigration run 0", source(2))
+                .getExceptions().isEmpty(), "a budget of zero is not a pass");
+        assertFalse(dispatcher.parse("mcareputation debug profilemigration run 100000", source(2))
+                .getExceptions().isEmpty(), "and a migration is never an unbounded sweep");
+    }
+
+    /** They sit behind the one permission gate on the debug group, like every other diagnostic. */
+    @Test
+    void aPlayerCannotReachTheProfileDiagnostics() {
+        CommandDispatcher<CommandSourceStack> dispatcher = dispatcher();
+        for (String input : List.of("mcareputation debug profile Steve minecraft:overworld/3",
+                "mcareputation debug credit Steve here",
+                "mcareputation debug profilemigration",
+                "mcareputation debug profilemigration run 4")) {
+            assertNull(dispatcher.parse(input, source(1)).getContext().getNodes().stream()
+                    .map(node -> node.getNode().getName())
+                    .filter("debug"::equals).findFirst().orElse(null),
+                    input + " must not be reachable below permission 2");
+        }
+    }
+
     @Test
     void titleGrantWithACommunityParses() {
         assertParses(dispatcher(),

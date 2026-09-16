@@ -30,6 +30,9 @@ public final class ClientReputationData {
 
     private static final RequestThrottle THROTTLE = new RequestThrottle();
 
+    /** Which reply still answers a question on screen; see {@link SnapshotIdentity}. */
+    private static final SnapshotIdentity IDENTITY = new SnapshotIdentity();
+
     private static List<ReputationNetwork.CommunitySummary> communities = List.of();
     private static Optional<ReputationNetwork.SelectedDetail> selected = Optional.empty();
     private static List<Component> globalTitles = List.of();
@@ -38,6 +41,13 @@ public final class ClientReputationData {
     private static int page;
     private static int pageCount = 1;
     private static int totalCommunities;
+
+    /**
+     * Whether the profile details expansion is open. Collapsed on every screen open by design (§18.1
+     * asks for one compact expansion, not a dossier), and remembered across refreshes within a
+     * session so a page turn does not close a pane the player just opened.
+     */
+    private static boolean profileExpanded;
 
     /** Change packets buffered within one client tick, so several communities can merge (§28.3). */
     private static final java.util.List<ReputationNetwork.ChangeS2C> PENDING_CHANGES =
@@ -51,6 +61,13 @@ public final class ClientReputationData {
     // ------------------------------------------------------------------
 
     public static void acceptSnapshot(ReputationNetwork.SnapshotS2C packet) {
+        if (!IDENTITY.accepts(packet.requestId())) {
+            // A reply to a question that is no longer on screen: the player has selected another
+            // village, turned a page, or looked at another villager since. Applying it would replace a
+            // whole profile pane with a different selection's answer (§18.3), and the throttle's
+            // "awaiting" state is deliberately left alone so the newer request still resolves.
+            return;
+        }
         communities = packet.communities();
         selected = packet.selected();
         globalTitles = packet.globalTitles();
@@ -160,8 +177,11 @@ public final class ClientReputationData {
     }
 
     private static void send(RequestThrottle.Request request) {
+        // Stamped at the moment it actually goes out, not when it was wished for: a parked request
+        // that was replaced never travelled, and a stamp spent on it would reject the reply to the
+        // one that did.
         ReputationNetwork.CHANNEL.sendToServer(new ReputationNetwork.RequestSnapshotC2S(
-                request.contextEntityId(), request.community(), request.page()));
+                request.contextEntityId(), request.community(), request.page(), IDENTITY.stamp()));
     }
 
     private static long now() {
@@ -200,6 +220,26 @@ public final class ClientReputationData {
         return totalCommunities;
     }
 
+    /** The selected community's public profile, when the server sent one (§18.3). */
+    public static Optional<ReputationNetwork.ProfileSummary> profile() {
+        return selected.flatMap(ReputationNetwork.SelectedDetail::profile);
+    }
+
+    /** What the villager the screen was opened from knows the player for, when there is one. */
+    public static Optional<ReputationNetwork.VillagerProfileSummary> villagerProfile() {
+        return selected.flatMap(ReputationNetwork.SelectedDetail::villagerProfile);
+    }
+
+    /** Whether the profile details expansion is currently open. */
+    public static boolean profileExpanded() {
+        return profileExpanded;
+    }
+
+    /** Opens or closes the expansion. Held here rather than on the screen so a rebuild keeps it. */
+    public static void toggleProfileExpanded() {
+        profileExpanded = !profileExpanded;
+    }
+
     /**
      * True while a request is outstanding: the screen shows "loading", never a guessed number. Times
      * out after {@link RequestThrottle#TIMEOUT_TICKS} so a lost packet degrades to the retryable
@@ -217,7 +257,9 @@ public final class ClientReputationData {
         page = 0;
         pageCount = 1;
         totalCommunities = 0;
+        profileExpanded = false;
         PENDING_CHANGES.clear();
         THROTTLE.reset();
+        IDENTITY.reset();
     }
 }
