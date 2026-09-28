@@ -2,6 +2,7 @@ package dev.otectus.mcareputation;
 
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationPolicy;
+import dev.otectus.mcareputation.state.StandingOutbox;
 import net.minecraftforge.common.ForgeConfigSpec;
 import org.apache.commons.lang3.tuple.Pair;
 
@@ -110,6 +111,7 @@ public final class McaReputationConfig {
         public final ForgeConfigSpec.BooleanValue enableConversationsIntegration;
         public final ForgeConfigSpec.BooleanValue enableCrimeIntegration;
         public final ForgeConfigSpec.BooleanValue enableUltimaKingdomsIntegration;
+        public final ForgeConfigSpec.IntValue standingJournalMaxEntries;
         public final ForgeConfigSpec.BooleanValue mirrorQuestsFallbackState;
         public final ForgeConfigSpec.BooleanValue migrateLegacyQuestsData;
         public final ForgeConfigSpec.BooleanValue debugLogging;
@@ -324,6 +326,14 @@ public final class McaReputationConfig {
                             "its deliverStandingEffect writes are refused as DISABLED; its reads and its",
                             "standing-journal consumer still work.")
                     .define("enableUltimaKingdomsIntegration", true);
+            standingJournalMaxEntries = builder
+                    .comment("The most standing-journal entries kept for companion consumers (Ultima",
+                            "Kingdoms' faction layer is the first). Entries every consumer has acknowledged",
+                            "are trimmed at each save regardless; this bounds the rest when a consumer stalls",
+                            "or its mod is removed. A consumer further behind than this lapses: its next poll",
+                            "reports GAP and it resumes from the oldest entry kept. /mcareputation standing",
+                            "consumers lists them; ... forget <id> drops one for good.")
+                    .defineInRange("standingJournalMaxEntries", StandingOutbox.DEFAULT_MAX_RETAINED, 256, 1_048_576);
             coreAuthorityUndeclaredKinds = builder
                     .comment("How much to trust a companion that claims core incidents without saying which",
                             "kinds it detects. TRUST_LEGACY honours every kind it claims; ASSAULT_KILL_ONLY",
@@ -692,6 +702,11 @@ public final class McaReputationConfig {
             return TestOverrides.ultimaKingdomsIntegration;
         }
         return read(COMMON.enableUltimaKingdomsIntegration::get, true);
+    }
+
+    /** The standing journal's retention bound, in entries; see {@code StandingOutbox}. */
+    public static int standingJournalMaxEntries() {
+        return read(COMMON.standingJournalMaxEntries::get, StandingOutbox.DEFAULT_MAX_RETAINED);
     }
 
     /**

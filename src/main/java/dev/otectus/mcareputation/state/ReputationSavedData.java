@@ -285,7 +285,7 @@ public final class ReputationSavedData extends SavedData {
 
     @Override
     public CompoundTag save(CompoundTag tag) {
-        return save(tag, standingOutbox.snapshotForSave());
+        return save(tag, standingOutbox.snapshotForSave(McaReputationConfig.standingJournalMaxEntries()));
     }
 
     private CompoundTag save(CompoundTag tag, StandingOutbox.Snapshot outboxSnapshot) {
@@ -326,7 +326,7 @@ public final class ReputationSavedData extends SavedData {
     @Override
     public void save(File file) {
         if (!isDirty()) return;
-        StandingOutbox.Snapshot snapshot=standingOutbox.snapshotForSave();
+        StandingOutbox.Snapshot snapshot=standingOutbox.snapshotForSave(McaReputationConfig.standingJournalMaxEntries());
         try {
             DurableDataWriter.write(file,save(new CompoundTag(),snapshot));
             standingOutbox.markDurable(snapshot);

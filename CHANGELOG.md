@@ -25,8 +25,14 @@ unchanged; every addition is additive.
   records `StandingConsumer`, `StandingEnvelope`, `StandingDelivery`, `StandingDeliveryBatch`,
   `StandingRegistration`, `StandingAckResult` and `CaptureResult`. A consumer starts at the current
   journal tail, captures each envelope as `READY`, `IGNORED`, `UNMAPPED` or `FAILED`, and polls at most
-  1,024 entries at a time. Entries every consumer has acknowledged are trimmed at save.
-  `flushStandingChanges` saves only when the journal or a cursor has changed.
+  1,024 entries at a time. Entries every consumer has acknowledged are trimmed at save, and a save
+  keeps no more than `[integration] standingJournalMaxEntries` (default 4,096) entries in any case: a
+  consumer further behind than that lapses, its next poll reports `GAP`, and it resumes from the oldest
+  entry kept (API.md, "Standing journal"). Without the bound, a consumer that stalled, or whose mod was
+  removed after registering once, would have held every later change in the save for the life of the
+  world. `flushStandingChanges` saves only when the journal or a cursor has changed.
+- **`/mcareputation standing consumers [forget <id>]`** shows the journal's size and every consumer
+  cursor (permission 2), and drops the cursor of a consumer whose mod is gone for good (permission 3).
 - **`standingBaselines(server)`**, a read-only snapshot of every canonical local standing for explicit
   migration tools. It creates no records, reconciles no decay and fires no events.
 - **`deliverStandingEffect(...)`**, one companion-owned effect on one community with a durable receipt.

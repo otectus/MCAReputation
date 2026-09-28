@@ -23,8 +23,21 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Persistent ordered source journal with durable consumer cursors. */
+/**
+ * Persistent ordered source journal with durable consumer cursors.
+ *
+ * <p>Each save trims what every consumer has acknowledged, and since 0.6.1 it also keeps no more than a
+ * retention bound ({@code [integration] standingJournalMaxEntries}) of the newest entries. Without the
+ * bound a consumer that stalled, or whose mod was removed after it registered once, froze the trim point
+ * for the life of the world, and every standing change ever made stayed in the save. A consumer that
+ * falls further behind than the bound <b>lapses</b>: its cursor moves to the new start of the journal,
+ * its next poll from the old position reports {@link StandingDeliveryBatch.Status#GAP}, and its
+ * registration says where to resume. The entries between are gone, which is what GAP means.
+ */
 public final class StandingOutbox {
+    /** The retention bound used when the configured one cannot be read. */
+    public static final int DEFAULT_MAX_RETAINED = 4_096;
+
     private UUID epoch = UUID.randomUUID();
     private long nextSequence = 1L;
     private long trimmedThrough;
@@ -44,8 +57,20 @@ public final class StandingOutbox {
         return true;
     }
 
+    /** Detaches the consumer for this session; its durable cursor is kept, so it resumes on re-registration. */
     public void unregister(ResourceLocation id) {
         callbacks.remove(id);
+    }
+
+    /**
+     * Drops a consumer outright, cursor and all: the operator's remedy for a consumer whose mod is gone
+     * for good. Once saved, its entries no longer hold the trim point and its polls report
+     * {@code UNREGISTERED}. Returns false when no such consumer exists.
+     */
+    public boolean forget(ResourceLocation id) {
+        callbacks.remove(id);
+        observedThrough.remove(id);
+        return consumers.remove(id) != null;
     }
 
     public Optional<StandingRegistration> registration(ResourceLocation id) {
@@ -124,11 +149,20 @@ public final class StandingOutbox {
         return currentTail() != durableTail || !consumers.equals(durableConsumers);
     }
 
-    public Snapshot snapshotForSave() {
-        long minimumAck = consumers.values().stream().mapToLong(value -> value.ackThrough).min().orElse(currentTail());
-        long trim = Math.max(trimmedThrough, minimumAck);
+    /**
+     * What a save writes: entries every consumer has acknowledged are trimmed, and so is everything older
+     * than the newest {@code maxRetained}. A consumer whose acknowledged position falls below the trim
+     * point is written as lapsed ({@link ConsumerState#lapsedAt}), starting after the new trim point.
+     */
+    public Snapshot snapshotForSave(int maxRetained) {
+        long tail = currentTail();
+        long minimumAck = consumers.values().stream().mapToLong(value -> value.ackThrough).min().orElse(tail);
+        long retentionFloor = Math.max(0L, tail - Math.max(1, maxRetained));
+        long trim = Math.max(trimmedThrough, Math.max(minimumAck, retentionFloor));
+        Map<ResourceLocation, ConsumerState> cursors = new LinkedHashMap<>();
+        consumers.forEach((id, state) -> cursors.put(id, state.ackThrough < trim ? ConsumerState.lapsedAt(trim) : state));
         List<Entry> retained = entries.stream().filter(entry -> entry.envelope.sequence() > trim).toList();
-        return new Snapshot(epoch, nextSequence, trim, retained, Map.copyOf(consumers));
+        return new Snapshot(epoch, nextSequence, trim, retained, Map.copyOf(cursors));
     }
 
     public void markDurable(Snapshot snapshot) {
@@ -136,7 +170,37 @@ public final class StandingOutbox {
         entries.removeIf(entry -> entry.envelope.sequence() <= trimmedThrough);
         durableTail = nextSequence - 1;durableTrimmedThrough=trimmedThrough;
         durableConsumers=Map.copyOf(snapshot.consumers);
+        // A cursor the save lapsed moves in memory too, once the lapse is on disk, so it is not lapsed
+        // again on every save and a re-registration reports where the consumer resumes.
+        snapshot.consumers.forEach((id, saved) -> consumers.computeIfPresent(id, (ignored, live) -> {
+            if (live.ackThrough >= snapshot.trimmedThrough) return live;
+            McaReputation.LOGGER.warn("[MCA: Reputation] Standing journal consumer {} fell behind the retention "
+                    + "bound and lapsed: {} entr{} it never acknowledged were trimmed. Its next poll reports GAP; "
+                    + "it resumes after entry {}. See [integration] standingJournalMaxEntries.", id,
+                    snapshot.trimmedThrough - live.ackThrough,
+                    snapshot.trimmedThrough - live.ackThrough == 1 ? "y" : "ies", snapshot.trimmedThrough);
+            return saved;
+        }));
     }
+
+    /** One consumer as an operator sees it: its cursor, whether it registered this session, how far behind. */
+    public record ConsumerView(ResourceLocation id, long startAfter, long acknowledgedThrough, boolean live,
+                               long behind) {
+    }
+
+    /** Every consumer with a cursor, in registration order. Read-only. */
+    public List<ConsumerView> consumerViews() {
+        long tail = currentTail();
+        List<ConsumerView> views = new ArrayList<>();
+        consumers.forEach((id, state) -> views.add(new ConsumerView(id, state.startAfter, state.ackThrough,
+                callbacks.containsKey(id), Math.max(0L, tail - state.ackThrough))));
+        return views;
+    }
+
+    /** Entries currently kept in memory, whether or not they are saved yet. */
+    public int retainedEntries() { return entries.size(); }
+    public long trimmedThrough() { return trimmedThrough; }
+    public long tail() { return currentTail(); }
 
     public CompoundTag save(Snapshot snapshot) {
         CompoundTag tag=new CompoundTag();tag.putUUID("Epoch",snapshot.epoch);tag.putLong("NextSequence",snapshot.nextSequence);tag.putLong("TrimmedThrough",snapshot.trimmedThrough);
@@ -163,6 +227,8 @@ public final class StandingOutbox {
 
     public record ConsumerState(long startAfter,long ackThrough) {
         ConsumerState(long startAfter){this(startAfter,startAfter);}
+        /** A cursor that fell behind the retention bound: it resumes after the trim point it lost to. */
+        static ConsumerState lapsedAt(long trimmedThrough){return new ConsumerState(trimmedThrough,trimmedThrough);}
         CompoundTag save(ResourceLocation id){CompoundTag tag=new CompoundTag();tag.putString("Id",id.toString());tag.putLong("StartAfter",startAfter);tag.putLong("AckThrough",ackThrough);return tag;}
         static ConsumerState load(CompoundTag tag){long start=Math.max(0L,tag.getLong("StartAfter"));return new ConsumerState(start,Math.max(start,tag.getLong("AckThrough")));}
     }

@@ -479,13 +479,65 @@ Reserved surface, carried but not yet consumed in this version: `TitleDefinition
 `TitleDefinition.icon`. Set them freely; they gain behaviour in a later version without a format
 change.
 
+### Standing journal (0.6.1)
+
+A durable, ordered journal of every scored change to a player's local standing, for a companion that
+keeps a standing of its own (Ultima Kingdoms' faction layer is the first). Every call is server-thread
+only; off it, each answers empty, `INVALID` or `false`, and `unregisterStandingConsumer` does nothing.
+
+```java
+Optional<StandingRegistration> registerStandingConsumer(MinecraftServer, StandingConsumer);
+void                  unregisterStandingConsumer(MinecraftServer, ResourceLocation consumerId);
+StandingDeliveryBatch pollStandingChanges(MinecraftServer, ResourceLocation consumerId, UUID epoch, long after, int limit);
+StandingAckResult     ackStandingChanges(MinecraftServer, ResourceLocation consumerId, UUID epoch, long through);
+boolean               flushStandingChanges(MinecraftServer);
+List<StandingBaseline> standingBaselines(MinecraftServer);
+```
+
+- **Registering** starts a cursor at the current tail (`StandingRegistration(epoch, startAfter,
+  acknowledgedThrough)`); re-registering an existing consumer is idempotent and returns its current
+  cursor. It returns empty while the world's data is read-only. `unregisterStandingConsumer` detaches
+  the consumer for the session only; its cursor is kept, so it resumes where it was on its next
+  registration.
+- **Capture.** Each change is offered to every registered consumer's `capture(StandingEnvelope)` as it
+  is appended, and the `CaptureResult` (`READY`, `IGNORED`, `UNMAPPED` or `FAILED`, with a string
+  payload) is stored with the entry for that consumer. A consumer that throws or returns null is
+  recorded as `FAILED`.
+- **Polling** returns entries after `after`, at most `limit` (1 to 1,024), and only entries and
+  registrations that have reached disk: nothing is published before the save that contains it.
+  `flushStandingChanges` performs that save when the journal or a cursor changed, and does no IO
+  otherwise. Statuses: `READY`; `UNREGISTERED` (no saved cursor for this id); `EPOCH_MISMATCH` (the
+  journal was recreated); `GAP` (see below); `INVALID` (bad arguments or wrong thread).
+- **Acknowledging** moves the cursor forward. It is refused as `UNOBSERVED_PREFIX` past what the
+  consumer has polled, `BEYOND_DURABLE_TAIL` past what is saved, and `READ_ONLY` on read-only data.
+- **Trimming.** Each save drops the entries every consumer has acknowledged, and keeps no more than
+  the newest `[integration] standingJournalMaxEntries` (default 4,096) whatever the cursors say.
+
+**`GAP` is a normal, recoverable state.** A consumer whose acknowledged position falls below what a save
+keeps **lapses**: its cursor moves to the new start of the journal (`startAfter = acknowledgedThrough =`
+the trim point), and a poll from any earlier position answers `GAP`. The entries in between are gone
+and cannot be replayed; that is what `GAP` means. To recover, register again (idempotent) and resume
+polling from the returned `startAfter`, which answers `READY`. `StandingDeliveryBatch.trimmedThrough()`
+reports the same trim point on every batch. A consumer lapses when its mod stalls, is switched off for a
+long time, or is removed after registering once; before 0.6.1's bound, such a cursor held every later
+change in the save for the life of the world. Operators can see the cursors with
+`/mcareputation standing consumers` (permission 2) and drop one whose mod is gone for good with
+`/mcareputation standing consumers forget <id>` (permission 3).
+
+**`standingBaselines(server)`** is a read-only, point-in-time list of every canonical local standing
+(`StandingBaseline(player, community, score, revision)`) for explicit migration tools: it creates no
+records, reconciles no decay, fires no events and does not mark the store dirty. A baseline is the
+*cumulative* local score. A consumer that has been applying journal deltas must not add a baseline on
+top of them after a `GAP`, or it counts every change it already applied a second time.
+
 ## Additive additions
 
 Every method introduced in this section — per-villager opinion, decay immunity, `capabilities`,
 `deliver`/receipts, `recordSuperseding`, the speaker-aware and bound-resolution overloads,
 `highWaterTierId`/`globalTitles`, `getVillagerOpinionDetailed`, `gossipStory`, the three
-`ReputationMirror`/`CoreIncidentAuthority` defaults, and 0.6.0's whole `api.profile` surface with
-`ReputationProfileChangedEvent` — is **additive to API version 1**.
+`ReputationMirror`/`CoreIncidentAuthority` defaults, 0.6.0's whole `api.profile` surface with
+`ReputationProfileChangedEvent`, and 0.6.1's standing journal and `standingBaselines` — is **additive
+to API version 1**.
 `getApiVersion()` deliberately does not move for any of it: a bridge written against the original
 version remains fully compatible, and a companion written for the original API neither calls these
 methods nor is affected by them, so a mismatch is silent and fine. Use `capabilities(server)` to

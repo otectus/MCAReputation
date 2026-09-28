@@ -57,6 +57,7 @@ import dev.otectus.mcareputation.state.PlayerReputationRecord;
 import dev.otectus.mcareputation.state.OperationReceipt;
 import dev.otectus.mcareputation.state.ReputationSavedData;
 import dev.otectus.mcareputation.state.SaveQuarantine;
+import dev.otectus.mcareputation.state.StandingOutbox;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -179,6 +180,7 @@ public final class ReputationCommand {
                 .then(buildValidate())
                 .then(buildReload())
                 .then(buildMigrate())
+                .then(buildStanding())
                 .then(buildDebug());
         // Register exactly once and redirect the alias to the *registered* node. Registering the same
         // builder twice merges a second copy of the tree into the dispatcher and returns an orphan
@@ -971,6 +973,74 @@ public final class ReputationCommand {
             }
         }
         return applied;
+    }
+
+    // ------------------------------------------------------------------
+    // Standing journal
+    // ------------------------------------------------------------------
+
+    private static final SuggestionProvider<CommandSourceStack> STANDING_CONSUMER_SUGGESTIONS =
+            (context, builder) -> SharedSuggestionProvider.suggestResource(
+                    ReputationSavedData.get(context.getSource().getServer()).standingOutbox().consumerViews()
+                            .stream().map(StandingOutbox.ConsumerView::id), builder);
+
+    /**
+     * {@code /mcareputation standing consumers [forget <id>]} (0.6.1): the standing journal's size and
+     * retention bound, every consumer cursor, and the remedy for a consumer whose mod is gone for good.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> buildStanding() {
+        return Commands.literal("standing")
+                .requires(source -> source.hasPermission(2))
+                .then(Commands.literal("consumers")
+                        .executes(ReputationCommand::standingConsumers)
+                        .then(Commands.literal("forget")
+                                .requires(source -> source.hasPermission(3))
+                                .then(Commands.argument("consumer", ResourceLocationArgument.id())
+                                        .suggests(STANDING_CONSUMER_SUGGESTIONS)
+                                        .executes(ctx -> forgetStandingConsumer(ctx,
+                                                ResourceLocationArgument.getId(ctx, "consumer"))))));
+    }
+
+    private static int standingConsumers(CommandContext<CommandSourceStack> ctx) {
+        CommandSourceStack source = ctx.getSource();
+        StandingOutbox outbox = ReputationSavedData.get(source.getServer()).standingOutbox();
+        int bound = McaReputationConfig.standingJournalMaxEntries();
+        source.sendSuccess(() -> Component.translatable("mcareputation.command.standing.journal",
+                outbox.retainedEntries(), outbox.tail(), outbox.trimmedThrough(), bound), false);
+        List<StandingOutbox.ConsumerView> views = outbox.consumerViews();
+        if (views.isEmpty()) {
+            source.sendSuccess(() -> Component.translatable("mcareputation.command.standing.none"), false);
+            return 0;
+        }
+        for (StandingOutbox.ConsumerView view : views) {
+            Component state = Component.translatable(view.live()
+                    ? "mcareputation.command.standing.live"
+                    : "mcareputation.command.standing.dormant");
+            source.sendSuccess(() -> Component.translatable("mcareputation.command.standing.consumer",
+                    view.id().toString(), view.acknowledgedThrough(), view.behind(), state), false);
+        }
+        return views.size();
+    }
+
+    /** Drops one consumer's cursor for good; see {@code StandingOutbox.forget}. */
+    private static int forgetStandingConsumer(CommandContext<CommandSourceStack> ctx, ResourceLocation id) {
+        CommandSourceStack source = ctx.getSource();
+        ReputationSavedData data = ReputationSavedData.get(source.getServer());
+        if (!data.writable()) {
+            source.sendFailure(Component.translatable("mcareputation.command.standing.read_only"));
+            return 0;
+        }
+        boolean live = data.standingOutbox().consumerViews().stream()
+                .anyMatch(view -> view.id().equals(id) && view.live());
+        if (!data.standingOutbox().forget(id)) {
+            source.sendFailure(Component.translatable("mcareputation.command.standing.unknown", id.toString()));
+            return 0;
+        }
+        data.setDirty();
+        source.sendSuccess(() -> Component.translatable(live
+                ? "mcareputation.command.standing.forgotten_live"
+                : "mcareputation.command.standing.forgotten", id.toString()), true);
+        return 1;
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> buildDebug() {

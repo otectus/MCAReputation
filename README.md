@@ -148,6 +148,7 @@ needs permission level 2, and every change is written to the server log with who
 /mcareputation export [player]               export standing data as JSON
 /mcareputation top <community> [limit]       the top players in a village
 /mcareputation community <community> decay   enable, disable, or check decay immunity
+/mcareputation standing consumers [forget <id>]      standing-journal cursors; forget drops one (level 3)
 /mcareputation debug community|witnesses|authorities|standing [<player>] [<community>]
 /mcareputation debug receipts <player> [community]     delivery receipts recorded for a player
 /mcareputation debug supersede <player> <community>    every incident folded into another, and by what
