@@ -61,6 +61,13 @@ public record ReputationCapabilities(int apiVersion, boolean enabled, boolean de
 
     /** {@link McaReputationApi#gossipStory} exists: enriched gossip with a semantic revision. */
     public static final String FEATURE_GOSSIP_STORY = "gossip_story";
+    /**
+     * {@link CoreIncidentExemptions} exists: a companion may register a per-incident PASS/EXEMPT query
+     * for villager assault and killing that this mod's own detector consults before recording.
+     *
+     * @since MCA: Reputation 0.6.1
+     */
+    public static final String FEATURE_INCIDENT_EXEMPTIONS = "incident_exemptions_v1";
 
     // --- public profiles (0.6.0, §14.4) -------------------------------------
     //

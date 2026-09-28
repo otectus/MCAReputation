@@ -70,7 +70,7 @@ class ProfileCapabilityTest {
     }
 
     @Test
-    void theThirteenOlderFeaturesAreUnconditionalAndUnchanged() {
+    void theStableFeaturesAreUnconditionalAndUnchanged() {
         ProfileRegistryBundle.clear();
         Set<String> features = features();
         assertTrue(features.containsAll(List.of(
@@ -86,9 +86,10 @@ class ProfileCapabilityTest {
                 ReputationCapabilities.FEATURE_BOUND_RESOLUTION,
                 ReputationCapabilities.FEATURE_TITLE_SYNC,
                 ReputationCapabilities.FEATURE_LADDER_HIGH_WATER,
-                ReputationCapabilities.FEATURE_GOSSIP_STORY)),
-                "the 0.5.0 surface is additive, so nothing here may be withdrawn");
-        assertEquals(13, features.size(), "and nothing else is advertised while profiles are not live");
+                ReputationCapabilities.FEATURE_GOSSIP_STORY,
+                ReputationCapabilities.FEATURE_INCIDENT_EXEMPTIONS)),
+                "the 0.5.0 and 0.6.1 stable surface is additive, so nothing here may be withdrawn");
+        assertEquals(14, features.size(), "and nothing else is advertised while profiles are not live");
     }
 
     /**
@@ -121,7 +122,7 @@ class ProfileCapabilityTest {
             assertFalse(disabled.contains(feature),
                     feature + " cannot answer while profiles are switched off in the config");
         }
-        assertEquals(13, disabled.size(), "and the 0.5.0 surface is untouched by that switch");
+        assertEquals(14, disabled.size(), "and the stable surface is untouched by that switch");
 
         // The static half still reports support, and now reports the operator's switches too.
         ProfileCapabilities report = McaReputationApi.profileCapabilities(null);

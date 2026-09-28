@@ -74,6 +74,7 @@ class ConfigParityTest {
             "integration.enableQuestsIntegration",
             "integration.enableConversationsIntegration",
             "integration.enableCrimeIntegration",
+            "integration.enableUltimaKingdomsIntegration",
             "integration.coreAuthorityUndeclaredKinds",
             "integration.mirrorQuestsFallbackState",
             "integration.migrateLegacyQuestsData");

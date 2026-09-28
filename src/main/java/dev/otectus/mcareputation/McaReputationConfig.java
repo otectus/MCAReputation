@@ -108,6 +108,7 @@ public final class McaReputationConfig {
         public final ModConfigSpec.IntValue maxFacetOpinionAdjustment;
         public final ModConfigSpec.BooleanValue enableQuestsIntegration;
         public final ModConfigSpec.BooleanValue enableConversationsIntegration;
+        public final ModConfigSpec.BooleanValue enableUltimaKingdomsIntegration;
         public final ModConfigSpec.BooleanValue enableCrimeIntegration;
         public final ModConfigSpec.BooleanValue mirrorQuestsFallbackState;
         public final ModConfigSpec.BooleanValue migrateLegacyQuestsData;
@@ -313,6 +314,11 @@ public final class McaReputationConfig {
             enableConversationsIntegration = builder
                     .comment("Serve dialogue context, check bias, and gossip candidates to MCA: Conversations.")
                     .define("enableConversationsIntegration", true);
+            enableUltimaKingdomsIntegration = builder
+                    .comment("Accept faction-synchronisation effects from Ultima Kingdoms. With this off",
+                            "its deliverStandingEffect writes are refused as DISABLED; its reads and its",
+                            "standing-journal consumer still work.")
+                    .define("enableUltimaKingdomsIntegration", true);
             coreAuthorityUndeclaredKinds = builder
                     .comment("How much to trust a companion that claims core incidents without saying which",
                             "kinds it detects. TRUST_LEGACY honours every kind it claims; ASSAULT_KILL_ONLY",
@@ -426,6 +432,7 @@ public final class McaReputationConfig {
     public static final class TestOverrides {
 
         public static volatile Boolean enabled;
+        public static volatile Boolean ultimaKingdomsIntegration;
         public static volatile Boolean scoreDecay;
         public static volatile Boolean tierTitles;
         public static volatile Boolean villagerOpinion;
@@ -443,6 +450,7 @@ public final class McaReputationConfig {
 
         /** Clears every override; call from test teardown so no override leaks across tests. */
         public static void reset() {
+            ultimaKingdomsIntegration = null;
             enabled = null;
             scoreDecay = null;
             tierTitles = null;
@@ -678,6 +686,13 @@ public final class McaReputationConfig {
             return TestOverrides.crimeIntegration;
         }
         return read(COMMON.enableCrimeIntegration::get, true);
+    }
+
+    public static boolean ultimaKingdomsIntegrationEnabled() {
+        if (TestOverrides.ultimaKingdomsIntegration != null) {
+            return TestOverrides.ultimaKingdomsIntegration;
+        }
+        return read(COMMON.enableUltimaKingdomsIntegration::get, true);
     }
 
     /**

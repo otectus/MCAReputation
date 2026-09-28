@@ -33,7 +33,13 @@ import dev.otectus.mcareputation.api.profile.ProfiledDelivery;
 import dev.otectus.mcareputation.api.profile.ProfiledDeliveryResult;
 import dev.otectus.mcareputation.api.profile.RecognitionValue;
 import dev.otectus.mcareputation.api.profile.VillagerProfileSnapshot;
+import dev.otectus.mcareputation.api.CoreIncidentExemptions;
+import dev.otectus.mcareputation.api.event.ReputationTitleGrantedEvent;
 import dev.otectus.mcareputation.community.CommunityKey;
+import dev.otectus.mcareputation.reputation.ReputationTier;
+import dev.otectus.mcareputation.reputation.ReputationTierSet;
+import dev.otectus.mcareputation.reputation.ReputationTiers;
+import dev.otectus.mcareputation.reputation.TitleScope;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 
@@ -64,6 +70,21 @@ public final class ApiJarConsumer {
     private static final ResourceLocation FACET = ResourceLocation.fromNamespaceAndPath("mcareputation", "reliability");
 
     private ApiJarConsumer() {
+    }
+
+    /**
+     * The 0.6.1 additions: the tier/title read model MCA: Quests derives its ladder answers from, and
+     * the per-incident exemption registry MCA: Crime registers against.
+     */
+    static void readModelAndExemptions(ReputationTitleGrantedEvent granted) {
+        TitleScope scope = granted.scope();
+        ReputationTierSet ladder = ReputationTiers.getOrDefault(ReputationTiers.DEFAULT_ID);
+        ReputationTier tier = ladder.tierFor(42);
+        int index = ladder.indexOf(tier.id());
+        int version = CoreIncidentExemptions.capabilityVersion();
+        CoreIncidentExemptions.register(SOURCE, CoreIncidentExemptions.EXEMPTABLE_KINDS,
+                (kind, actor, target, source, amount) -> CoreIncidentExemptions.Decision.PASS);
+        boolean removed = CoreIncidentExemptions.unregister(SOURCE);
     }
 
     /** The 0.5.0 surface a companion written against the previous release already uses. */

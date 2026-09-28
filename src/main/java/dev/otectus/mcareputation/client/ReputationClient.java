@@ -7,6 +7,7 @@ import dev.otectus.mcareputation.compat.McaScreenCompat;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.Entity;
@@ -20,7 +21,10 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 
+import java.lang.reflect.Method;
+import java.util.Map;
 import java.util.Optional;
+import java.util.WeakHashMap;
 
 /**
  * Client entry points (spec §28.1): the Standing button on MCA's interaction screen, and the keybind.
@@ -191,6 +195,52 @@ public final class ReputationClient {
                         Component.translatable("mcareputation.button.standing.tooltip")))
                 .build();
         event.addListener(standing);
+        STANDING_BUTTONS.put(screen, standing);
+    }
+
+    /**
+     * The Standing button placed on each interaction screen, so a widget rebuild can be noticed.
+     *
+     * <p>Weak on the screen: a closed screen takes its entry with it, and a resize re-runs
+     * {@link #onScreenInit} and replaces the entry.
+     */
+    private static final Map<Screen, Button> STANDING_BUTTONS = new WeakHashMap<>();
+
+    /** Vanilla's {@code Screen#addRenderableWidget}, resolved once by its Mojang name; null once it failed. */
+    private static Method addRenderableWidget;
+    private static boolean addRenderableWidgetUnavailable;
+
+    /**
+     * Puts the Standing button back when MCA has rebuilt its widget list.
+     *
+     * <p>{@link ScreenEvent.Init.Post} fires once, when the screen is first built, but MCA's
+     * {@code InteractScreen} clears and rebuilds its widgets every time the player moves between its
+     * sub-menus — which silently dropped this button after the first Interact → Back. Presence is
+     * read from the public {@code children()} list; only the re-add needs vanilla's protected
+     * {@code addRenderableWidget}, reached reflectively by its Mojang name — NeoForge runs unobfuscated,
+     * so the name holds in production — rather than through a mixin (§11). In the steady state this is
+     * one map lookup and one list scan per frame.
+     */
+    @SubscribeEvent
+    public static void onScreenRender(ScreenEvent.Render.Pre event) {
+        Screen screen = event.getScreen();
+        Button standing = STANDING_BUTTONS.get(screen);
+        if (standing == null || addRenderableWidgetUnavailable || screen.children().contains(standing)
+                || !McaReputationConfig.showReputationButton()) {
+            return;
+        }
+        try {
+            if (addRenderableWidget == null) {
+                Method found = Screen.class.getDeclaredMethod("addRenderableWidget", GuiEventListener.class);
+                found.setAccessible(true);
+                addRenderableWidget = found;
+            }
+            addRenderableWidget.invoke(screen, standing);
+        } catch (Throwable t) {
+            addRenderableWidgetUnavailable = true;
+            McaReputation.LOGGER.warn("[MCA: Reputation] could not re-add the Standing button after a screen "
+                    + "rebuild; it will be missing until the villager screen is reopened", t);
+        }
     }
 
     private static void openFromInteraction(Screen parent) {

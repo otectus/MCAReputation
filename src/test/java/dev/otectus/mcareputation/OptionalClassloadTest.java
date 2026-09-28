@@ -212,6 +212,7 @@ class OptionalClassloadTest {
         assertTrue(toml.contains("modId=\"mcaquests\""), "mcaquests dependency entry missing");
         assertTrue(toml.contains("modId=\"mcaconversations\""), "mcaconversations dependency entry missing");
         assertTrue(toml.contains("modId=\"mcacrime\""), "mcacrime dependency entry missing");
+        assertTrue(toml.contains("modId=\"ultima_kingdoms\""), "ultima_kingdoms dependency entry missing");
         assertTrue(toml.contains("modId=\"mca\""), "the mandatory MCA dependency is missing");
         assertTrue(toml.contains("modId=\"neoforge\""),
                 "the loader dependency must be neoforge, not forge");
@@ -223,8 +224,8 @@ class OptionalClassloadTest {
         assertTrue(required == 3, "expected exactly 3 required dependencies "
                 + "(neoforge, minecraft, mca), found " + required);
         long optional = toml.lines().filter(line -> line.trim().equals("type=\"optional\"")).count();
-        assertTrue(optional == 3, "expected exactly 3 optional companions "
-                + "(mcaquests, mcaconversations, mcacrime), found " + optional);
+        assertTrue(optional == 4, "expected exactly 4 optional companions "
+                + "(mcaquests, mcaconversations, mcacrime, ultima_kingdoms), found " + optional);
 
         assertTrue(toml.contains("# NOTE: Architectury is deliberately"),
                 "the Architectury omission should stay documented, not silently dropped");

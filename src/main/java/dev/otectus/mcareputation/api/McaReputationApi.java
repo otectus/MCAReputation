@@ -103,6 +103,9 @@ public final class McaReputationApi {
         if (McaReputation.CRIME_MOD_ID.equals(source.getNamespace())) {
             return McaReputationConfig.crimeIntegrationEnabled();
         }
+        if (McaReputation.ULTIMA_KINGDOMS_MOD_ID.equals(source.getNamespace())) {
+            return McaReputationConfig.ultimaKingdomsIntegrationEnabled();
+        }
         return true;
     }
 
@@ -178,7 +181,8 @@ public final class McaReputationApi {
                         ReputationCapabilities.FEATURE_BOUND_RESOLUTION,
                         ReputationCapabilities.FEATURE_TITLE_SYNC,
                         ReputationCapabilities.FEATURE_LADDER_HIGH_WATER,
-                        ReputationCapabilities.FEATURE_GOSSIP_STORY)),
+                        ReputationCapabilities.FEATURE_GOSSIP_STORY,
+                        ReputationCapabilities.FEATURE_INCIDENT_EXEMPTIONS)),
                 nativeKinds, claimants, readinessReason);
     }
 

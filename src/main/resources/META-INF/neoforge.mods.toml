@@ -71,3 +71,13 @@ description='''${mod_description}'''
     versionRange="[0.1,)"
     ordering="BEFORE"
     side="BOTH"
+
+# Ultima Kingdoms - an OPTIONAL consumer of the API, ordered BEFORE like the other companions so the
+# API exists when its bridge handshakes at common setup. Lower bound only: every consumer probes the
+# API and degrades on drift (family policy).
+[[dependencies.${mod_id}]]
+    modId="ultima_kingdoms"
+    type="optional"
+    versionRange="[0,)"
+    ordering="BEFORE"
+    side="BOTH"

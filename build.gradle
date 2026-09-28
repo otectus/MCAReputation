@@ -366,9 +366,24 @@ def apiExports = [
         'dev/otectus/mcareputation/incident/IncidentSubject$*.class',
         'dev/otectus/mcareputation/incident/SubjectKind.class',
         'dev/otectus/mcareputation/incident/SubjectKind$*.class',
+        // Read model (0.6.1 line): the tier and title types the public api events and lookups already
+        // return (ReputationTitleGrantedEvent.scope(), ReputationTiers.getOrDefault). MCA: Quests named
+        // them as internals; exporting them makes the api jar closed under its own signatures.
+        'dev/otectus/mcareputation/reputation/TitleScope.class',
+        'dev/otectus/mcareputation/reputation/TitleScope$*.class',
+        'dev/otectus/mcareputation/reputation/ReputationTiers.class',
+        'dev/otectus/mcareputation/reputation/ReputationTiers$*.class',
+        'dev/otectus/mcareputation/reputation/ReputationTierSet.class',
+        'dev/otectus/mcareputation/reputation/ReputationTierSet$*.class',
+        'dev/otectus/mcareputation/reputation/ReputationTier.class',
+        'dev/otectus/mcareputation/reputation/ReputationTier$*.class',
 ]
 
 tasks.register('apiJar', Jar) {
+    // Reproducible: no entry timestamps and a fixed entry order, so a rebuild from the same sources yields
+    // the same bytes and the SHA-256 pins in consumers' gradle/sibling-apis.properties survive it.
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
     group = 'build'
     description = 'Builds the compile-only API jar for sibling add-ons.'
     dependsOn tasks.named('compileJava')

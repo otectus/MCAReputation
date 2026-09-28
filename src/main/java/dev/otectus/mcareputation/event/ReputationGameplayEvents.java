@@ -2,6 +2,7 @@ package dev.otectus.mcareputation.event;
 
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
+import dev.otectus.mcareputation.api.CoreIncidentExemptions;
 import dev.otectus.mcareputation.api.CoreIncidentKind;
 import dev.otectus.mcareputation.api.ReputationRequest;
 import dev.otectus.mcareputation.api.SupersedeSpec;
@@ -117,6 +118,12 @@ public final class ReputationGameplayEvents {
             return;
         }
         ServerPlayer player = responsible.get();
+        if (CoreIncidentExemptions.exempt(CoreIncidentKind.MCA_VILLAGER_ASSAULT, player, target,
+                event.getSource(), event.getNewDamage())) {
+            // A companion with lawful knowledge of this hit (MCA: Crime's thief combat, for one) says
+            // it is no deed. Asked after attribution, so only a player's hit ever costs a provider call.
+            return;
+        }
         Optional<CommunityKey> community = CommunityResolver.resolve(target);
         if (community.isEmpty()) {
             // A villager with no village and none nearby has no public to be outraged (§12.2).
@@ -241,6 +248,10 @@ public final class ReputationGameplayEvents {
             return;
         }
         ServerPlayer player = responsible.get();
+        if (CoreIncidentExemptions.exempt(CoreIncidentKind.MCA_VILLAGER_KILL, player, victim,
+                event.getSource(), 0.0F)) {
+            return; // as in onLivingHurt: a companion says this death was lawful
+        }
         Optional<CommunityKey> maybeCommunity = CommunityResolver.resolve(victim);
         if (maybeCommunity.isEmpty()) {
             return;

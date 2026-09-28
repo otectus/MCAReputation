@@ -36,6 +36,28 @@ below is additive, including the whole `api.profile` surface, and the companions
 gate on `2`. Forge's API version is `1` for this same surface, for the reason the 0.5.0 entry gives —
 the `api.event` types here extend `net.neoforged.bus.api.Event`.
 
+### Added — family integration pass (2026-09-27, mirrored from Forge 0.6.1)
+
+- **`CoreIncidentExemptions`** (capability `incident_exemptions_v1`): a companion registers a
+  per-incident `PASS`/`EXEMPT` query for villager assault and killing, consulted by this mod's own
+  detector after a deed is attributed to a player. MCA: Crime 0.7.5 already probes for exactly this
+  class (its thief-combat exemption); until now every combined start logged that the capability was
+  missing. Default `PASS`, bounded and idempotent registration, throwing providers contained.
+- **`enableUltimaKingdomsIntegration`** in `[integration]`, so writes attributed to `ultima_kingdoms`
+  can be switched off from this side like Quests', Conversations' and Crime's already could.
+- **API jar read model.** `reputation/TitleScope`, `ReputationTiers`, `ReputationTierSet` and
+  `ReputationTier` are now exported in the compile-only api jar: `ReputationTitleGrantedEvent#scope()`
+  already returned `TitleScope`, and MCA: Quests derives its ladder answers from the tier types, so a
+  consumer can now compile against the jar alone. The `apiJar` task is reproducible (no entry timestamps, fixed entry order), so a rebuild from unchanged sources yields the same hash and consumers' pins survive it.
+- `neoforge.mods.toml` now declares `ultima_kingdoms` as an optional `BEFORE` companion too (range
+  `[0,)`, never a launch blocker), so the dependency graph reads the same from either direction.
+
+### Fixed — family integration pass
+
+- The Standing button on MCA's villager screen survives MCA's widget rebuilds: `InteractScreen` clears
+  and rebuilds its widgets on every sub-menu change, which dropped the button after the first
+  Interact → Back. It is now re-placed on the next render when missing, still without a mixin (reflection on the Mojang name here, where NeoForge runs unobfuscated).
+
 ### Added
 
 - **Public profiles.** A village now tracks two things beside your score: **recognition** — how widely

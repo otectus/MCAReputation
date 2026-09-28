@@ -27,6 +27,9 @@ public final class McaReputation {
     /** MCA: Crime's mod id, used only for optional-presence checks and integration gating. */
     public static final String CRIME_MOD_ID = "mcacrime";
 
+    /** Ultima Kingdoms' mod id, the namespace its faction-sync effects are attributed to. */
+    public static final String ULTIMA_KINGDOMS_MOD_ID = "ultima_kingdoms";
+
     /** MCA Reborn's mod id. */
     public static final String MCA_MOD_ID = "mca";
 
