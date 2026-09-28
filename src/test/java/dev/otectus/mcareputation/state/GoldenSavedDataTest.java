@@ -62,6 +62,7 @@ class GoldenSavedDataTest {
 
     private static final String FORMAT_2_NAME = "mcareputation-format-2-1.20.1.nbt";
     private static final String FORMAT_3_NAME = "mcareputation-format-3-1.20.1.nbt";
+    private static final String FORMAT_4_NAME = "mcareputation-format-4-1.20.1.nbt";
     private static final String REGENERATE = "mcareputation.regenerateFixtures";
 
     private static final int MIN = -1000;
@@ -297,7 +298,7 @@ class GoldenSavedDataTest {
     @Test
     void regenerateTheFixture() throws IOException {
         Assumptions.assumeTrue(Boolean.getBoolean(REGENERATE), "fixture regeneration is not requested");
-        Path target = Path.of("src", "test", "resources", "fixtures", FORMAT_3_NAME);
+        Path target = Path.of("src", "test", "resources", "fixtures", FORMAT_4_NAME);
         Files.createDirectories(target.getParent());
         Files.write(target, encode(profiledLedger().save(new CompoundTag())));
     }
@@ -312,13 +313,21 @@ class GoldenSavedDataTest {
     @Test
     void theFormatThreeFixtureIsAFormatThreeFile() {
         assertEquals(3, fixtureTag(FORMAT_3_NAME).getInt("version"));
-        assertEquals(ReputationSavedData.FORMAT_VERSION, fixtureTag(FORMAT_3_NAME).getInt("version"));
     }
 
     @Test
-    void theCurrentSerializerReproducesTheFormatThreeFixtureByteForByte() {
-        assertArrayEquals(fixtureBytes(FORMAT_3_NAME), encode(profiledLedger().save(new CompoundTag())),
-                "the v3 serializer no longer writes the ledger it wrote when this fixture was taken");
+    void theFormatFourFixtureIsTheCurrentFormat() {
+        assertEquals(ReputationSavedData.FORMAT_VERSION, fixtureTag(FORMAT_4_NAME).getInt("version"));
+    }
+
+    @Test
+    void theCurrentSerializerReproducesTheFormatFourFixtureByteForByte() {
+        CompoundTag expected=fixtureTag(FORMAT_4_NAME);
+        CompoundTag actual=profiledLedger().save(new CompoundTag());
+        actual.getCompound("standingOutbox").putUUID("Epoch",
+                expected.getCompound("standingOutbox").getUUID("Epoch"));
+        assertArrayEquals(encode(expected), encode(actual),
+                "the v4 serializer no longer writes the ledger it wrote when this fixture was taken");
     }
 
     /**
@@ -370,10 +379,14 @@ class GoldenSavedDataTest {
     }
 
     @Test
-    void theFormatThreeFixtureRoundTripsUnchanged() {
-        assertArrayEquals(fixtureBytes(FORMAT_3_NAME),
-                encode(ReputationSavedData.load(fixtureTag(FORMAT_3_NAME)).save(new CompoundTag())),
-                "loading and re-saving the golden file must not move a byte");
+    void theFormatThreeFixtureUpgradesWithoutMovingExistingPayloads() {
+        CompoundTag original=fixtureTag(FORMAT_3_NAME);
+        CompoundTag upgraded=ReputationSavedData.load(original).save(new CompoundTag());
+        assertEquals(ReputationSavedData.FORMAT_VERSION,upgraded.getInt("version"));
+        assertEquals(original.getCompound("players"),upgraded.getCompound("players"));
+        assertEquals(original.getList("decayImmune",10),upgraded.getList("decayImmune",10));
+        assertEquals(original.getCompound("profileMigration"),upgraded.getCompound("profileMigration"));
+        assertTrue(upgraded.contains("standingOutbox"));
     }
 
     /** Every format-3 addition survives the round trip with its exact stored quantities. */

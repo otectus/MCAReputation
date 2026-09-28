@@ -64,8 +64,14 @@ class McaTraitFallbackTest {
             return; // running from a packaged artifact rather than the source tree
         }
         String source = Files.readString(SOURCE, StandardCharsets.UTF_8);
-        assertTrue(source.contains("optionalMethod(missingOptional, villager, \"getProfessionId\")"),
+        // Since 0.6.1 the tier is declared in the manifest the initialiser binds from, so it is asserted
+        // on the manifest itself rather than on the shape of one resolution line.
+        assertTrue(McaReflect.MANIFEST.stream()
+                        .filter(member -> member.name().equals("getProfessionId"))
+                        .findFirst().map(McaReflect.Member::optional).orElse(false),
                 "the profession member belongs on the audited-but-optional tier");
+        assertTrue(source.contains("? optionalMethod(missingOptional, owner, member.name(), member.params())"),
+                "optional manifest members must be resolved through optionalMethod");
         assertTrue(source.contains("AVAILABLE = root != null && missing.isEmpty();"),
                 "availability must be decided by the required members alone");
     }

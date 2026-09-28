@@ -3,6 +3,7 @@ package dev.otectus.mcareputation.state;
 import dev.otectus.mcareputation.McaReputation;
 import dev.otectus.mcareputation.McaReputationConfig;
 import dev.otectus.mcareputation.api.ReceiptOutcome;
+import dev.otectus.mcareputation.api.StandingBaseline;
 import dev.otectus.mcareputation.community.CommunityKey;
 import dev.otectus.mcareputation.credit.CreditDecision;
 import dev.otectus.mcareputation.incident.IncidentDefinition;
@@ -33,6 +34,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.io.File;
+import java.io.IOException;
 
 /**
  * The one canonical store for every player's public standing (spec §13.1–§13.2), persisted to
@@ -61,7 +64,7 @@ public final class ReputationSavedData extends SavedData {
     public static final String DATA_NAME = McaReputation.MOD_ID;
 
     /** Bump only for a format change that {@link #migrateFormat} can carry forward. */
-    public static final int FORMAT_VERSION = 3;
+    public static final int FORMAT_VERSION = 4;
 
     /**
      * Players examined by one enrichment pass (§19.3). Small on purpose: the pass runs on the same
@@ -94,6 +97,7 @@ public final class ReputationSavedData extends SavedData {
      */
     private boolean readOnly;
     private CompoundTag retainedRaw;
+    private StandingOutbox standingOutbox = new StandingOutbox();
 
     public ReputationSavedData() {
     }
@@ -143,6 +147,10 @@ public final class ReputationSavedData extends SavedData {
         return !readOnly;
     }
 
+    public StandingOutbox standingOutbox() {
+        return standingOutbox;
+    }
+
     /**
      * The player's record for a path that is about to write, or empty when this store may not be
      * written. Creates nothing on a read-only store, so a refused operation leaves no trace of having
@@ -174,6 +182,13 @@ public final class ReputationSavedData extends SavedData {
 
     public Collection<PlayerReputationRecord> players() {
         return Collections.unmodifiableCollection(players.values());
+    }
+
+    /** Pure export for explicit migration previews; performs no reconciliation or record creation. */
+    public List<StandingBaseline> standingBaselines() {
+        return players.values().stream().flatMap(player -> player.communities().stream().map(community ->
+                new StandingBaseline(player.playerId(), community.key(), community.score(),
+                        community.revision()))).toList();
     }
 
     public Set<UUID> playerIds() {
@@ -270,6 +285,10 @@ public final class ReputationSavedData extends SavedData {
 
     @Override
     public CompoundTag save(CompoundTag tag) {
+        return save(tag, standingOutbox.snapshotForSave());
+    }
+
+    private CompoundTag save(CompoundTag tag, StandingOutbox.Snapshot outboxSnapshot) {
         if (readOnly && retainedRaw != null) {
             // Verbatim, key for key: the one safe thing to do with a file from the future is to hand
             // it back exactly as it arrived.
@@ -300,7 +319,22 @@ public final class ReputationSavedData extends SavedData {
         if (!migration.isEmpty()) {
             tag.put("profileMigration", migration);
         }
+        tag.put("standingOutbox", standingOutbox.save(outboxSnapshot));
         return tag;
+    }
+
+    @Override
+    public void save(File file) {
+        if (!isDirty()) return;
+        StandingOutbox.Snapshot snapshot=standingOutbox.snapshotForSave();
+        try {
+            DurableDataWriter.write(file,save(new CompoundTag(),snapshot));
+            standingOutbox.markDurable(snapshot);
+            setDirty(false);
+        } catch(IOException exception) {
+            McaReputation.LOGGER.error("[MCA: Reputation] could not durably save data {}",file,exception);
+            setDirty(true);
+        }
     }
 
     public static ReputationSavedData load(CompoundTag tag) {
@@ -352,6 +386,9 @@ public final class ReputationSavedData extends SavedData {
             }
         }
         data.profileMigration = ProfileMigrationState.load(tag.getCompound("profileMigration"));
+        if(tag.contains("standingOutbox",Tag.TAG_COMPOUND)) {
+            data.standingOutbox=StandingOutbox.load(tag.getCompound("standingOutbox"));
+        }
         data.migrateFormat();
         if (skipped > 0) {
             McaReputation.LOGGER.warn("[MCA: Reputation] loaded {} player record(s), skipped {} malformed entr(ies)",
@@ -382,6 +419,8 @@ public final class ReputationSavedData extends SavedData {
         if (loadedVersion < 3) {
             migrateV2ToV3();
         }
+        // v4 adds an empty durable standing journal. Existing score history is imported explicitly,
+        // never fabricated into live change envelopes.
         loadedVersion = FORMAT_VERSION;
         setDirty();
     }

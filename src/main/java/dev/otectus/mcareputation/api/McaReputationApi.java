@@ -27,6 +27,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.storage.LevelResource;
 
 import javax.annotation.Nullable;
 import java.util.LinkedHashMap;
@@ -83,7 +84,8 @@ public final class McaReputationApi {
 
     /**
      * Whether requests attributed to this source's mod are currently accepted (§23's
-     * {@code enableQuestsIntegration} / {@code enableConversationsIntegration}). Sources from any
+     * {@code enableQuestsIntegration} / {@code enableConversationsIntegration} /
+     * {@code enableCrimeIntegration} / {@code enableUltimaKingdomsIntegration}). Sources from any
      * other namespace — the core hooks, commands, third-party mods — are always accepted.
      */
     private static boolean integrationEnabled(@Nullable ResourceLocation source) {
@@ -95,6 +97,12 @@ public final class McaReputationApi {
         }
         if (McaReputation.CONVERSATIONS_MOD_ID.equals(source.getNamespace())) {
             return McaReputationConfig.conversationsIntegrationEnabled();
+        }
+        if (McaReputation.CRIME_MOD_ID.equals(source.getNamespace())) {
+            return McaReputationConfig.crimeIntegrationEnabled();
+        }
+        if (McaReputation.ULTIMA_KINGDOMS_MOD_ID.equals(source.getNamespace())) {
+            return McaReputationConfig.ultimaKingdomsIntegrationEnabled();
         }
         return true;
     }
@@ -131,6 +139,20 @@ public final class McaReputationApi {
                     .orElseGet(List::of);
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] knownCommunities failed; returning empty", t);
+            return List.of();
+        }
+    }
+
+    /**
+     * A read-only, point-in-time list of every canonical local standing for explicit migration tools.
+     * This does not create records, reconcile decay, emit events, or mark the store dirty.
+     */
+    public static List<StandingBaseline> standingBaselines(MinecraftServer server) {
+        try {
+            if (server == null || !server.isSameThread()) return List.of();
+            return ReputationSavedData.get(server).standingBaselines();
+        } catch (Throwable t) {
+            McaReputation.LOGGER.error("[MCA: Reputation] standing baseline enumeration failed", t);
             return List.of();
         }
     }
@@ -615,6 +637,31 @@ public final class McaReputationApi {
     }
 
     /**
+     * Delivers one explicit companion-owned semantic effect to one community with a durable receipt.
+     * The operation key is scoped by producer namespace, player and community, so a retry cannot
+     * duplicate the local effect and no other community is changed.
+     */
+    public static DeliveryOutcome deliverStandingEffect(MinecraftServer server, UUID player,
+                                                         CommunityKey community, int delta,
+                                                         ResourceLocation source, String operationKey,
+                                                         long producerRevision, String description) {
+        try {
+            ResourceLocation incident = new ResourceLocation("mcareputation", "situation_resolved");
+            ReputationRequest request = ReputationRequest.builder(server, player, community, incident, source)
+                    .dedupeKey(operationKey)
+                    .delta(delta)
+                    .context("semantic_effect", description == null ? "" : description)
+                    .build();
+            return deliver(new IncidentDelivery(request, source.getNamespace(), operationKey,
+                    producerRevision));
+        } catch (Throwable throwable) {
+            McaReputation.LOGGER.error("[MCA: Reputation] semantic standing effect delivery failed", throwable);
+            return DeliveryOutcome.of(ReceiptOutcome.REFUSED_INVALID,
+                    ReputationResult.rejected(ReputationResult.Reason.INVALID, community));
+        }
+    }
+
+    /**
      * The receipt for one operation, or empty when this side has no memory of it. Strictly read-only:
      * it creates no player record, reconciles nothing, and posts no event.
      *
@@ -893,7 +940,8 @@ public final class McaReputationApi {
                         ReputationCapabilities.FEATURE_BOUND_RESOLUTION,
                         ReputationCapabilities.FEATURE_TITLE_SYNC,
                         ReputationCapabilities.FEATURE_LADDER_HIGH_WATER,
-                        ReputationCapabilities.FEATURE_GOSSIP_STORY)),
+                        ReputationCapabilities.FEATURE_GOSSIP_STORY,
+                        ReputationCapabilities.FEATURE_INCIDENT_EXEMPTIONS)),
                 nativeKinds, claimants, readinessReason);
     }
 
@@ -1301,6 +1349,80 @@ public final class McaReputationApi {
 
     public static void unregisterMirror(ReputationMirror mirror) {
         ReputationService.unregisterMirror(mirror);
+    }
+
+    /** Registers a config-independent durable standing consumer at the current journal tail. */
+    public static Optional<StandingRegistration> registerStandingConsumer(MinecraftServer server, StandingConsumer consumer) {
+        try {
+            if (server == null || consumer == null || !server.isSameThread()) return Optional.empty();
+            ReputationSavedData data = ReputationSavedData.get(server);
+            if (!data.writable() || !data.standingOutbox().register(consumer)) return Optional.empty();
+            data.setDirty();
+            return data.standingOutbox().registration(consumer.id());
+        } catch (Throwable throwable) {
+            McaReputation.LOGGER.error("[MCA: Reputation] standing consumer registration failed", throwable);
+            return Optional.empty();
+        }
+    }
+
+    public static void unregisterStandingConsumer(MinecraftServer server, ResourceLocation consumerId) {
+        try {
+            if (server != null && consumerId != null && server.isSameThread()) {
+                ReputationSavedData.get(server).standingOutbox().unregister(consumerId);
+            }
+        } catch (Throwable throwable) {
+            McaReputation.LOGGER.error("[MCA: Reputation] standing consumer removal failed", throwable);
+        }
+    }
+
+    public static StandingDeliveryBatch pollStandingChanges(MinecraftServer server, ResourceLocation consumerId,
+                                                             UUID epoch, long after, int limit) {
+        try {
+            if (server == null || !server.isSameThread()) return invalidBatch(epoch);
+            return ReputationSavedData.get(server).standingOutbox().poll(consumerId, epoch, after, limit);
+        } catch (Throwable throwable) {
+            McaReputation.LOGGER.error("[MCA: Reputation] standing outbox poll failed", throwable);
+            return invalidBatch(epoch);
+        }
+    }
+
+    public static StandingAckResult ackStandingChanges(MinecraftServer server, ResourceLocation consumerId,
+                                                       UUID epoch, long through) {
+        try {
+            if (server == null || !server.isSameThread()) return StandingAckResult.INVALID;
+            ReputationSavedData data = ReputationSavedData.get(server);
+            StandingAckResult result = data.standingOutbox().acknowledge(
+                    consumerId, epoch, through, data.writable());
+            if (result == StandingAckResult.ACCEPTED) data.setDirty();
+            return result;
+        } catch (Throwable throwable) {
+            McaReputation.LOGGER.error("[MCA: Reputation] standing outbox acknowledgement failed", throwable);
+            return StandingAckResult.INVALID;
+        }
+    }
+
+    /**
+     * Persists this mod's canonical store when the standing journal has unpublished entries or cursor
+     * changes. Consumers call this before polling so delivery need not wait for a broad world autosave;
+     * an unchanged journal performs no IO.
+     */
+    public static boolean flushStandingChanges(MinecraftServer server) {
+        try {
+            if (server == null || !server.isSameThread()) return false;
+            ReputationSavedData data = ReputationSavedData.get(server);
+            if (!data.standingOutbox().needsDurableSave()) return true;
+            data.save(server.getWorldPath(LevelResource.ROOT).resolve("data")
+                    .resolve(ReputationSavedData.DATA_NAME + ".dat").toFile());
+            return !data.standingOutbox().needsDurableSave();
+        } catch (Throwable throwable) {
+            McaReputation.LOGGER.error("[MCA: Reputation] standing outbox flush failed", throwable);
+            return false;
+        }
+    }
+
+    private static StandingDeliveryBatch invalidBatch(UUID epoch) {
+        return new StandingDeliveryBatch(StandingDeliveryBatch.Status.INVALID,
+                epoch == null ? new UUID(0L, 0L) : epoch, 0L, 0L, List.of());
     }
 
     /**

@@ -60,3 +60,21 @@ description='''${mod_description}'''
     versionRange="[1.0,)"
     ordering="BEFORE"
     side="BOTH"
+
+# MCA: Crime and Ultima Kingdoms are OPTIONAL companions on the same terms: neither is compiled
+# against, both declare `mcareputation` AFTER on their own side, and these entries only make the
+# dependency graph read the same from either direction. "[0,)" rather than a floor because Forge
+# enforces an optional range when the mod is present, and refusing to launch over an optional
+# integration is worse than running without it (the companions' bridges handle version drift).
+[[dependencies.${mod_id}]]
+    modId="mcacrime"
+    mandatory=false
+    versionRange="[0,)"
+    ordering="BEFORE"
+    side="BOTH"
+[[dependencies.${mod_id}]]
+    modId="ultima_kingdoms"
+    mandatory=false
+    versionRange="[0,)"
+    ordering="BEFORE"
+    side="BOTH"

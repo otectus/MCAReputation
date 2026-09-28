@@ -24,6 +24,12 @@ public final class McaReputation {
     /** MCA: Conversations' mod id, used only for optional-presence checks. */
     public static final String CONVERSATIONS_MOD_ID = "mcaconversations";
 
+    /** MCA: Crime's mod id, the namespace its civic writes are attributed to. */
+    public static final String CRIME_MOD_ID = "mcacrime";
+
+    /** Ultima Kingdoms' mod id, the namespace its faction-sync effects are attributed to. */
+    public static final String ULTIMA_KINGDOMS_MOD_ID = "ultima_kingdoms";
+
     /** MCA Reborn's mod id. */
     public static final String MCA_MOD_ID = "mca";
 

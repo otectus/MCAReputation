@@ -2524,7 +2524,7 @@ public final class ReputationService {
         ReputationTierSet.Transition transition = ladder.transition(oldScore, newScore);
         String newTierId = transition.to().id();
         if (!transition.changed()) {
-            return new TierOutcome(false, transition.from().id(), newTierId, 0, 0, false);
+            return new TierOutcome(false, transition.from().id(), newTierId, 0, 0, false, -1, -1);
         }
 
         String highWater = communityRecord.tierHighWater(ladderId).orElse(null);
@@ -2539,17 +2539,14 @@ public final class ReputationService {
         if (firstTime) {
             int firstUnearned = ladder.indexOf(highWater) + 1;
             communityRecord.setTierHighWater(ladderId, newTierId);
-            if (McaReputationConfig.tierTitlesEnabled()) {
-                // Every milestone the jump passed through, not only the one it landed on (F13). A
-                // single admin set from 0 to 300 crosses Honored on its way to Revered, and the badge
-                // for a tier you have stood in is not owed to how you got there. One change, one tier
-                // notification, several badges.
-                grantCrossedMilestones(ctx, playerRecord, communityRecord, player, ladder,
-                        firstUnearned, ladder.indexOf(newTierId));
-            }
+            int lastEarned = ladder.indexOf(newTierId);
+            return new TierOutcome(true, transition.from().id(), newTierId,
+                    ladder.indexOf(transition.from().id()), lastEarned, true,
+                    McaReputationConfig.tierTitlesEnabled() ? firstUnearned : -1,
+                    McaReputationConfig.tierTitlesEnabled() ? lastEarned : -1);
         }
         return new TierOutcome(true, transition.from().id(), newTierId,
-                ladder.indexOf(transition.from().id()), ladder.indexOf(newTierId), firstTime);
+                ladder.indexOf(transition.from().id()), ladder.indexOf(newTierId), firstTime, -1, -1);
     }
 
     /**
@@ -2569,7 +2566,16 @@ public final class ReputationService {
 
     /** A pending tier transition, posted after the score change it followed from. */
     private record TierOutcome(boolean changed, String oldTierId, String newTierId,
-                               int oldIndex, int newIndex, boolean firstTime) {
+                               int oldIndex, int newIndex, boolean firstTime,
+                               int milestoneFrom, int milestoneTo) {
+
+        void grantMilestones(ServiceContext ctx, UUID playerId, @Nullable ServerPlayer player,
+                             CommunityReputationRecord communityRecord) {
+            if (milestoneFrom < 0 || milestoneTo < milestoneFrom) return;
+            ctx.data().player(playerId).ifPresent(playerRecord -> grantCrossedMilestones(ctx,
+                    playerRecord, communityRecord, player, ReputationTiers.getDefault(),
+                    milestoneFrom, milestoneTo));
+        }
 
         void post(ServiceContext ctx, UUID playerId, @Nullable ServerPlayer player, CommunityKey community) {
             if (changed) {
@@ -2595,6 +2601,17 @@ public final class ReputationService {
                                               @Nullable UUID incidentId,
                                               @Nullable ResourceLocation incidentType,
                                               ResourceLocation source) {
+        if (change.scoreChanged()) {
+            long eventTime = incidentId == null ? ctx.now()
+                    : record.incident(incidentId).map(IncidentRecord::createdGameTime).orElseGet(ctx::now);
+            ctx.data().standingOutbox().append(change.player(), change.community(), change.revision(),
+                    change.oldScore(), change.newScore(), change.cause(), change.quiet(), source,
+                    incidentId, incidentType, eventTime);
+            ctx.data().setDirty();
+        }
+        if (tier != null) {
+            tier.grantMilestones(ctx, change.player(), player, record);
+        }
         notifyMirrors(change, record);
         if (incidentEvent != null) {
             postSafely(ctx, incidentEvent);

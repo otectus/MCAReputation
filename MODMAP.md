@@ -115,7 +115,7 @@ P9 is documentation; independent runtime verification is still owed — see PROD
   as bounded policy epochs (`state/ProfileFreezeLog`) rather than a lazy skip, so an unobserved
   disabled interval is not paid out as catch-up. Per-community immunity deliberately keeps the
   scalar channel's lazy-skip semantics — a known, recorded limitation.
-- **Numbers.** Protocol `"5"` (`network/ReputationNetwork`), save format `3`
+- **Numbers.** Protocol `"5"` (`network/ReputationNetwork`), save format `4`
   (`state/ReputationSavedData`), API version `1` unchanged — every profile operation is additive,
   because Quests and Conversations hard-refuse any other API version. Values themselves live in
   `gradle.properties`.

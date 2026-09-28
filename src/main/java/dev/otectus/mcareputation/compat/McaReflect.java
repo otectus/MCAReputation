@@ -71,6 +71,57 @@ public final class McaReflect {
             "net.conczin.mca",
             "net.mca");
 
+    /** One MCA member this mod consumes: the owning class by suffix under the root, its name, its parameters. */
+    record Member(String key, String owner, String name, boolean optional, Class<?>... params) {
+    }
+
+    /** The result of replaying the manifest against a class loader; binds nothing. */
+    record Resolution(String root, List<String> missing, List<String> missingOptional) {
+    }
+
+    /** The MCA classes this mod resolves, by suffix under the detected package root. */
+    static final List<String> TYPES = List.of(
+            "entity.VillagerEntityMCA",
+            "entity.VillagerLike",
+            "entity.ai.brain.VillagerBrain",
+            "entity.ai.Residency",
+            "server.world.data.Village",
+            "server.world.data.VillageManager",
+            "server.world.data.FamilyTree",
+            "server.world.data.FamilyTreeNode");
+
+    /**
+     * The audited member manifest: the single table the static initialiser binds from and
+     * {@code McaReflectProbeTest} replays against every supported MCA jar. An optional member (see
+     * {@link #optionalMethod}) only enriches an answer with a neutral fallback; every other one is
+     * load-bearing.
+     */
+    static final List<Member> MANIFEST = List.of(
+            new Member("getAgeState", "entity.VillagerLike", "getAgeState", false),
+            new Member("getVillagerBrain", "entity.VillagerEntityMCA", "getVillagerBrain", false),
+            new Member("getPersonality", "entity.ai.brain.VillagerBrain", "getPersonality", false),
+            // A removed profession getter costs role sensitivity, and must not cost deed recording.
+            new Member("getProfessionId", "entity.VillagerEntityMCA", "getProfessionId", true),
+            new Member("getResidency", "entity.VillagerEntityMCA", "getResidency", false),
+            new Member("getHomeVillage", "entity.ai.Residency", "getHomeVillage", false),
+            new Member("village.getId", "server.world.data.Village", "getId", false),
+            new Member("village.getName", "server.world.data.Village", "getName", false),
+            new Member("village.getCenter", "server.world.data.Village", "getCenter", false),
+            new Member("village.isWithinBorder", "server.world.data.Village", "isWithinBorder", false,
+                    BlockPos.class, int.class),
+            // Overloaded: getResidents(int) yields names, getResidents(ServerLevel) yields entities.
+            new Member("village.getResidents", "server.world.data.Village", "getResidents", false,
+                    ServerLevel.class),
+            new Member("village.getResidentsUUIDs", "server.world.data.Village", "getResidentsUUIDs", false),
+            new Member("village.getResidentNames", "server.world.data.Village", "getResidentNames", false),
+            new Member("manager.get", "server.world.data.VillageManager", "get", false, ServerLevel.class),
+            new Member("manager.getOrEmpty", "server.world.data.VillageManager", "getOrEmpty", false, int.class),
+            new Member("manager.findNearestVillage", "server.world.data.VillageManager", "findNearestVillage",
+                    false, BlockPos.class, int.class),
+            new Member("familyTree.get", "server.world.data.FamilyTree", "get", false, ServerLevel.class),
+            new Member("familyTree.getOrEmpty", "server.world.data.FamilyTree", "getOrEmpty", false, UUID.class),
+            new Member("node.getName", "server.world.data.FamilyTreeNode", "getName", false));
+
     private static final String ROOT;
     private static final List<String> MISSING;
     private static final List<String> MISSING_OPTIONAL;
@@ -102,74 +153,24 @@ public final class McaReflect {
 
     static {
         String root = null;
-        Class<?> villager = null;
-        Class<?> villagerLike = null;
-        Class<?> villagerBrain = null;
-        Class<?> residency = null;
-        Class<?> village = null;
-        Class<?> villageManager = null;
-        Class<?> familyTree = null;
-        Class<?> familyTreeNode = null;
-        MethodHandle getAgeState = null;
-        MethodHandle getVillagerBrain = null;
-        MethodHandle getPersonality = null;
-        MethodHandle getProfessionId = null;
-        MethodHandle getResidency = null;
-        MethodHandle getHomeVillage = null;
-        MethodHandle villageGetId = null;
-        MethodHandle villageGetName = null;
-        MethodHandle villageGetCenter = null;
-        MethodHandle villageIsWithinBorder = null;
-        MethodHandle villageGetResidents = null;
-        MethodHandle villageGetResidentUuids = null;
-        MethodHandle villageGetResidentNames = null;
-        MethodHandle managerGet = null;
-        MethodHandle managerGetOrEmpty = null;
-        MethodHandle managerFindNearest = null;
-        MethodHandle familyTreeGet = null;
-        MethodHandle familyTreeGetOrEmpty = null;
-        MethodHandle nodeGetName = null;
+        Map<String, Class<?>> classes = new HashMap<>();
+        Map<String, MethodHandle> handles = new HashMap<>();
         List<String> missing = new ArrayList<>();
         List<String> missingOptional = new ArrayList<>();
 
         try {
-            root = detectRoot();
+            ClassLoader loader = McaReflect.class.getClassLoader();
+            root = detectRoot(loader);
             if (root != null) {
-                villager = type(missing, root, "entity.VillagerEntityMCA");
-                villagerLike = type(missing, root, "entity.VillagerLike");
-                villagerBrain = type(missing, root, "entity.ai.brain.VillagerBrain");
-                residency = type(missing, root, "entity.ai.Residency");
-                village = type(missing, root, "server.world.data.Village");
-                villageManager = type(missing, root, "server.world.data.VillageManager");
-                familyTree = type(missing, root, "server.world.data.FamilyTree");
-                familyTreeNode = type(missing, root, "server.world.data.FamilyTreeNode");
-
-                getAgeState = method(missing, villagerLike, "getAgeState");
-                getVillagerBrain = method(missing, villager, "getVillagerBrain");
-                getPersonality = method(missing, villagerBrain, "getPersonality");
-                // Optional tier: see the AUDITED-BUT-OPTIONAL note on optionalMethod. A removed
-                // profession getter costs role sensitivity, and must not cost deed recording.
-                getProfessionId = optionalMethod(missingOptional, villager, "getProfessionId");
-                getResidency = method(missing, villager, "getResidency");
-                getHomeVillage = method(missing, residency, "getHomeVillage");
-
-                villageGetId = method(missing, village, "getId");
-                villageGetName = method(missing, village, "getName");
-                villageGetCenter = method(missing, village, "getCenter");
-                villageIsWithinBorder = method(missing, village, "isWithinBorder", BlockPos.class, int.class);
-                // Overloaded: getResidents(int) yields names, getResidents(ServerLevel) yields entities.
-                villageGetResidents = method(missing, village, "getResidents", ServerLevel.class);
-                villageGetResidentUuids = method(missing, village, "getResidentsUUIDs");
-                villageGetResidentNames = method(missing, village, "getResidentNames");
-
-                managerGet = method(missing, villageManager, "get", ServerLevel.class);
-                managerGetOrEmpty = method(missing, villageManager, "getOrEmpty", int.class);
-                managerFindNearest = method(missing, villageManager, "findNearestVillage",
-                        BlockPos.class, int.class);
-
-                familyTreeGet = method(missing, familyTree, "get", ServerLevel.class);
-                familyTreeGetOrEmpty = method(missing, familyTree, "getOrEmpty", UUID.class);
-                nodeGetName = method(missing, familyTreeNode, "getName");
+                for (String suffix : TYPES) {
+                    classes.put(suffix, type(missing, root, suffix, loader));
+                }
+                for (Member member : MANIFEST) {
+                    Class<?> owner = classes.get(member.owner());
+                    handles.put(member.key(), member.optional()
+                            ? optionalMethod(missingOptional, owner, member.name(), member.params())
+                            : method(missing, owner, member.name(), member.params()));
+                }
             }
         } catch (Throwable t) {
             // A static initialiser that throws would turn every later access into
@@ -178,30 +179,59 @@ public final class McaReflect {
         }
 
         ROOT = root;
-        VILLAGER = villager;
-        VILLAGER_LIKE = villagerLike;
-        GET_AGE_STATE = getAgeState;
-        GET_VILLAGER_BRAIN = getVillagerBrain;
-        GET_PERSONALITY = getPersonality;
-        GET_PROFESSION_ID = getProfessionId;
-        GET_RESIDENCY = getResidency;
-        GET_HOME_VILLAGE = getHomeVillage;
-        VILLAGE_GET_ID = villageGetId;
-        VILLAGE_GET_NAME = villageGetName;
-        VILLAGE_GET_CENTER = villageGetCenter;
-        VILLAGE_IS_WITHIN_BORDER = villageIsWithinBorder;
-        VILLAGE_GET_RESIDENTS = villageGetResidents;
-        VILLAGE_GET_RESIDENT_UUIDS = villageGetResidentUuids;
-        VILLAGE_GET_RESIDENT_NAMES = villageGetResidentNames;
-        MANAGER_GET = managerGet;
-        MANAGER_GET_OR_EMPTY = managerGetOrEmpty;
-        MANAGER_FIND_NEAREST = managerFindNearest;
-        FAMILY_TREE_GET = familyTreeGet;
-        FAMILY_TREE_GET_OR_EMPTY = familyTreeGetOrEmpty;
-        NODE_GET_NAME = nodeGetName;
+        VILLAGER = classes.get("entity.VillagerEntityMCA");
+        VILLAGER_LIKE = classes.get("entity.VillagerLike");
+        GET_AGE_STATE = handles.get("getAgeState");
+        GET_VILLAGER_BRAIN = handles.get("getVillagerBrain");
+        GET_PERSONALITY = handles.get("getPersonality");
+        GET_PROFESSION_ID = handles.get("getProfessionId");
+        GET_RESIDENCY = handles.get("getResidency");
+        GET_HOME_VILLAGE = handles.get("getHomeVillage");
+        VILLAGE_GET_ID = handles.get("village.getId");
+        VILLAGE_GET_NAME = handles.get("village.getName");
+        VILLAGE_GET_CENTER = handles.get("village.getCenter");
+        VILLAGE_IS_WITHIN_BORDER = handles.get("village.isWithinBorder");
+        VILLAGE_GET_RESIDENTS = handles.get("village.getResidents");
+        VILLAGE_GET_RESIDENT_UUIDS = handles.get("village.getResidentsUUIDs");
+        VILLAGE_GET_RESIDENT_NAMES = handles.get("village.getResidentNames");
+        MANAGER_GET = handles.get("manager.get");
+        MANAGER_GET_OR_EMPTY = handles.get("manager.getOrEmpty");
+        MANAGER_FIND_NEAREST = handles.get("manager.findNearestVillage");
+        FAMILY_TREE_GET = handles.get("familyTree.get");
+        FAMILY_TREE_GET_OR_EMPTY = handles.get("familyTree.getOrEmpty");
+        NODE_GET_NAME = handles.get("node.getName");
         MISSING = List.copyOf(missing);
         MISSING_OPTIONAL = List.copyOf(missingOptional);
         AVAILABLE = root != null && missing.isEmpty();
+    }
+
+    /**
+     * Replays {@link #MANIFEST} against another class loader, resolving classes and members but
+     * binding nothing. What {@code McaReflectProbeTest} runs against every supported MCA jar.
+     */
+    static Resolution resolveAgainst(ClassLoader loader) {
+        List<String> missing = new ArrayList<>();
+        List<String> missingOptional = new ArrayList<>();
+        String root = detectRoot(loader);
+        if (root == null) {
+            return new Resolution(null, List.of(), List.of());
+        }
+        Map<String, Class<?>> classes = new HashMap<>();
+        for (String suffix : TYPES) {
+            classes.put(suffix, type(missing, root, suffix, loader));
+        }
+        for (Member member : MANIFEST) {
+            Class<?> owner = classes.get(member.owner());
+            if (owner == null) {
+                continue; // its class already recorded a miss
+            }
+            try {
+                owner.getMethod(member.name(), member.params());
+            } catch (Throwable t) {
+                (member.optional() ? missingOptional : missing).add(owner.getName() + '#' + member.name());
+            }
+        }
+        return new Resolution(root, List.copyOf(missing), List.copyOf(missingOptional));
     }
 
     private McaReflect() {
@@ -212,10 +242,10 @@ public final class McaReflect {
     // ------------------------------------------------------------------
 
     /** The first root whose two sentinel classes both resolve, or null when MCA is absent/unknown. */
-    private static String detectRoot() {
+    private static String detectRoot(ClassLoader loader) {
         for (String candidate : SUPPORTED_ROOTS) {
-            if (resolves(candidate + ".entity.VillagerEntityMCA")
-                    && resolves(candidate + ".server.world.data.VillageManager")) {
+            if (resolves(candidate + ".entity.VillagerEntityMCA", loader)
+                    && resolves(candidate + ".server.world.data.VillageManager", loader)) {
                 return candidate;
             }
         }
@@ -228,19 +258,19 @@ public final class McaReflect {
      * here rather than later, which is the point. Catching {@link Throwable} rather than
      * {@link ClassNotFoundException} is therefore load-bearing, not padding.
      */
-    private static boolean resolves(String name) {
+    private static boolean resolves(String name, ClassLoader loader) {
         try {
-            Class.forName(name, false, McaReflect.class.getClassLoader());
+            Class.forName(name, false, loader);
             return true;
         } catch (Throwable t) {
             return false;
         }
     }
 
-    private static Class<?> type(List<String> missing, String root, String suffix) {
+    private static Class<?> type(List<String> missing, String root, String suffix, ClassLoader loader) {
         String name = root + '.' + suffix;
         try {
-            return Class.forName(name, false, McaReflect.class.getClassLoader());
+            return Class.forName(name, false, loader);
         } catch (Throwable t) {
             missing.add("class " + name);
             return null;

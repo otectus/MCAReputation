@@ -64,8 +64,27 @@ repositories {
     }
 }
 
+// Every MCA build McaReflectProbeTest replays the manifest against, one configuration each (see
+// mca_probe_versions in gradle.properties; the same list the sibling add-ons probe). Raw jars,
+// deliberately not fg.deobf: MCA's own member names are unobfuscated and Minecraft class names are
+// official in a production jar, which is exactly what the manifest compares against. transitive=false
+// keeps MCA's dependency graph out of the build; the probe opens each jar against the test
+// classloader, which already carries Minecraft.
+ext.mcaProbeVersions = (project.findProperty('mcaProbeVersions') ?: mca_probe_versions)
+        .toString().split(',').collect { it.trim() }.findAll { !it.isEmpty() }
+mcaProbeVersions.eachWithIndex { version, i ->
+    configurations.create("mcaProbe${i}") {
+        canBeConsumed = false
+        transitive = false
+    }
+}
+
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    mcaProbeVersions.eachWithIndex { version, i ->
+        add("mcaProbe${i}", "maven.modrinth:minecraft-comes-alive-reborn:${version}")
+    }
 
     // MCA Reborn — obfuscated production (Universal) jar, remapped to our dev mappings by fg.deobf.
     //
@@ -93,6 +112,17 @@ test {
     // src/test/resources/fixtures/README.md. Absent, the regeneration test skips itself.
     systemProperty 'mcareputation.regenerateFixtures',
             System.getProperty('mcareputation.regenerateFixtures', 'false')
+    // The MCA jars travel as paths, not a classpath: McaReflectProbeTest opens each in its own
+    // URLClassLoader, so the manifest is verified against real MCA without one MCA class being
+    // linked into the test JVM. Resolved in doFirst, not at configuration time, so the deobf
+    // repository is not frozen before every fg.deobf dependency is registered.
+    doFirst {
+        systemProperty 'mcareputation.probe.jars', mcaProbeVersions.indices
+                .collect { i -> configurations.getByName("mcaProbe${i}").files }
+                .flatten()
+                .findAll { it.name.contains('minecraft-comes-alive') }
+                .join(File.pathSeparator)
+    }
     testLogging {
         events 'passed', 'skipped', 'failed'
     }
@@ -190,9 +220,25 @@ def apiExports = [
         'dev/otectus/mcareputation/incident/IncidentSubject$*.class',
         'dev/otectus/mcareputation/incident/SubjectKind.class',
         'dev/otectus/mcareputation/incident/SubjectKind$*.class',
+        // Read model reached from exported signatures and used by MCA: Quests' typed adapter:
+        // ReputationTitleGrantedEvent#scope() returns TitleScope, and the ladder types back the
+        // tier answers Quests derives (getOrDefault(ladder).tierFor(score)). Exported so the api
+        // jar closes over its own signatures and a consumer compiles against it alone.
+        'dev/otectus/mcareputation/reputation/TitleScope.class',
+        'dev/otectus/mcareputation/reputation/TitleScope$*.class',
+        'dev/otectus/mcareputation/reputation/ReputationTiers.class',
+        'dev/otectus/mcareputation/reputation/ReputationTiers$*.class',
+        'dev/otectus/mcareputation/reputation/ReputationTierSet.class',
+        'dev/otectus/mcareputation/reputation/ReputationTierSet$*.class',
+        'dev/otectus/mcareputation/reputation/ReputationTier.class',
+        'dev/otectus/mcareputation/reputation/ReputationTier$*.class',
 ]
 
 tasks.register('apiJar', Jar) {
+    // Reproducible: no entry timestamps and a fixed entry order, so a rebuild from the same sources yields
+    // the same bytes and the SHA-256 pins in consumers' gradle/sibling-apis.properties survive it.
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
     dependsOn tasks.named('compileJava')
     archiveClassifier = 'api'
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE

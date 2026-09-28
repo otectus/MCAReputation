@@ -5,6 +5,63 @@ All notable changes to MCA: Reputation.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — unreleased
+
+A durable **standing journal** for companion mods that keep a political standing of their own (the
+first consumer is Ultima Kingdoms' faction layer). Every scored change to a player's local standing is
+now appended to a world-saved journal. A registered consumer reads the journal in order and
+acknowledges what it has applied, so a crash or restart cannot lose or double-count a change.
+
+**Numbers that moved:** the save format goes `3` → `4`. An existing world migrates automatically on
+first load: v4 adds an empty journal, and existing scores are never replayed into it. A 0.6.0 jar
+opening a v4 world loads nothing, writes nothing and leaves the file untouched, so downgrading needs
+the backup taken before the upgrade. The network protocol (`"5"`) and `getApiVersion()` (`1`) are
+unchanged; every addition is additive.
+
+### Added
+
+- **Standing journal API.** `registerStandingConsumer`, `unregisterStandingConsumer`,
+  `pollStandingChanges`, `ackStandingChanges` and `flushStandingChanges` on `McaReputationApi`, with the
+  records `StandingConsumer`, `StandingEnvelope`, `StandingDelivery`, `StandingDeliveryBatch`,
+  `StandingRegistration`, `StandingAckResult` and `CaptureResult`. A consumer starts at the current
+  journal tail, captures each envelope as `READY`, `IGNORED`, `UNMAPPED` or `FAILED`, and polls at most
+  1,024 entries at a time. Entries every consumer has acknowledged are trimmed at save.
+  `flushStandingChanges` saves only when the journal or a cursor has changed.
+- **`standingBaselines(server)`**, a read-only snapshot of every canonical local standing for explicit
+  migration tools. It creates no records, reconciles no decay and fires no events.
+- **`deliverStandingEffect(...)`**, one companion-owned effect on one community with a durable receipt.
+  The operation key is scoped by producer namespace, player and community, so a retry never applies
+  the effect twice and no other community changes.
+- **`CoreIncidentExemptions`** (capability `incident_exemptions_v1`): a companion registers a
+  per-incident `PASS`/`EXEMPT` query for villager assault and killing, consulted by this mod's own
+  detector after a deed is attributed to a player. MCA: Crime 0.7.5 already probes for exactly this
+  class (its thief-combat exemption); until now every combined start logged that the capability was
+  missing. Default `PASS`, bounded and idempotent registration, throwing providers contained.
+- **`enableCrimeIntegration` and `enableUltimaKingdomsIntegration`** in `[integration]`, so writes
+  attributed to `mcacrime` and `ultima_kingdoms` can be switched off from this side like Quests' and
+  Conversations' already could.
+- **API jar read model.** `reputation/TitleScope`, `ReputationTiers`, `ReputationTierSet` and
+  `ReputationTier` are now exported in the compile-only api jar: `ReputationTitleGrantedEvent#scope()`
+  already returned `TitleScope`, and MCA: Quests derives its ladder answers from the tier types, so a
+  consumer can now compile against the jar alone. The `apiJar` task is reproducible (no entry timestamps, fixed entry order), so a rebuild from unchanged sources yields the same hash and consumers' pins survive it.
+- **`McaReflectProbeTest`** replays the MCA binding manifest (`McaReflect.MANIFEST`) against every jar
+  in `mca_probe_versions`, each in its own class loader — the same check the sibling add-ons run.
+- `mods.toml` now declares `mcacrime` and `ultima_kingdoms` as optional `BEFORE` companions (range
+  `[0,)`, never a launch blocker), so the dependency graph reads the same from either direction.
+
+### Fixed
+
+- The Standing button on MCA's villager screen survives MCA's widget rebuilds: `InteractScreen` clears
+  and rebuilds its widgets on every sub-menu change, which dropped the button after the first
+  Interact → Back. It is now re-placed on the next render when missing, still without a mixin.
+
+### Changed
+
+- The world file is written to a temporary file, flushed to disk and atomically moved into place.
+  The journal cursor only advances after that write succeeds.
+- Milestone titles for tiers crossed by one change are granted after the change is recorded, rather
+  than inside the tier transition.
+
 ## [0.6.0] — 2026-09-16
 
 Public **profiles**: what a village knows you *for*, as distinct from how much it likes you. Standing

@@ -226,7 +226,7 @@ class SavedDataMigrationTest {
         ReputationSavedData migrated = ReputationSavedData.load(fixtureTag());
         CompoundTag written = migrated.save(new CompoundTag());
         assertEquals(ReputationSavedData.FORMAT_VERSION, written.getInt("version"));
-        assertEquals(3, ReputationSavedData.FORMAT_VERSION,
+        assertEquals(4, ReputationSavedData.FORMAT_VERSION,
                 "this test documents the format it was written for; update it deliberately");
 
         ReputationSavedData reloaded = ReputationSavedData.load(written);

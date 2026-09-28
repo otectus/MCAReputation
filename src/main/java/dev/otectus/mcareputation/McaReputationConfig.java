@@ -108,6 +108,8 @@ public final class McaReputationConfig {
         public final ForgeConfigSpec.IntValue maxFacetOpinionAdjustment;
         public final ForgeConfigSpec.BooleanValue enableQuestsIntegration;
         public final ForgeConfigSpec.BooleanValue enableConversationsIntegration;
+        public final ForgeConfigSpec.BooleanValue enableCrimeIntegration;
+        public final ForgeConfigSpec.BooleanValue enableUltimaKingdomsIntegration;
         public final ForgeConfigSpec.BooleanValue mirrorQuestsFallbackState;
         public final ForgeConfigSpec.BooleanValue migrateLegacyQuestsData;
         public final ForgeConfigSpec.BooleanValue debugLogging;
@@ -312,6 +314,16 @@ public final class McaReputationConfig {
             enableConversationsIntegration = builder
                     .comment("Serve dialogue context, check bias, and gossip candidates to MCA: Conversations.")
                     .define("enableConversationsIntegration", true);
+            enableCrimeIntegration = builder
+                    .comment("Accept civic incidents and resolutions from MCA: Crime. With this off its",
+                            "writes are refused as DISABLED; its detection-authority claim is unaffected,",
+                            "so switch its own enableReputation off as well to hand detection back here.")
+                    .define("enableCrimeIntegration", true);
+            enableUltimaKingdomsIntegration = builder
+                    .comment("Accept faction-synchronisation effects from Ultima Kingdoms. With this off",
+                            "its deliverStandingEffect writes are refused as DISABLED; its reads and its",
+                            "standing-journal consumer still work.")
+                    .define("enableUltimaKingdomsIntegration", true);
             coreAuthorityUndeclaredKinds = builder
                     .comment("How much to trust a companion that claims core incidents without saying which",
                             "kinds it detects. TRUST_LEGACY honours every kind it claims; ASSAULT_KILL_ONLY",
@@ -425,6 +437,8 @@ public final class McaReputationConfig {
         public static volatile Boolean migrateLegacyQuestsData;
         public static volatile Boolean questsIntegration;
         public static volatile Boolean conversationsIntegration;
+        public static volatile Boolean crimeIntegration;
+        public static volatile Boolean ultimaKingdomsIntegration;
         public static volatile Boolean profiles;
         public static volatile Boolean repeatCredit;
         public static volatile Boolean facetOpinion;
@@ -442,6 +456,8 @@ public final class McaReputationConfig {
             migrateLegacyQuestsData = null;
             questsIntegration = null;
             conversationsIntegration = null;
+            crimeIntegration = null;
+            ultimaKingdomsIntegration = null;
             profiles = null;
             repeatCredit = null;
             facetOpinion = null;
@@ -662,6 +678,20 @@ public final class McaReputationConfig {
             return TestOverrides.conversationsIntegration;
         }
         return read(COMMON.enableConversationsIntegration::get, true);
+    }
+
+    public static boolean crimeIntegrationEnabled() {
+        if (TestOverrides.crimeIntegration != null) {
+            return TestOverrides.crimeIntegration;
+        }
+        return read(COMMON.enableCrimeIntegration::get, true);
+    }
+
+    public static boolean ultimaKingdomsIntegrationEnabled() {
+        if (TestOverrides.ultimaKingdomsIntegration != null) {
+            return TestOverrides.ultimaKingdomsIntegration;
+        }
+        return read(COMMON.enableUltimaKingdomsIntegration::get, true);
     }
 
     /**

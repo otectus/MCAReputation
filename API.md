@@ -279,6 +279,9 @@ datapack generation with profile content published), because a query that cannot
 like a negative answer about the player. The stable "this build supports profiles" half of the question
 is `profileCapabilities(server)`, which keeps reporting `supported` through a temporary disablement.
 
+0.6.1 adds one stable row, `FEATURE_INCIDENT_EXEMPTIONS` (`incident_exemptions_v1`): the
+[`CoreIncidentExemptions`](#coreincidentexemptions--lawful-deeds) registry exists.
+
 ### Standing change envelope
 
 Every canonical change now carries a `StandingChange(player, community, oldScore, newScore, oldTierId,
@@ -628,6 +631,38 @@ Registering an authority is **additive to API version 1** — `getApiVersion()` 
 move, because a bridge written against the original version is still fully compatible.
 
 ---
+
+## `CoreIncidentExemptions` — lawful deeds
+
+Independent of the authority mechanism above. An authority takes a whole `CoreIncidentKind` away from
+this mod's detector; an exemption answers a narrower question about **one** hit or death while the
+detector is still this mod's. The case it exists for is MCA: Crime handing villager assault and killing
+back (its Reputation integration off, or degraded) while one of its thieves is attacking the player:
+fighting back is lawful under Crime's rules, and without this query Reputation would charge the player
+for an assault Crime already knows was self-defence.
+
+```java
+if (CoreIncidentExemptions.capabilityVersion() == 1) {
+    CoreIncidentExemptions.register(new ResourceLocation("mcacrime", "thief_combat"),
+            CoreIncidentExemptions.EXEMPTABLE_KINDS,
+            (kind, actor, target, source, amount) -> lawful(actor, target, source)
+                    ? CoreIncidentExemptions.Decision.EXEMPT
+                    : CoreIncidentExemptions.Decision.PASS);
+}
+```
+
+- `capabilityVersion()` is `1`; it moves only for an incompatible change to `Query`.
+- Only `MCA_VILLAGER_ASSAULT` and `MCA_VILLAGER_KILL` may be exempted (`EXEMPTABLE_KINDS`); any other
+  kind, a null argument or an empty set is an `IllegalArgumentException`.
+- Registration is idempotent by id (re-registering replaces) and bounded at `MAX_PROVIDERS` (16);
+  `unregister(id)` withdraws, `registeredIds()` lists, `clear()` drops everything.
+- The query runs on the server thread inside the damage or death event, **after** the deed has been
+  attributed to a player, so only a player's hit ever costs a provider call. It must be cheap and must
+  not call back into `McaReputationApi`.
+- The default is `PASS`. Providers are asked in registration order; the first `EXEMPT` wins. A
+  provider that throws counts as `PASS` and is warned about once, so a broken companion can suppress
+  nothing wholesale.
+- Advertised as `ReputationCapabilities.FEATURE_INCIDENT_EXEMPTIONS`.
 
 ## `ReputationMirror`
 
