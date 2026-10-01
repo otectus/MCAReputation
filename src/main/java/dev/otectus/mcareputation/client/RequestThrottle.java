@@ -8,20 +8,20 @@ import java.util.Optional;
 /**
  * Client-side pacing for snapshot requests (spec §27.2, §28.2).
  *
- * <p>The server silently drops requests that arrive within its per-player cooldown — deliberately, so
- * a spammed button costs one map lookup. The client must therefore never fire-and-forget inside that
- * window, or the request simply vanishes: the screen that asked stays "asking around…" forever and a
- * fast community cycle leaves the header showing one village while the footer counts another. This
- * class is the client's matching discipline: at most one send per cooldown, the newest wish parked
- * until it may go out, and an answer that never comes times out into the retryable empty state
- * instead of an eternal spinner.
+ * <p>The server answers at most one request per player per cooldown and defers the newest one inside
+ * that window ({@code network/RequestPacing}); it used to drop it, which left the screen "asking
+ * around…" forever or showing the previous village. This class is the client's matching discipline:
+ * at most one send per cooldown, the newest wish parked until it may go out, and an answer that never
+ * comes times out into the retryable empty state instead of an eternal spinner. The two cooldowns are
+ * measured on different clocks — this one on the client level's, the server's on its own — which is
+ * exactly why the server side must not be lossy.
  *
  * <p>Pure on purpose: the caller supplies the clock, so {@code RequestThrottleTest} exercises every
  * branch with no client running.
  */
 final class RequestThrottle {
 
-    /** Mirrors the server's {@code REQUEST_COOLDOWN_TICKS}; sending faster is sending into a void. */
+    /** Mirrors the server's {@code REQUEST_COOLDOWN_TICKS}; sending faster only queues behind itself. */
     static final int COOLDOWN_TICKS = 10;
 
     /** After this long with no reply the request is considered lost and the UI may say so. */

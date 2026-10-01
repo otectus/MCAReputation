@@ -303,8 +303,12 @@ public final class ReputationScreen extends Screen {
                 .build());
 
         // Once per screen open, not once per rebuild: an empty reply rebuilds the widgets, and asking
-        // again from every rebuild turned "you have no standing anywhere" into an endless poll.
-        if (!requestedOnce && communities.isEmpty() && !ClientReputationData.awaitingSnapshot()) {
+        // again from every rebuild turned "you have no standing anywhere" into an endless poll. Only
+        // when nothing at all is cached: a server-pushed open for a village the player has no record
+        // with arrives as a selection and an empty list, and an unnamed request would replace that
+        // selection with the unprompted one.
+        if (!requestedOnce && communities.isEmpty() && detail.isEmpty()
+                && !ClientReputationData.awaitingSnapshot()) {
             requestedOnce = true;
             ClientReputationData.request(0, Optional.empty());
         }

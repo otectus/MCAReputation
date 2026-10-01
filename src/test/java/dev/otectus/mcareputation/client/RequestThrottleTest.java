@@ -11,8 +11,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The client-side request pacing that keeps the standing screen honest (§27.2, §28.2): requests
- * inside the server's silent cooldown are parked instead of vanishing, the newest wish wins, and a
- * reply that never comes times out into the retryable empty state instead of an eternal spinner.
+ * inside the server's cooldown are parked instead of queueing behind the one in flight, the newest
+ * wish wins, and a reply that never comes times out into the retryable empty state instead of an
+ * eternal spinner.
  */
 class RequestThrottleTest {
 
@@ -35,7 +36,7 @@ class RequestThrottleTest {
         RequestThrottle throttle = new RequestThrottle(10, 60);
         throttle.offer(ANY, 100L);
         assertTrue(throttle.offer(HOME, 102L).isEmpty(),
-                "sending now would land in the server's silent drop window");
+                "sending now would only queue behind the request in flight");
         assertEquals(Optional.of(HOME), throttle.due(110L),
                 "the parked wish goes out the moment the cooldown allows");
         assertTrue(throttle.due(111L).isEmpty(), "and only once");

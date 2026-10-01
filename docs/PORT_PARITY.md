@@ -4,7 +4,7 @@ Every difference between this port and the Forge 1.20.1 tree at `../../MCAReputa
 The family rule is that this tree mirrors every change made there; anything that does not is listed here
 as **pending** (owed, not yet ported), **not ported** (a recorded decision), or a **loader adaptation**
 (the same behaviour, built the way 1.21.1 and NeoForge require). Compiled from a file-level comparison
-of both working trees on 2026-09-28.
+of both working trees on 2026-09-28; updated 2026-09-30 for the audit remediation below.
 
 ## Numbers
 
@@ -30,8 +30,18 @@ the Forge 0.6.1 release is built around the standing journal, which is not porte
 | API jar read-model exports (`TitleScope`, `ReputationTiers`, `ReputationTierSet`, `ReputationTier`) | Ported. |
 | The Standing button survives MCA's `InteractScreen` widget rebuilds | Ported (`client/ReputationClient`). |
 | World file written to a temporary file, forced to disk and moved into place atomically (`state/DurableDataWriter`) | Not needed. NeoForge 1.21.1's own `SavedData.save` already writes through `IOUtilities.writeNbtCompressed`, which does exactly this. Forge's version also writes synchronously so the journal cursor advances only after the file is on disk; with no journal here, nothing depends on that. |
-| Milestone titles for tiers crossed by one change are granted after the change is recorded, rather than inside the tier transition | **Pending.** `reputation/ReputationService` here still grants them inside the transition. |
+| Milestone titles for tiers crossed by one change are granted after the change is recorded, rather than inside the tier transition | Ported 2026-09-30. `TierOutcome` carries the milestone range and `publishStandingChange` grants it first, before mirrors and events, in Forge's order minus the journal append this branch does not have. |
 | `McaReflectProbeTest` over the six-build MCA probe fleet | **Not ported**, by decision: this port keeps its own audited-member binding (`AUDITED_MEMBERS`, `McaBinaryAbiTest`). |
+
+## 2026-09-30 audit remediation (Forge `AUDIT.md`)
+
+| Forge change | Status here |
+|---|---|
+| Snapshot requests inside the 10-tick window are deferred, not dropped (`network/RequestPacing`, flushed from `ReputationFeedback`'s end-of-tick handler, each deferred answer contained) | Ported. `RequestPacing` and `RequestPacingTest` are byte-identical; the flush hangs off `ServerTickEvent.Post`. |
+| A server-pushed screen open sends no request of its own; the screen's one-shot request needs an empty cache *and* no selection | Ported. |
+| Live API reads reconcile through the publishing path first (`ReputationService.reconcileCommunityWith` with a server-thread guard, `currentScore`, `effectiveStanding`; `McaReputationApi.reconcileForRead`); `/mcareputation top` reconciles through the service | Ported. The step is published to mirrors and the event bus; Forge also appends it to the standing journal, which is not ported. `ReadPublicationTest` asserts the same steps minus the journal entry. |
+| `/mcareputation debug standing` prints what the client was last sent (`ReputationNetwork.SentSnapshot`) | Ported. |
+| Run configurations remap MCA's refmap (`mixin.env.remapRefMap`) | **Not needed.** NeoForge 1.21.1 runs on official names, so MCA's mixins apply in a dev run as-is (verified: `runServer` loads with MCA 7.7.36-beta.3). |
 
 ## Loader adaptations (same behaviour, different mechanism)
 

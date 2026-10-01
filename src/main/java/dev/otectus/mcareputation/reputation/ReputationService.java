@@ -2251,9 +2251,67 @@ public final class ReputationService {
      */
     public static void reconcileCommunity(MinecraftServer server, UUID playerId, CommunityKey community,
                                           long gameTime) {
-        ServiceContext ctx = ServiceContext.of(server);
+        reconcileCommunityWith(ServiceContext.of(server), playerId, community, gameTime);
+    }
+
+    /**
+     * Seam entry point for {@link #reconcileCommunity}. Server thread only, like every other read
+     * that ages a ledger: off it this does nothing rather than mutate the store from a foreign thread.
+     *
+     * <p>This is the <em>publishing</em> gate for a read, and every live API read goes through it
+     * before it looks at the record. The gate on its own persists whatever it ages; entered from
+     * {@link StandingAvailability} or {@link ProfileService} it used to do so without telling anybody,
+     * so a decay step one of those reads happened to observe first reached no mirror, no standing
+     * outbox and no scoreboard — and the next pass, seeing nothing left to age, never reported it
+     * either (§5 F07, §15.1).
+     */
+    static void reconcileCommunityWith(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                       long gameTime) {
+        if (playerId == null || community == null || !ctx.isServerThread()) {
+            return;
+        }
         publishReconcile(ctx, playerId, community, ReconciliationService.reconcile(ctx, ctx.data(),
                 playerId, community, gameTime, ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
+    }
+
+    /**
+     * A player's <b>current</b> standing, or empty when they have no record for this community:
+     * decay brought up to date through the publishing gate first, as {@link #snapshot} does.
+     *
+     * <p>{@link #score} is the raw stored value and stays so for callers that have just reconciled
+     * themselves. The API's score reads used it directly, which let MCA: Quests' Journal and tier gates
+     * and MCA: Conversations' check biases read a number the standing screen had already aged past.
+     */
+    public static OptionalInt currentScore(MinecraftServer server, UUID playerId, CommunityKey community) {
+        if (server == null || playerId == null || community == null) {
+            return OptionalInt.empty();
+        }
+        return currentScoreWith(ServiceContext.of(server), playerId, community);
+    }
+
+    static OptionalInt currentScoreWith(ServiceContext ctx, UUID playerId, CommunityKey community) {
+        reconcileCommunityWith(ctx, playerId, community, ctx.now());
+        return ctx.data().player(playerId)
+                .flatMap(record -> record.community(community))
+                .map(record -> OptionalInt.of(record.score()))
+                .orElseGet(OptionalInt::empty);
+    }
+
+    /**
+     * The §5 F14 effective standing for one player and community, reconciled through the publishing
+     * gate first so the evaluation cannot be the read that silently absorbs a decay step.
+     */
+    public static StandingAvailability.EffectiveStanding effectiveStanding(MinecraftServer server,
+                                                                          UUID playerId,
+                                                                          CommunityKey community) {
+        return effectiveStandingWith(ServiceContext.of(server), playerId, community);
+    }
+
+    static StandingAvailability.EffectiveStanding effectiveStandingWith(ServiceContext ctx, UUID playerId,
+                                                                       CommunityKey community) {
+        long now = ctx.now();
+        reconcileCommunityWith(ctx, playerId, community, now);
+        return StandingAvailability.of(ctx, ctx.data(), playerId, community, now);
     }
 
     /**
@@ -2524,7 +2582,7 @@ public final class ReputationService {
         ReputationTierSet.Transition transition = ladder.transition(oldScore, newScore);
         String newTierId = transition.to().id();
         if (!transition.changed()) {
-            return new TierOutcome(false, transition.from().id(), newTierId, 0, 0, false);
+            return new TierOutcome(false, transition.from().id(), newTierId, 0, 0, false, -1, -1);
         }
 
         String highWater = communityRecord.tierHighWater(ladderId).orElse(null);
@@ -2539,17 +2597,19 @@ public final class ReputationService {
         if (firstTime) {
             int firstUnearned = ladder.indexOf(highWater) + 1;
             communityRecord.setTierHighWater(ladderId, newTierId);
-            if (McaReputationConfig.tierTitlesEnabled()) {
-                // Every milestone the jump passed through, not only the one it landed on (F13). A
-                // single admin set from 0 to 300 crosses Honored on its way to Revered, and the badge
-                // for a tier you have stood in is not owed to how you got there. One change, one tier
-                // notification, several badges.
-                grantCrossedMilestones(ctx, playerRecord, communityRecord, player, ladder,
-                        firstUnearned, ladder.indexOf(newTierId));
-            }
+            int lastEarned = ladder.indexOf(newTierId);
+            // Every milestone the jump passed through, not only the one it landed on (F13). A single
+            // admin set from 0 to 300 crosses Honored on its way to Revered, and the badge for a tier
+            // you have stood in is not owed to how you got there. One change, one tier notification,
+            // several badges. Granted by the publication step, once the change itself is recorded,
+            // not here: a title event must never announce a change that has not been published yet.
+            return new TierOutcome(true, transition.from().id(), newTierId,
+                    ladder.indexOf(transition.from().id()), lastEarned, true,
+                    McaReputationConfig.tierTitlesEnabled() ? firstUnearned : -1,
+                    McaReputationConfig.tierTitlesEnabled() ? lastEarned : -1);
         }
         return new TierOutcome(true, transition.from().id(), newTierId,
-                ladder.indexOf(transition.from().id()), ladder.indexOf(newTierId), firstTime);
+                ladder.indexOf(transition.from().id()), ladder.indexOf(newTierId), firstTime, -1, -1);
     }
 
     /**
@@ -2569,7 +2629,16 @@ public final class ReputationService {
 
     /** A pending tier transition, posted after the score change it followed from. */
     private record TierOutcome(boolean changed, String oldTierId, String newTierId,
-                               int oldIndex, int newIndex, boolean firstTime) {
+                               int oldIndex, int newIndex, boolean firstTime,
+                               int milestoneFrom, int milestoneTo) {
+
+        void grantMilestones(ServiceContext ctx, UUID playerId, @Nullable ServerPlayer player,
+                             CommunityReputationRecord communityRecord) {
+            if (milestoneFrom < 0 || milestoneTo < milestoneFrom) return;
+            ctx.data().player(playerId).ifPresent(playerRecord -> grantCrossedMilestones(ctx,
+                    playerRecord, communityRecord, player, ReputationTiers.getDefault(),
+                    milestoneFrom, milestoneTo));
+        }
 
         void post(ServiceContext ctx, UUID playerId, @Nullable ServerPlayer player, CommunityKey community) {
             if (changed) {
@@ -2595,6 +2664,9 @@ public final class ReputationService {
                                               @Nullable UUID incidentId,
                                               @Nullable ResourceLocation incidentType,
                                               ResourceLocation source) {
+        if (tier != null) {
+            tier.grantMilestones(ctx, change.player(), player, record);
+        }
         notifyMirrors(change, record);
         if (incidentEvent != null) {
             postSafely(ctx, incidentEvent);

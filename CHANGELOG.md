@@ -58,6 +58,38 @@ the `api.event` types here extend `net.neoforged.bus.api.Event`.
   and rebuilds its widgets on every sub-menu change, which dropped the button after the first
   Interact → Back. It is now re-placed on the next render when missing, still without a mixin (reflection on the Mojang name here, where NeoForge runs unobfuscated).
 
+### Fixed — audit remediation (2026-09-30, mirrored from Forge 0.6.1)
+
+- **The standing screen no longer sticks on the previous village on a dedicated server.** The server
+  used to drop any snapshot request arriving within 10 ticks of the last, while the client paces the
+  same 10 ticks on its own clock; network jitter or a server below 20 TPS put an honestly paced request
+  inside the window, nothing replied, and the screen kept the old village's tier and progress. The
+  newest request inside the window is now deferred to its end and answered then
+  (`network/RequestPacing`); the cost bound of one answer per player per 10 ticks is unchanged.
+- **"View Deeds" from the Quests Journal opens on the village it names.** The client used to send its
+  own unnamed request after the server-pushed snapshot, and the reply replaced the named village with
+  the one the player was standing in or their best one.
+- **Decay is published by whichever read observes it first.** `matches` (behind companion gates and
+  conditions and the `mcareputation:standing` loot condition), the profile queries and
+  `/mcareputation top` aged a ledger and saved the result without publishing it, so mirrors and the
+  scoreboard never saw that step and the next sweep had nothing left to report. They now reconcile
+  through the publishing path first. (The Forge line also appends the step to its standing journal,
+  which this branch does not carry; see `docs/PORT_PARITY.md`.)
+- **`getScore`, `getScoreOrZero`, `getTierId` and `getCheckBias` report the current, decayed score**,
+  the number the standing screen and `getSnapshot` show, instead of the stored value from before decay.
+- `ReputationService.reconcileCommunity` no longer ages a ledger when called off the server thread.
+
+### Changed — mirrored from Forge 0.6.1
+
+- Milestone titles for tiers crossed by one change are granted by the publication step, once the
+  change is recorded, rather than inside the tier transition — the last item the 2026-09-28 parity
+  ledger listed as pending.
+- Live API reads (`getScore`, `getScoreOrZero`, `getTierId`, `getCheckBias`, `matches`, the profile
+  queries) bring the community's decay up to date through the publishing path before answering, on the
+  server thread, exactly as `getSnapshot` and the opinion queries already did. No signature changed.
+- `/mcareputation debug standing` also prints what the player's client was last sent (community,
+  score, tier, next threshold, request stamp, age).
+
 ### Added
 
 - **Public profiles.** A village now tracks two things beside your score: **recognition** — how widely

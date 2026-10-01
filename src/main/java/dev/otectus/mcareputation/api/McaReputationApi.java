@@ -277,10 +277,14 @@ public final class McaReputationApi {
     // Reads
     // ------------------------------------------------------------------
 
-    /** A player's standing, or empty when they have no record for this community. */
+    /**
+     * A player's current standing, or empty when they have no record for this community. Decay is
+     * brought up to date first, exactly as {@link #getSnapshot} does, so this, the snapshot and the
+     * standing screen can never report two different numbers for the same moment (§15.1).
+     */
     public static OptionalInt getScore(MinecraftServer server, UUID player, CommunityKey community) {
         try {
-            return ReputationService.score(server, player, community);
+            return ReputationService.currentScore(server, player, community);
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] getScore failed; returning empty", t);
             return OptionalInt.empty();
@@ -361,8 +365,10 @@ public final class McaReputationApi {
                 return false;
             }
             ReputationSavedData data = ReputationSavedData.get(server);
-            StandingAvailability.EffectiveStanding standing = StandingAvailability.of(
-                    McaReputationConfig.snapshot(), data, player, community, gameTime(server));
+            // Through the publishing gate: evaluating a condition must not be the read that ages the
+            // ledger without telling mirrors, the outbox or the scoreboard.
+            StandingAvailability.EffectiveStanding standing =
+                    ReputationService.effectiveStanding(server, player, community);
             Set<ResourceLocation> villageTitles = Set.of();
             Set<ResourceLocation> globalTitles = Set.of();
             if (standing.state().isAvailable()) {
@@ -1008,6 +1014,7 @@ public final class McaReputationApi {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         "unresolved_target");
             }
+            reconcileForRead(server, player, community);
             return ProfileService.profile(McaReputationConfig.snapshot(),
                     ReputationSavedData.get(server), player, community, gameTime(server), false);
         } catch (Throwable t) {
@@ -1124,6 +1131,7 @@ public final class McaReputationApi {
             UUID player, UUID villager, CommunityKey community,
             VillagerProfileResolver.ObserverTraits traits) {
         boolean resident = CommunityResolver.isResident(server, community, villager);
+        reconcileForRead(server, player, community);
         return ProfileService.speakerProfile(McaReputationConfig.snapshot(),
                 ReputationSavedData.get(server), player, community,
                 SpeakerContext.of(villager, resident), traits, gameTime(server));
@@ -1151,6 +1159,7 @@ public final class McaReputationApi {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         "unresolved_target");
             }
+            reconcileForRead(server, player, community);
             return ProfileService.matches(McaReputationConfig.snapshot(),
                     ReputationSavedData.get(server), player, community, query, gameTime(server));
         } catch (Throwable t) {
@@ -1183,6 +1192,7 @@ public final class McaReputationApi {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         "unresolved_target");
             }
+            reconcileForRead(server, player, community);
             return ProfileService.matchesSpeaker(McaReputationConfig.snapshot(),
                     ReputationSavedData.get(server), player, community, speaker, query,
                     VillagerProfileResolver.traits(server, community,
@@ -1218,6 +1228,7 @@ public final class McaReputationApi {
                 return ProfileQueryResult.unavailable(ProfileAvailability.UNRESOLVED,
                         "unresolved_community");
             }
+            reconcileForRead(server, player, community.get());
             return ProfileService.matchesSpeaker(McaReputationConfig.snapshot(),
                     ReputationSavedData.get(server), player, community.get(), speaker.get(), query,
                     VillagerProfileResolver.traits(villager), gameTime(server));
@@ -1356,6 +1367,19 @@ public final class McaReputationApi {
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] openReputationScreen failed; nothing shown", t);
             return false;
+        }
+    }
+
+    /**
+     * Brings one community's decay up to date through the publishing gate before a live read (§15.1),
+     * which is what {@link #getVillagerOpinionDetailed} has always done. The profile service reconciles
+     * on its own as well, but through the bare gate: without this, a profile query that happened to
+     * observe a decay step first would persist it with no standing change published for it.
+     */
+    private static void reconcileForRead(@Nullable MinecraftServer server, @Nullable UUID player,
+                                         @Nullable CommunityKey community) {
+        if (server != null && player != null && community != null) {
+            ReputationService.reconcileCommunity(server, player, community, gameTime(server));
         }
     }
 

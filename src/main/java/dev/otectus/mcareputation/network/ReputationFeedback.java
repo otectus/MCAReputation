@@ -106,6 +106,8 @@ public final class ReputationFeedback {
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         // No phase check: the Post subtype already is the end phase.
+        // Snapshot requests parked by the pacing window go out on the same end-of-tick flush.
+        ReputationNetwork.flushDeferredRequests(event.getServer());
         if (PENDING.isEmpty()) {
             return;
         }

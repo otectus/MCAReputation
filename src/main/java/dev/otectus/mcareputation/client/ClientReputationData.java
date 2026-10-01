@@ -18,11 +18,12 @@ import java.util.Optional;
  * loading state and asks again (§35.1). Everything here arrived from the server, which is the only
  * authority on any of it.
  *
- * <p>Requests are paced by {@link RequestThrottle}: the server silently drops anything inside its
- * per-player cooldown, so an unpaced client request simply vanishes — which is how the screen used to
- * wedge on "asking around…" forever, and how two fast selector clicks left the header and the footer
- * describing different villages. The newest wish is parked and flushed from the screen's tick, and an
- * answer that never arrives times out into the retryable empty state.
+ * <p>Requests are paced by {@link RequestThrottle} to the server's per-player cooldown. The server
+ * defers anything inside that window rather than answering it at once (it used to drop it, which is
+ * how the screen wedged on "asking around…" and how two fast selector clicks left the header and the
+ * footer describing different villages), so pacing here is about not queueing behind ourselves. The
+ * newest wish is parked and flushed from the screen's tick, and an answer that never arrives times
+ * out into the retryable empty state.
  *
  * <p>Client-only by construction — loaded solely through {@code DistExecutor} from the packet handler
  * and from the client setup class, so a dedicated server never touches it.
@@ -88,10 +89,16 @@ public final class ClientReputationData {
         }
     }
 
+    /**
+     * Opens the screen on the server's say-so (the Quests Journal's "View Deeds" link, §29.7).
+     *
+     * <p>No request goes out. The server sends a fresh snapshot, for the community it was asked to
+     * show, immediately before the open, on this same connection, so it has already been applied by
+     * the time this runs. Asking again used to throw that answer away: an unnamed request is resolved
+     * "unprompted" — where the player stands, or their best village — so "View Deeds" for one village
+     * opened on another.
+     */
     public static void openScreen() {
-        // A push-opened screen (Journal link, future integrations) may be looking at another world's
-        // or another moment's cache; ask for a fresh snapshot before showing anything.
-        request(0, Optional.empty());
         Minecraft.getInstance().setScreen(new ReputationScreen(Minecraft.getInstance().screen));
     }
 

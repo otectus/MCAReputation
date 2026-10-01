@@ -310,6 +310,15 @@ best-known community — the correct answer.
   opinion, which is why the flag is now called `selectionStale`. The observer's UUID travels with the
   reply as well, so a late reply about a *different villager* is recognisable rather than plausible.
 
+  **2026-09-30 addendum** (ported from the Forge line's audit; full detail in the Forge `AUDIT.md`).
+  Two more ways for the screen to show something other than the answer to the question on it were
+  found and closed. The server's snapshot rate limit used to *drop* a request inside its 10-tick
+  window while the client paced the same 10 ticks on its own clock, so jitter or lag on a dedicated
+  server left the screen on the previous village; the window now defers instead
+  (`network/RequestPacing.java`). And the push-opened screen (the Journal's "View Deeds") no longer
+  sends a request of its own: the server sends the fresh snapshot for the named village immediately
+  before the open, and an unnamed request's reply used to replace it with the unprompted village.
+
 ---
 
 ## 5. Step 5 — proof

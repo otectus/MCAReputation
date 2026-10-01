@@ -44,6 +44,7 @@ import dev.otectus.mcareputation.profile.IncidentProfileEvidence;
 import dev.otectus.mcareputation.profile.ProfileRegistryBundle;
 import dev.otectus.mcareputation.profile.VillagerProfileResolver;
 import dev.otectus.mcareputation.reputation.ReputationPolicy;
+import dev.otectus.mcareputation.network.ReputationNetwork;
 import dev.otectus.mcareputation.network.SnapshotSelection;
 import dev.otectus.mcareputation.reputation.ReputationBounds;
 import dev.otectus.mcareputation.reputation.ReputationService;
@@ -796,8 +797,10 @@ public final class ReputationCommand {
         List<Standing> ranked = new java.util.ArrayList<>();
         for (PlayerReputationRecord record : data.players()) {
             // Reconcile first, or a board could rank a player above another purely because their decay
-            // had not been brought up to date yet.
-            data.reconcilePlayer(record.playerId(), gameTime);
+            // had not been brought up to date yet. Through the service, so any score this moves is
+            // published to mirrors and the standing outbox like every other decay step, rather than
+            // silently absorbed by a leaderboard.
+            ReputationService.reconcile(server, record.playerId(), gameTime);
             record.community(community).ifPresent(entry -> ranked.add(new Standing(
                     record.lastKnownName().isBlank() ? record.playerId().toString()
                             : record.lastKnownName(),
@@ -1154,6 +1157,25 @@ public final class ReputationCommand {
                             .orElse("(top of ladder)")
                     + "  remaining: " + snap.pointsToNextTier()
                             .map(String::valueOf).orElse("(none)")), false);
+        }
+
+        // What the client was last actually sent, beside what is stored. The two disagreeing is a sync
+        // or display problem; the two agreeing on a wrong number is a server problem. Only a server
+        // can tell which, and a dedicated server's client cannot be asked.
+        Optional<ReputationNetwork.SentSnapshot> sent = ReputationNetwork.lastSent(subject.getUUID());
+        if (sent.isEmpty()) {
+            source.sendSuccess(() -> Component.literal("  client last sent: (nothing this session)")
+                    .withStyle(ChatFormatting.DARK_GRAY), false);
+        } else {
+            ReputationNetwork.SentSnapshot last = sent.get();
+            source.sendSuccess(() -> Component.literal("  client last sent: "
+                    + last.community().map(CommunityKey::asString).orElse("(no selection)")
+                    + " score " + last.score() + " tier " + last.tierId()
+                    + " (>= " + last.tierThreshold() + ")"
+                    + " next " + last.nextTierId().map(next -> next + " (>= " + last.nextThreshold()
+                            + ")").orElse("(top of ladder)")
+                    + "  " + (gameTime - last.gameTime()) + " ticks ago, request #" + last.requestId()
+                    + ", " + last.totalCommunities() + " community/ies listed"), false);
         }
 
         // Per incident: when it happened, when it was applied, how much decay clock it has actually

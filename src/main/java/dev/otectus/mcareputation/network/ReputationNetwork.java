@@ -32,6 +32,7 @@ import net.minecraft.network.chat.ComponentSerialization;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
@@ -62,8 +63,9 @@ import java.util.function.Function;
  *
  * <p>The one client-supplied value — a context entity id — is validated before use: the entity must
  * exist, be in the same dimension, be a living MCA villager, and be within 12 blocks (§27.2). Requests
- * are rate limited to one per 10 ticks per player, so spamming the button costs the server one map
- * lookup rather than a ledger walk.
+ * are answered at most once per 10 ticks per player, so spamming the button costs the server one map
+ * write rather than a ledger walk; a request inside that window is deferred to its end rather than
+ * dropped (see {@link RequestPacing}).
  *
  * <h2>What the NeoForge port changed</h2>
  *
@@ -115,7 +117,7 @@ public final class ReputationNetwork {
      */
     private static final String PROTOCOL_VERSION = "6";
 
-    /** §27.2: at most one snapshot request per player per this many ticks. */
+    /** §27.2: at most one snapshot answer per player per this many ticks. */
     private static final int REQUEST_COOLDOWN_TICKS = 10;
 
     /** §27.2: a context villager must be within this many blocks to be a valid interaction subject. */
@@ -126,7 +128,11 @@ public final class ReputationNetwork {
     private static final int MAX_STATUS_LENGTH = 32;
     private static final int MAX_SEVERITY_LENGTH = 32;
 
-    private static final Map<UUID, Long> LAST_REQUEST_TICK = new HashMap<>();
+    private static final RequestPacing<UUID, RequestSnapshotC2S> PACING =
+            new RequestPacing<>(REQUEST_COOLDOWN_TICKS);
+
+    /** The last snapshot each player was sent, for {@code /mcareputation debug standing}. */
+    private static final Map<UUID, SentSnapshot> LAST_SENT = new HashMap<>();
 
     private ReputationNetwork() {
     }
@@ -163,18 +169,74 @@ public final class ReputationNetwork {
      */
     public static void openScreenWithSnapshot(ServerPlayer player, @Nullable CommunityKey community) {
         long gameTime = player.server.overworld().getGameTime();
-        sendTo(player, buildSnapshot(player, Optional.ofNullable(community), gameTime));
+        sendSnapshot(player, buildSnapshot(player, Optional.ofNullable(community), gameTime), gameTime);
         sendTo(player, new OpenScreenS2C());
     }
 
-    /** Clears per-player rate-limit state on disconnect so the map cannot grow across sessions. */
-    public static void forget(UUID playerId) {
-        LAST_REQUEST_TICK.remove(playerId);
+    /**
+     * What the server last sent one player's standing screen, as the debug command prints it: the
+     * difference between "the stored value is wrong" and "the client is showing something older than
+     * what it was sent" is only visible from here.
+     */
+    public record SentSnapshot(long gameTime, int requestId, int totalCommunities,
+                               Optional<CommunityKey> community, int score, String tierId,
+                               int tierThreshold, Optional<String> nextTierId, int nextThreshold) {
+
+        static SentSnapshot of(SnapshotS2C packet, long gameTime) {
+            Optional<SelectedDetail> detail = packet.selected();
+            return new SentSnapshot(gameTime, packet.requestId(), packet.totalCommunities(),
+                    detail.map(SelectedDetail::key), detail.map(SelectedDetail::score).orElse(0),
+                    detail.map(SelectedDetail::tierId).orElse(""),
+                    detail.map(SelectedDetail::tierThreshold).orElse(0),
+                    detail.flatMap(SelectedDetail::nextTierId),
+                    detail.map(SelectedDetail::nextThreshold).orElse(0));
+        }
     }
 
-    /** Clears every rate-limit stamp on server stop; the next world in this JVM starts clean. */
+    /** The last snapshot sent to this player in this server session, if any. */
+    public static Optional<SentSnapshot> lastSent(UUID playerId) {
+        return Optional.ofNullable(LAST_SENT.get(playerId));
+    }
+
+    private static void sendSnapshot(ServerPlayer player, SnapshotS2C packet, long gameTime) {
+        LAST_SENT.put(player.getUUID(), SentSnapshot.of(packet, gameTime));
+        sendTo(player, packet);
+    }
+
+    /**
+     * Answers every snapshot request whose pacing window has now closed. Called at the end of each
+     * server tick; returns before reading anything when nothing is parked, which is the steady state.
+     */
+    public static void flushDeferredRequests(MinecraftServer server) {
+        if (!PACING.hasDeferred()) {
+            return;
+        }
+        long gameTime = server.overworld().getGameTime();
+        for (Map.Entry<UUID, RequestSnapshotC2S> due : PACING.due(gameTime)) {
+            ServerPlayer player = server.getPlayerList().getPlayer(due.getKey());
+            if (player != null) {
+                // Contained as the immediate path's handler is: this runs on the server tick, where
+                // an escaping exception would take the tick loop down with it.
+                try {
+                    answer(player, due.getValue(), gameTime);
+                } catch (Throwable t) {
+                    McaReputation.LOGGER.debug("[MCA: Reputation] deferred snapshot request failed; "
+                            + "ignoring", t);
+                }
+            }
+        }
+    }
+
+    /** Clears per-player request state on disconnect so the maps cannot grow across sessions. */
+    public static void forget(UUID playerId) {
+        PACING.forget(playerId);
+        LAST_SENT.remove(playerId);
+    }
+
+    /** Clears every request stamp on server stop; the next world in this JVM starts clean. */
     public static void clearAll() {
-        LAST_REQUEST_TICK.clear();
+        PACING.clear();
+        LAST_SENT.clear();
     }
 
     // ==================================================================
@@ -302,24 +364,29 @@ public final class ReputationNetwork {
                 return;
             }
             long gameTime = player.server.overworld().getGameTime();
-            Long last = LAST_REQUEST_TICK.get(player.getUUID());
-            if (last != null && gameTime - last < REQUEST_COOLDOWN_TICKS) {
-                return; // rate limited; silently ignored, not an error worth telling the client about
+            if (!PACING.offer(player.getUUID(), packet, gameTime)) {
+                // Inside the window: parked, newest wins, and answered by flushDeferredRequests once
+                // the window closes. Dropping it here is what used to leave the screen on the previous
+                // village whenever jitter or lag packed two requests together.
+                return;
             }
-            LAST_REQUEST_TICK.put(player.getUUID(), gameTime);
-
-            Optional<CommunityKey> selected = resolveSelection(player, packet, gameTime);
-            // One validation of the one client-supplied value, shared by both context answers: a
-            // villager good enough to have an opinion and a villager good enough to have read the
-            // player must be the same villager, or the two panes describe different people.
-            Optional<Entity> villager = contextEntity(player, packet.contextEntityId());
-            sendTo(player, buildSnapshot(player, selected, gameTime,
-                    contextOpinion(player, villager, selected),
-                    contextProfile(player, villager, selected),
-                    packet.page(), packet.requestId()));
+            answer(player, packet, gameTime);
         } catch (Throwable t) {
             McaReputation.LOGGER.debug("[MCA: Reputation] snapshot request handler failed; ignoring", t);
         }
+    }
+
+    /** Builds and sends the reply to one request that pacing has already let through. */
+    private static void answer(ServerPlayer player, RequestSnapshotC2S packet, long gameTime) {
+        Optional<CommunityKey> selected = resolveSelection(player, packet, gameTime);
+        // One validation of the one client-supplied value, shared by both context answers: a
+        // villager good enough to have an opinion and a villager good enough to have read the
+        // player must be the same villager, or the two panes describe different people.
+        Optional<Entity> villager = contextEntity(player, packet.contextEntityId());
+        sendSnapshot(player, buildSnapshot(player, selected, gameTime,
+                contextOpinion(player, villager, selected),
+                contextProfile(player, villager, selected),
+                packet.page(), packet.requestId()), gameTime);
     }
 
     /**

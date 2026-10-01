@@ -232,8 +232,12 @@ public final class ReputationSavedData extends SavedData {
 
     /**
      * Brings one player's decay up to date across all their communities and enforces the whole-player
-     * incident cap. Idempotent, and the only reconciliation entry point — login, screen open, query,
-     * mutation, and the rate-limited online sweep all funnel through here (§15.1).
+     * incident cap. Idempotent.
+     *
+     * <p>A raw store operation: it publishes nothing, so a score it moves reaches no mirror, standing
+     * outbox or display. Gameplay code goes through {@code ReputationService.reconcile}, which runs the
+     * same pass and publishes each change; this stays for tests and for callers that genuinely want
+     * the store alone.
      *
      * @return true when something changed and the store was marked dirty
      */

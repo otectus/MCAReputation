@@ -156,6 +156,15 @@ config keys and four debug subcommands). 0.5.0's reliability pass is beneath it.
 - **MCA is resolved by name through `compat/McaReflect`**, never imported. `mca_version_range` is
   deliberately wider than the compile pin so Reputation, Quests and Conversations stay mutually
   installable.
+- **Every live read reconciles through the publishing gate first** (2026-09-30 audit, ported from the
+  Forge line). `ReconciliationService.reconcile` persists what it ages but publishes nothing, so a
+  read that reaches it bare can absorb a decay step no mirror or scoreboard ever hears about. API
+  reads call `ReputationService.reconcileCommunity` / `currentScore` / `effectiveStanding` before
+  looking at a record. This branch has no standing outbox, so mirrors and the event bus are what the
+  step is published to; the Forge line also appends it to its outbox.
+- **The snapshot rate limit defers, never drops** (`network/RequestPacing`, flushed from
+  `ReputationFeedback`'s end-of-tick handler), and **a server-pushed screen open sends no request of
+  its own** — the snapshot for the named community arrives immediately before `OpenScreenS2C`.
 
 ## Known issues
 
@@ -169,5 +178,8 @@ config keys and four debug subcommands). 0.5.0's reliability pass is beneath it.
   alone leaves the trait basis `NEUTRAL_DEFAULT`. Adding one would be a datapack schema change this
   release does not own — the same position the Forge line took.
 - **`modmap.py` is Forge-shaped**, per the note above; the `?` rows are a tool limitation.
+- `StandingAvailability.of` and `ProfileService`'s QUERY reads still age a record from whatever thread
+  calls them. Every API entry point reaches them on the server thread after the guarded publishing
+  reconcile, so nothing is absorbed in practice; a direct off-thread caller would still mutate.
 - **`IMPLEMENTATION_NOTES.md` and `docs/MCAReputation_1.21.1_NeoForge_Port_Plan.md` are
   pre-implementation** and stale in places. Cross-check against this file.

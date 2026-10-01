@@ -290,6 +290,14 @@ but no toast, no action-bar line, and `ReputationTierChangedEvent.firstTime()` i
 them. `ReputationChangedEvent` gained a constructor overload carrying `cause()`/`quiet()`; the original
 constructor still exists and implies `DEED`/`false`.
 
+Live reads — `getScore`, `getScoreOrZero`, `getTierId`, `getCheckBias`, `matches`, `getSnapshot`,
+`getAllSnapshots`, the opinion queries and the profile queries — bring decay up to date for the
+communities they answer about, through the same publishing path, before answering (server thread
+only). They therefore report the number the standing screen shows, and a decay step that a read
+happens to observe first is published once as a quiet `DECAY` change instead of being absorbed.
+Before the 2026-09-30 audit fixes, `getScore` and its derivatives returned the stored, un-aged value,
+and `matches` and the profile reads aged the record without publishing.
+
 ### Decay immunity
 
 `isDecayImmune` returns whether decay is currently off for a community, for every player at once. A
