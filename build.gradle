@@ -27,6 +27,11 @@ minecraft {
             workingDirectory project.file('run')
             property 'forge.logging.markers', 'REGISTRIES'
             property 'forge.logging.console.level', 'debug'
+            // MCA's mixin refmap names SRG members; a userdev run is on official names, so without
+            // this remap MCA's own mixins fail to apply and runClient/runServer never reach this mod.
+            // Same two lines as MCA: Quests and MCA: Conversations. Dev runs only; the jar is unaffected.
+            property 'mixin.env.remapRefMap', 'true'
+            property 'mixin.env.refMapRemappingFile', "${projectDir}/build/createSrgToMcp/output.srg"
             mods {
                 "${mod_id}" {
                     source sourceSets.main

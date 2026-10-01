@@ -60,9 +60,38 @@ unchanged; every addition is additive.
 - The Standing button on MCA's villager screen survives MCA's widget rebuilds: `InteractScreen` clears
   and rebuilds its widgets on every sub-menu change, which dropped the button after the first
   Interact → Back. It is now re-placed on the next render when missing, still without a mixin.
+- **The standing screen no longer sticks on the previous village on a dedicated server** (2026-09-30
+  audit, `AUDIT.md`). The server used to drop any snapshot request arriving within 10 ticks of the
+  last, while the client paces the same 10 ticks on its own clock; network jitter or a server below
+  20 TPS put an honestly paced request inside the window, nothing replied, and the screen kept the old
+  village's tier and progress. The newest request inside the window is now deferred to its end and
+  answered then (`network/RequestPacing`); the cost bound of one answer per player per 10 ticks is
+  unchanged.
+- **"View Deeds" from the Quests Journal opens on the village it names.** The client used to send its
+  own unnamed request after the server-pushed snapshot, and the reply replaced the named village with
+  the one the player was standing in or their best one.
+- **Decay is published by whichever read observes it first.** `matches` (behind MCA: Quests' gates,
+  MCA: Conversations' conditions and the `mcareputation:standing` loot condition), the profile queries
+  and `/mcareputation top` aged a ledger and saved the result without publishing it, so mirrors, the
+  standing journal and the scoreboard never saw that step and the next sweep had nothing left to
+  report. They now reconcile through the publishing path first.
+- **`getScore`, `getScoreOrZero`, `getTierId` and `getCheckBias` report the current, decayed score**,
+  the number the standing screen and `getSnapshot` show. They returned the stored value from before
+  decay, so MCA: Quests' Journal and tier gates and MCA: Conversations' check biases could disagree
+  with the screen.
+- `ReputationService.reconcileCommunity` no longer ages a ledger when called off the server thread.
+- `runClient` and `runServer` in a development checkout no longer crash in MCA Reborn's own mixin:
+  the run configurations now remap MCA's refmap, as MCA: Quests' and MCA: Conversations' already did.
+  Development runs only; the jar is unchanged.
 
 ### Changed
 
+- Live API reads (`getScore`, `getScoreOrZero`, `getTierId`, `getCheckBias`, `matches`, the profile
+  queries) bring the community's decay up to date through the publishing path before answering, on the
+  server thread, exactly as `getSnapshot` and the opinion queries already did. No signature changed.
+- `/mcareputation debug standing` also prints what the player's client was last sent (community,
+  score, tier, next threshold, request stamp, age), so a wrong stored value can be told from a display
+  that is behind it.
 - The world file is written to a temporary file, flushed to disk and atomically moved into place.
   The journal cursor only advances after that write succeeds.
 - Milestone titles for tiers crossed by one change are granted after the change is recorded, rather

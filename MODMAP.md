@@ -22,7 +22,7 @@ Machine-generated map of this mod. Read this first when picking the project up.
 
 ```
 dev.otectus.mcareputation                            3 files
-dev.otectus.mcareputation.api                        29 files
+dev.otectus.mcareputation.api                        38 files
 dev.otectus.mcareputation.api.event                  7 files
 dev.otectus.mcareputation.api.profile                12 files
 dev.otectus.mcareputation.client                     14 files
@@ -33,10 +33,10 @@ dev.otectus.mcareputation.credit                     3 files
 dev.otectus.mcareputation.data                       4 files
 dev.otectus.mcareputation.event                      10 files
 dev.otectus.mcareputation.incident                   15 files
-dev.otectus.mcareputation.network                    7 files
+dev.otectus.mcareputation.network                    8 files
 dev.otectus.mcareputation.profile                    8 files
 dev.otectus.mcareputation.reputation                 20 files
-dev.otectus.mcareputation.state                      10 files
+dev.otectus.mcareputation.state                      12 files
 dev.otectus.mcareputation.util                       3 files
 ```
 
@@ -77,6 +77,7 @@ _No datagen providers detected — assets and data JSON are hand-written._
 Run `check_mod.py` for a full consistency check (missing models, lang keys, textures).
 
 <!-- MODMAP:AUTO:END — everything below is hand-maintained and preserved -->
+
 
 
 ## Current focus
@@ -125,6 +126,17 @@ P9 is documentation; independent runtime verification is still owed — see PROD
   than travelling over it.
 - **Read-only means refuse.** A store latched by a future save format refuses every write path
   retryably instead of applying a mutation in memory that will never be saved.
+- **Every live read reconciles through the publishing gate first** (2026-09-30 audit, `AUDIT.md`).
+  `ReconciliationService.reconcile` persists what it ages but publishes nothing, so a read that reaches
+  it bare can absorb a decay step that no mirror, outbox consumer or scoreboard ever hears about. API
+  reads call `ReputationService.reconcileCommunity` / `currentScore` / `effectiveStanding` before
+  looking at a record; `StandingAvailability` and `ProfileService` still reconcile on their own, which
+  is then a no-op at the same evaluation time. A new read path must do the same.
+- **The snapshot rate limit defers, never drops** (`network/RequestPacing`). Client and server pace
+  the same 10 ticks on different clocks, so any lossy window turns jitter or lag into a screen stuck
+  on the previous selection. Deferred requests go out on `ReputationFeedback`'s end-of-tick flush.
+- **A server-pushed screen open sends no request of its own.** The server sends the snapshot for
+  the named community immediately before `OpenScreenS2C`; an unnamed request's reply would replace it.
 
 ## Known issues
 
@@ -138,3 +150,11 @@ P9 is documentation; independent runtime verification is still owed — see PROD
 - Villager **profession** is resolved and reported but weights nothing: the shipped facet schema
   authors no profession override, and adding one is a datapack schema change.
 - `IMPLEMENTATION_NOTES.md` is pre-implementation and stale in the ways its own drift note lists.
+- `StandingAvailability.of` and `ProfileService`'s QUERY reads still age a record from whatever thread
+  calls them. Every API entry point reaches them from the server thread after the guarded publishing
+  reconcile, so nothing is absorbed in practice; a direct off-thread caller would still mutate.
+- MCA: Quests' Journal derives tier and "next" from its own legacy `mcaquests:default` ladder (no
+  negative rungs), not this mod's canonical one, so for negative standing it can disagree with the
+  standing screen. A Quests-side change; see `AUDIT.md` open questions.
+- `runServer` cannot be stopped from the console (Gradle does not forward stdin to the JavaExec);
+  SIGTERM to the server JVM triggers the vanilla shutdown hook, which saves and halts cleanly.

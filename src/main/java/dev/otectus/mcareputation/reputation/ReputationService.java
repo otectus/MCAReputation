@@ -2251,9 +2251,67 @@ public final class ReputationService {
      */
     public static void reconcileCommunity(MinecraftServer server, UUID playerId, CommunityKey community,
                                           long gameTime) {
-        ServiceContext ctx = ServiceContext.of(server);
+        reconcileCommunityWith(ServiceContext.of(server), playerId, community, gameTime);
+    }
+
+    /**
+     * Seam entry point for {@link #reconcileCommunity}. Server thread only, like every other read
+     * that ages a ledger: off it this does nothing rather than mutate the store from a foreign thread.
+     *
+     * <p>This is the <em>publishing</em> gate for a read, and every live API read goes through it
+     * before it looks at the record. The gate on its own persists whatever it ages; entered from
+     * {@link StandingAvailability} or {@link ProfileService} it used to do so without telling anybody,
+     * so a decay step one of those reads happened to observe first reached no mirror, no standing
+     * outbox and no scoreboard — and the next pass, seeing nothing left to age, never reported it
+     * either (§5 F07, §15.1).
+     */
+    static void reconcileCommunityWith(ServiceContext ctx, UUID playerId, CommunityKey community,
+                                       long gameTime) {
+        if (playerId == null || community == null || !ctx.isServerThread()) {
+            return;
+        }
         publishReconcile(ctx, playerId, community, ReconciliationService.reconcile(ctx, ctx.data(),
                 playerId, community, gameTime, ChangeCause.DECAY, ReconciliationService.Intent.QUERY));
+    }
+
+    /**
+     * A player's <b>current</b> standing, or empty when they have no record for this community:
+     * decay brought up to date through the publishing gate first, as {@link #snapshot} does.
+     *
+     * <p>{@link #score} is the raw stored value and stays so for callers that have just reconciled
+     * themselves. The API's score reads used it directly, which let MCA: Quests' Journal and tier gates
+     * and MCA: Conversations' check biases read a number the standing screen had already aged past.
+     */
+    public static OptionalInt currentScore(MinecraftServer server, UUID playerId, CommunityKey community) {
+        if (server == null || playerId == null || community == null) {
+            return OptionalInt.empty();
+        }
+        return currentScoreWith(ServiceContext.of(server), playerId, community);
+    }
+
+    static OptionalInt currentScoreWith(ServiceContext ctx, UUID playerId, CommunityKey community) {
+        reconcileCommunityWith(ctx, playerId, community, ctx.now());
+        return ctx.data().player(playerId)
+                .flatMap(record -> record.community(community))
+                .map(record -> OptionalInt.of(record.score()))
+                .orElseGet(OptionalInt::empty);
+    }
+
+    /**
+     * The §5 F14 effective standing for one player and community, reconciled through the publishing
+     * gate first so the evaluation cannot be the read that silently absorbs a decay step.
+     */
+    public static StandingAvailability.EffectiveStanding effectiveStanding(MinecraftServer server,
+                                                                          UUID playerId,
+                                                                          CommunityKey community) {
+        return effectiveStandingWith(ServiceContext.of(server), playerId, community);
+    }
+
+    static StandingAvailability.EffectiveStanding effectiveStandingWith(ServiceContext ctx, UUID playerId,
+                                                                       CommunityKey community) {
+        long now = ctx.now();
+        reconcileCommunityWith(ctx, playerId, community, now);
+        return StandingAvailability.of(ctx, ctx.data(), playerId, community, now);
     }
 
     /**

@@ -280,6 +280,16 @@ best-known community — the correct answer.
   suppresses both the profile and the observer pane while a different selection is outstanding — the
   same rule 0.5.0 already applied to the villager's opinion.
 
+  **2026-09-30 addendum** (full detail in `AUDIT.md`). Two more ways for the screen to show something
+  other than the answer to the question on it were found and closed. The server's snapshot rate limit
+  used to *drop* a request inside its 10-tick window while the client paced the same 10 ticks on its
+  own clock, so jitter or lag on a dedicated server left the screen on the previous village; the
+  window now defers instead (`network/RequestPacing.java`). And the push-opened screen (the Journal's
+  "View Deeds") no longer sends a request of its own: §2 hop 7 and §3.2 above list
+  `ClientReputationData.openScreen` as requesting first, which is no longer true on purpose — the
+  server sends the fresh snapshot for the named village immediately before the open, and an unnamed
+  request's reply used to replace it with the unprompted village.
+
 ---
 
 ## 5. Step 5 — proof

@@ -105,7 +105,12 @@ public final class ReputationFeedback {
     /** Flushes at the end of the tick, so everything that happened this tick arrives merged. */
     @SubscribeEvent
     public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || PENDING.isEmpty()) {
+        if (event.phase != TickEvent.Phase.END) {
+            return;
+        }
+        // Snapshot requests parked by the pacing window go out on the same end-of-tick flush.
+        ReputationNetwork.flushDeferredRequests(event.getServer());
+        if (PENDING.isEmpty()) {
             return;
         }
         Map<UUID, Map<CommunityKey, Pending>> flushing = new LinkedHashMap<>(PENDING);
